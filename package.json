@@ -1,0 +1,98 @@
+{
+  "name": "nano-cortex-editor",
+  "productName": "Nano Cortex Editor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Unofficial desktop editor for the Neural DSP Nano Cortex (macOS and Windows): presets, every block, captures, footswitches, expression, tempo, tuner, metronome and Cortex Cloud capture transfer over Bluetooth.",
+  "main": "src/main.js",
+  "license": "MIT",
+  "author": "AJs Creations",
+  "homepage": "https://github.com/AJs-Creations/nano-cortex-editor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AJs-Creations/nano-cortex-editor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AJs-Creations/nano-cortex-editor/issues"
+  },
+  "scripts": {
+    "build:core": "node scripts/build-core.js",
+    "start": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron .",
+    "dist": "npm run build:core && npm run build:icon && electron-builder --mac --arm64 --x64",
+    "build:preview": "node scripts/build-core.js && node scripts/build-preview.js",
+    "test:ux": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron test/ux-test.js",
+    "build:icon": "env -u ELECTRON_RUN_AS_NODE electron scripts/build-icon.js",
+    "docs:screenshots": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron scripts/docs-screenshots.js && python3 scripts/docs-images.py"
+  },
+  "devDependencies": {
+    "acorn": "^8.19.0",
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "io.github.ajs-creations.nano-cortex-editor",
+    "productName": "Nano Cortex Editor",
+    "files": [
+      "src/**",
+      "assets/icon.svg",
+      "editor/**",
+      "pro/**",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md"
+    ],
+    "mac": {
+      "category": "public.app-category.music",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "identity": null,
+      "extendInfo": {
+        "NSBluetoothAlwaysUsageDescription": "Nano Cortex Editor connects to your Nano Cortex over Bluetooth to read and edit presets.",
+        "NSBluetoothPeripheralUsageDescription": "Nano Cortex Editor connects to your Nano Cortex over Bluetooth.",
+        "NSMicrophoneUsageDescription": "Only needed to list your audio outputs for the metronome; the microphone is never recorded.",
+        "CFBundleDisplayName": "Nano Cortex Editor",
+        "LSApplicationCategoryType": "public.app-category.music"
+      },
+      "icon": "build/icon.icns"
+    },
+    "copyright": "Copyright © 2026 AJs Creations. Unofficial; not affiliated with or endorsed by Neural DSP.",
+    "artifactName": "nano-cortex-editor-${version}-${os}-${arch}.${ext}",
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "nano-cortex-editor-${version}-${os}-${arch}-portable.${ext}"
+    }
+  }
+}

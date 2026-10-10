@@ -1,0 +1,16 @@
+// Bridge between the shell and the pro editor page. The editor receives capture bundles and can reach a few
+// settings in the main process here; it never gets access to Node or the Cloud session.
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('nanoCloud', {
+  onCapture: (fn) => ipcRenderer.on('capture-bundle', (_e, bundle) => fn(bundle)),
+});
+
+contextBridge.exposeInMainWorld('nanoShell', {
+  getSettings: () => ipcRenderer.invoke('settings-get'),
+  setAccent: (hex, followDock) => ipcRenderer.invoke('set-accent', String(hex), typeof followDock === 'boolean' ? followDock : undefined),
+  forgetPedal: () => ipcRenderer.invoke('forget-pedal'),
+  revealRecordings: () => ipcRenderer.invoke('reveal-recordings'),
+  autoConnect: () => ipcRenderer.invoke('auto-connect'),
+  onOpenSettings: (fn) => ipcRenderer.on('open-settings', () => fn()),
+});
