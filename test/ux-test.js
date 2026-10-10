@@ -229,8 +229,8 @@ async function run() {
   const menuFor = (devTools, isMac = true) => menuLabels(menuTemplate({ isMac, appName: 'Nano Cortex Editor', devTools, editorFlavor: 'pro', links: LINKS, a: new Proxy({}, { get: () => () => {} }) }));
   for (const mac of [true, false]) {
     const off = menuFor(false, mac), on = menuFor(true, mac);
-    check('menu (' + (mac ? 'macOS' : 'Windows') + ', dev tools off): no Classic Editor, Reload Current or Developer Tools; Help → Show Log File', !off.includes('Classic Editor') && !off.includes('Reload Current') && !off.includes('Developer Tools') && off.includes('Show Log File'), off.join(','));
-    check('menu (' + (mac ? 'macOS' : 'Windows') + ', dev tools on): Classic Editor, Reload Current and Developer Tools are back; Show Log File stays', on.includes('Classic Editor') && on.includes('Reload Current') && on.includes('Developer Tools') && on.includes('Show Log File'), on.join(','));
+    check('menu (' + (mac ? 'macOS' : 'Windows and Linux') + ', dev tools off): no Classic Editor, Reload Current or Developer Tools; Help → Show Log File', !off.includes('Classic Editor') && !off.includes('Reload Current') && !off.includes('Developer Tools') && off.includes('Show Log File'), off.join(','));
+    check('menu (' + (mac ? 'macOS' : 'Windows and Linux') + ', dev tools on): Classic Editor, Reload Current and Developer Tools are back; Show Log File stays', on.includes('Classic Editor') && on.includes('Reload Current') && on.includes('Developer Tools') && on.includes('Show Log File'), on.join(','));
   }
   // the log file on disk (src/activity-log.js, written by main for everyone): batched, capped at 2 MB, one old file
   {
@@ -1686,6 +1686,34 @@ async function run() {
   await reloadPage();
   check('with Developer tools off, "Activity at launch" does not open the drawer', await js('!__ui.drawerOpen && !__devTools.on && !document.body.classList.contains("dev-tools")'));
   await js('localStorage.removeItem("settings.drawerAtLaunch"); localStorage.removeItem("settings.devTools")');
+
+  // ---------------------------------------------------------------- shortcut labels per platform
+  // ⌘ on macOS, Ctrl on Windows and Linux. The page's own platform first, then the others via ?platform=… (labels only;
+  // the key handlers keep following the real platform).
+  const labelsFor = async (plat) => {
+    const loaded = new Promise(r => wc.once('did-finish-load', r));
+    await win.loadURL('file://' + PAGE + '?demo' + (plat ? '&platform=' + plat : ''));
+    await loaded; await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle(); await frame();
+    await js('document.activeElement.blur()');
+    await key('?'); await waitFor('!!document.querySelector(".modal .keys")');
+    const r = await js(`({ kbd: document.querySelector("#saveBtn kbd").textContent, saveTitle: document.getElementById("saveBtn").title,
+      saveAsTitle: document.getElementById("saveAsBtn").title, settingsTitle: document.getElementById("settingsBtn").title,
+      sheet: [...document.querySelectorAll(".modal .keys kbd")].map(k => k.textContent) })`);
+    await key('Escape'); await waitFor('!document.querySelector(".modal")');
+    return r;
+  };
+  const expectLabels = (name, r, mac) => {
+    const S = mac ? '\u2318S' : 'Ctrl+S', SS = mac ? '\u21e7\u2318S' : 'Ctrl+Shift+S', C = mac ? '\u2318,' : 'Ctrl+,';
+    check(name + ': the Save button shows ' + S, r.kbd === S && r.saveTitle.endsWith('(' + S + ')'), r.kbd + ' | ' + r.saveTitle);
+    check(name + ': tooltips use ' + (mac ? '\u2318 and \u21e7' : 'Ctrl and Shift'), r.saveAsTitle.endsWith('(' + SS + ')') && r.settingsTitle === 'Settings (' + C + ')', r.saveAsTitle + ' | ' + r.settingsTitle);
+    check(name + ': the shortcuts sheet lists ' + S + ' and ' + SS, r.sheet.includes(S) && r.sheet.includes(SS) && r.sheet.includes(C), r.sheet.join(' , '));
+    check(name + ': no ' + (mac ? 'Ctrl' : '\u2318, \u21e7 or \u2325') + ' left in the labels', mac ? !/Ctrl/.test(r.sheet.join() + r.kbd + r.saveTitle) : !/[\u2318\u21e7\u2325]/.test(r.sheet.join() + r.kbd + r.saveTitle + r.saveAsTitle + r.settingsTitle));
+  };
+  const hostMac = process.platform === 'darwin';
+  expectLabels('labels on this platform (' + process.platform + ')', await labelsFor(''), hostMac);
+  for (const plat of hostMac ? ['win', 'linux'] : ['mac']) expectLabels('labels with ?platform=' + plat, await labelsFor(plat), plat === 'mac');
+  check('keyLabel off-Mac: \u2325\u2318I → Ctrl+Alt+I, \u2318\u2191 → Ctrl+\u2191', (await js('__keyLabel("\u2325\u2318I / \u2318\u2191")')) === 'Ctrl+Alt+I / Ctrl+\u2191');
+  await labelsFor('');
 
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('nanoCloud', {
 });
 
 contextBridge.exposeInMainWorld('nanoShell', {
+  platform: process.platform,   // shortcut labels: ⌘ on macOS, Ctrl on Windows and Linux
   getSettings: () => ipcRenderer.invoke('settings-get'),
   setAccent: (hex, followDock) => ipcRenderer.invoke('set-accent', String(hex), typeof followDock === 'boolean' ? followDock : undefined),
   forgetPedal: () => ipcRenderer.invoke('forget-pedal'),

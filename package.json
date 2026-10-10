@@ -3,7 +3,7 @@
   "productName": "Nano Cortex Editor",
   "version": "1.0.0",
   "private": true,
-  "description": "Unofficial desktop editor for the Neural DSP Nano Cortex (macOS and Windows): presets, every block, captures, footswitches, expression, tempo, tuner, metronome and Cortex Cloud capture transfer over Bluetooth.",
+  "description": "Unofficial desktop editor for the Neural DSP Nano Cortex (macOS, Windows and Linux): presets, every block, captures, footswitches, expression, tempo, tuner, metronome and Cortex Cloud capture transfer over Bluetooth.",
   "main": "src/main.js",
   "license": "MIT",
   "author": "AJs Creations",
@@ -19,6 +19,7 @@
     "build:core": "node scripts/build-core.js",
     "start": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron .",
     "dist": "npm run build:core && npm run build:icon && electron-builder --mac --arm64 --x64",
+    "dist:linux": "npm run build:core && electron-builder --linux --x64 --arm64",
     "build:preview": "node scripts/build-core.js && node scripts/build-preview.js",
     "test:ux": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron test/ux-test.js",
     "build:icon": "env -u ELECTRON_RUN_AS_NODE electron scripts/build-icon.js",
@@ -58,7 +59,7 @@
           ]
         }
       ],
-      "identity": null,
+      "identity": "-",
       "extendInfo": {
         "NSBluetoothAlwaysUsageDescription": "Nano Cortex Editor connects to your Nano Cortex over Bluetooth to read and edit presets.",
         "NSBluetoothPeripheralUsageDescription": "Nano Cortex Editor connects to your Nano Cortex over Bluetooth.",
@@ -66,7 +67,8 @@
         "CFBundleDisplayName": "Nano Cortex Editor",
         "LSApplicationCategoryType": "public.app-category.music"
       },
-      "icon": "build/icon.icns"
+      "icon": "build/icon.icns",
+      "hardenedRuntime": false
     },
     "copyright": "Copyright © 2026 AJs Creations. Unofficial; not affiliated with or endorsed by Neural DSP.",
     "artifactName": "nano-cortex-editor-${version}-${os}-${arch}.${ext}",
@@ -93,6 +95,41 @@
     },
     "portable": {
       "artifactName": "nano-cortex-editor-${version}-${os}-${arch}-portable.${ext}"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "AudioVideo",
+      "maintainer": "AJs Creations",
+      "synopsis": "Unofficial editor for the Neural DSP Nano Cortex",
+      "executableName": "nano-cortex-editor",
+      "desktop": {
+        "entry": {
+          "Name": "Nano Cortex Editor",
+          "StartupWMClass": "Nano Cortex Editor"
+        }
+      },
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "appImage": {
+      "artifactName": "nano-cortex-editor-${version}-linux-${arch}.${ext}"
+    },
+    "deb": {
+      "artifactName": "nano-cortex-editor_${version}_${arch}.${ext}"
     }
   }
 }
