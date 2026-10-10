@@ -44,19 +44,16 @@ Download the build for your system from the
 Not sure which Mac you have? Apple menu → **About This Mac**: "Chip: Apple M…" means Apple Silicon, "Processor:
 Intel…" means Intel.
 
-The builds are **not code-signed**, so the first launch needs one extra step.
-
 **macOS**
 
-1. Open the `.dmg` and drag **Nano Cortex Editor** into **Applications** (or unzip the `.zip` and move the app there).
-2. In Applications, right-click (or Control-click) **Nano Cortex Editor** and choose **Open**. In the warning, click
-   **Open** again. You only do this once.
-3. If macOS says the app "can't be opened" and only offers **Move to Bin** or **Done**, click **Done**, open
-   **System Settings → Privacy & Security**, scroll to the **Security** section and click **Open Anyway** next to the
-   message about Nano Cortex Editor. Confirm with your password.
-4. The first time you connect, macOS asks whether Nano Cortex Editor may use Bluetooth. Click **Allow**.
+The macOS app is signed by "Anup Sebastian" (Developer ID) and notarised by Apple.
 
-**Windows**
+1. Open the `.dmg` and drag **Nano Cortex Editor** into **Applications** (or unzip the `.zip` and move the app there).
+2. Open it from Applications. macOS asks once whether you want to open an app downloaded from the internet; click
+   **Open**.
+3. The first time you connect, macOS asks whether Nano Cortex Editor may use Bluetooth. Click **Allow**.
+
+**Windows** (not code-signed, so the first launch needs one extra step)
 
 1. Run the installer (you can choose the install folder) or the portable `.exe`.
 2. When SmartScreen says "Windows protected your PC", click **More info**, then **Run anyway**.
@@ -480,9 +477,10 @@ devices). Windows needs a Bluetooth 4.0 (LE) adapter.
 **macOS: Connect does nothing / Bluetooth permission.** Open **System Settings → Privacy & Security → Bluetooth** and
 make sure **Nano Cortex Editor** is allowed, then quit and reopen the app.
 
-**macOS: "Nano Cortex Editor can't be opened" / "Apple could not verify…".** The app is unsigned. Right-click it in
-Applications → **Open**, or use **System Settings → Privacy & Security → Open Anyway** (see
-[section 1](#1-install-and-first-launch)).
+**macOS: "Nano Cortex Editor can't be opened" / "Apple could not verify…".** Current releases are signed and
+notarised and open without this message. If you see it, you have an older, unsigned build: download the latest
+release from [GitHub Releases](https://github.com/AJs-Creations/nano-cortex-editor/releases/latest) and replace it.
+(Since macOS 15, right-click → Open no longer gets past Gatekeeper for unsigned apps.)
 
 **Windows: SmartScreen blocks the app.** Click **More info → Run anyway**.
 

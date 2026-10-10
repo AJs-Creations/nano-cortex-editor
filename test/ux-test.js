@@ -1256,6 +1256,7 @@ async function run() {
   check('? opens shortcuts', await js('!!document.querySelector(".modal .keys")'));
   check('(dev tools on) the shortcuts sheet lists ⌘L', await js('[...document.querySelectorAll(".modal .keys kbd")].some(k => /^(⌘|Ctrl\\+)L$/.test(k.textContent) && k.nextElementSibling.textContent === "Show Bluetooth activity")'));
   check('(dev tools on) the shortcuts sheet lists Record', await js('[...document.querySelectorAll(".modal .keys kbd")].some(k => k.textContent === "Record" && k.nextElementSibling.textContent === "In the status bar: record every packet, then save it as JSON")'));
+  check('the shortcuts sheet lists each shortcut once (Settings appears a single time)', await js('(() => { const k = [...document.querySelectorAll(".modal .keys kbd")].map(x => x.textContent + "|" + x.nextElementSibling.textContent); return new Set(k).size === k.length && k.filter(x => x.endsWith("|Settings")).length === 1; })()'));
   check('the shortcuts sheet ends with "Full manual…" pointing at the manual', (await js('(() => { const a = document.querySelector(\'[data-fk="keys-manual"]\'); return a ? a.textContent + "|" + a.href : ""; })()')) === 'Full manual\u2026|' + LINKS.manual);
   await shot('11-shortcuts');
   await key('Escape');

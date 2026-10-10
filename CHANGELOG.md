@@ -11,8 +11,8 @@ First public release.
 - Linux builds: AppImage and deb, for x64 and arm64 (Raspberry Pi 4/5 with a 64-bit OS). Not yet tested with a pedal.
 - Keyboard shortcut labels show Ctrl (and Shift, Alt) on Windows and Linux instead of ⌘ (⇧, ⌥): tooltips, the Save
   button and the shortcuts sheet.
-- macOS: the app is properly ad-hoc signed, so a downloaded copy opens with right-click → Open instead of being
-  reported as damaged.
+- macOS: signed with a Developer ID and notarised by Apple, so the download opens without security workarounds.
+- The keyboard shortcuts sheet no longer lists Settings twice.
 
 ### Help, About and support links
 

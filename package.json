@@ -60,6 +60,10 @@
         }
       ],
       "identity": "-",
+      "hardenedRuntime": false,
+      "notarize": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "extendInfo": {
         "NSBluetoothAlwaysUsageDescription": "Nano Cortex Editor connects to your Nano Cortex over Bluetooth to read and edit presets.",
         "NSBluetoothPeripheralUsageDescription": "Nano Cortex Editor connects to your Nano Cortex over Bluetooth.",
@@ -67,8 +71,7 @@
         "CFBundleDisplayName": "Nano Cortex Editor",
         "LSApplicationCategoryType": "public.app-category.music"
       },
-      "icon": "build/icon.icns",
-      "hardenedRuntime": false
+      "icon": "build/icon.icns"
     },
     "copyright": "Copyright © 2026 AJs Creations. Unofficial; not affiliated with or endorsed by Neural DSP.",
     "artifactName": "nano-cortex-editor-${version}-${os}-${arch}.${ext}",

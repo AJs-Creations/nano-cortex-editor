@@ -63,14 +63,11 @@ Get the latest build from [GitHub Releases](https://github.com/AJs-Creations/nan
 | Linux, x86-64 | `nano-cortex-editor-<version>-linux-x86_64.AppImage` (any distro) or `nano-cortex-editor_<version>_amd64.deb` (Debian, Ubuntu, Mint…) |
 | Linux, ARM 64-bit (Raspberry Pi 4/5 with a 64-bit OS) | `nano-cortex-editor-<version>-linux-arm64.AppImage` or `nano-cortex-editor_<version>_arm64.deb` |
 
-The builds are **not code-signed** (that needs paid developer certificates), so your system warns you the first time:
-
-- **macOS**: open the `.dmg` and drag **Nano Cortex Editor** to Applications. The first time, right-click (or
-  Control-click) the app, choose **Open**, then **Open** again. If macOS only offers to move it to the Bin, open
-  **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to the message about
-  Nano Cortex Editor.
-- **Windows**: run the installer or the portable `.exe`. When SmartScreen says "Windows protected your PC", click
-  **More info → Run anyway**.
+- **macOS**: open the `.dmg` (or unzip the `.zip`), drag **Nano Cortex Editor** to Applications and open it. macOS
+  asks once to confirm that you want to open an app downloaded from the internet; click **Open**. The app is signed
+  with a Developer ID and notarised by Apple, so no other steps are needed.
+- **Windows**: the Windows build is not code-signed, so SmartScreen warns you the first time. Run the installer or the
+  portable `.exe`; when SmartScreen says "Windows protected your PC", click **More info → Run anyway**.
 - **Linux, AppImage**: make it executable and run it: `chmod +x nano-cortex-editor-*.AppImage`, then
   `./nano-cortex-editor-*.AppImage` (or double-click it). Some distros need FUSE 2 first (`sudo apt install libfuse2t64` on
   Ubuntu 24.04 and later, `libfuse2` on older Debian and Ubuntu).
@@ -107,7 +104,7 @@ You need [Node.js](https://nodejs.org/) 22 or later.
 npm install
 npm start            # run the app from source
 npm run test:ux      # automated UX test on demo data (screenshots in test-output/)
-npm run dist         # unsigned macOS .dmg/.zip for Apple Silicon and Intel (run on a Mac)
+npm run dist         # macOS .dmg/.zip for Apple Silicon and Intel, ad-hoc signed (run on a Mac)
 npm run dist:linux   # Linux AppImage and .deb for x64 and arm64 (run on Linux)
 ```
 

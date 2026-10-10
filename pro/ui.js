@@ -2849,7 +2849,6 @@
       ['M', 'Change the effect in the selected slot'],
       [m + 'F', 'Filter presets'],
       ...(devTools ? [[m + 'L', 'Show Bluetooth activity'], ['Record', 'In the status bar: record every packet, then save it as JSON']] : []),
-      [m + ',', 'Settings'],
       ['T', 'Tuner (Esc closes it)'],
       ['N', 'Metronome (Space starts and stops it)'],
       ['Drag, scroll, arrows', 'Adjust a knob. Hold Shift for fine control'],
