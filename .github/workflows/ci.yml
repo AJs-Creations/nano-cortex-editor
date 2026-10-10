@@ -1,11 +1,10 @@
 # Pull-request checks.
 #  - smoke (required): npm ci, regenerate the protocol layer from the vendored editor (fails loudly if
 #    upstream moved anything), and syntax-check every script.
-#  - ux-test (informational): the full input-driven UX test on demo data. It drives a real Electron window
-#    with mouse, wheel and key events; on GitHub's macOS runners (small 1024×768 display, slow VMs) a few
-#    timing-sensitive checks (write coalescing, stopping the slot scan, delayed parameter refreshes) fail
-#    intermittently, so it does not block the PR. Run `npm run test:ux` locally before merging; it must be
-#    fully green there. Screenshots and results are attached to every run.
+#  - ux-test (required): the full input-driven UX test on demo data. It drives a real Electron window
+#    with mouse, wheel and key events and asserts the exact packets sent. GitHub's macOS runners are slow
+#    VMs, so the test waits on conditions (UI state, packets arriving, writes settling) rather than fixed
+#    sleeps. Screenshots and results are attached to every run.
 name: CI
 
 on:
@@ -38,7 +37,6 @@ jobs:
   ux-test:
     runs-on: macos-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
