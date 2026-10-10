@@ -201,7 +201,9 @@ function createWindow() {
     minHeight: 600,
     title: 'Nano Cortex Editor',
     backgroundColor: '#121212',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default'
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
+    // Windows and Linux: the window/taskbar icon (macOS takes it from the bundle or the Dock).
+    ...(process.platform !== 'darwin' && fs.existsSync(STOCK_ICON) ? { icon: nativeImage.createFromPath(STOCK_ICON) } : {}),
   });
 
   // Toolbar

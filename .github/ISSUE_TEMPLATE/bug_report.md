@@ -17,7 +17,7 @@ A clear description of the problem.
 **What you expected**
 
 **Setup**
-- OS and version (e.g. macOS 15.1 on Apple Silicon, Windows 11):
+- OS and version (e.g. macOS 15.1 on Apple Silicon, Windows 11, Ubuntu 24.04 x64):
 - App version (About Nano Cortex Editor, or the release file name):
 - Pedal firmware (Settings → Device → Firmware):
 - Connected to a pedal, or demo mode?
