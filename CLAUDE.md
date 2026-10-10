@@ -11,7 +11,7 @@ User docs: `README.md`, `docs/MANUAL.md` (screenshots from `npm run docs:screens
 - The app runs as an Electron app with two tabs: the pro editor (`pro/`) and the Cortex Cloud website (their real login, persistent session).
 - This repo is the Electron product for good (and the shareable one). The native Mac edition is <https://github.com/AJs-Creations/nano-cortex-editor-mac> (local clone `../nano-cortex-editor-mac`); the two READMEs link each other.
 - **No recordings in git, ever** (not even in history): session recordings, `.pklg`/HCI traces and capture bundles stay local (`test/fixtures/sessions/` and those types are git-ignored). Tests inline the specific frames they need with identifying values replaced.
-- Hardware-verified on a Nano Cortex (firmware 2.2.1) on 2026-10-08, including Cortex Cloud → pedal capture transfer. `npm run test:ux` passes 458/458 on macOS with demo data (CI runs it on PRs to `staging`/`main`, `.github/workflows/ci.yml`). Windows is untested.
+- Hardware-verified on a Nano Cortex (firmware 2.2.1) on 2026-10-08, including Cortex Cloud → pedal capture transfer. `npm run test:ux` passes 458/458 on macOS with demo data (CI, `.github/workflows/ci.yml`, on PRs to `staging`/`main`: a required smoke job, and the UX test as a non-blocking job because GitHub's small, slow macOS runners make a few timing checks flaky; it must be green locally). Windows is untested.
 - Inside VS Code's terminal `ELECTRON_RUN_AS_NODE=1` is set, which makes `electron` behave like `node`. The npm scripts clear it; if you run `electron` by hand, prefix `env -u ELECTRON_RUN_AS_NODE`.
 
 ## Commands
