@@ -1,12 +1,12 @@
 # Nano Cortex Editor: user manual
 
 Nano Cortex Editor is an unofficial desktop editor for the Neural DSP Nano Cortex. This manual covers version 1.0 of
-the Electron edition for macOS and Windows. Every screenshot was taken in demo mode, so what you see is sample data.
+the Electron edition for macOS, Windows and Linux. Every screenshot was taken in demo mode, so what you see is sample data.
 
 > Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or
 > endorsed by Neural DSP.
 
-On Windows, read ⌘ as **Ctrl** and ⇧ as **Shift** throughout.
+On Windows and Linux, read ⌘ as **Ctrl** and ⇧ as **Shift** throughout; the app itself shows Ctrl and Shift there.
 
 ## Contents
 
@@ -38,6 +38,8 @@ Download the build for your system from the
 | macOS, Apple Silicon | `nano-cortex-editor-<version>-mac-arm64.dmg` or `.zip` |
 | macOS, Intel | `nano-cortex-editor-<version>-mac-x64.dmg` or `.zip` |
 | Windows 10/11, 64-bit | `nano-cortex-editor-<version>-win-x64.exe` (installer) or `…-portable.exe` (no install) |
+| Linux, x86-64 | `nano-cortex-editor-<version>-linux-x86_64.AppImage` or `nano-cortex-editor_<version>_amd64.deb` |
+| Linux, ARM 64-bit (e.g. Raspberry Pi 4/5, 64-bit OS) | `nano-cortex-editor-<version>-linux-arm64.AppImage` or `nano-cortex-editor_<version>_arm64.deb` |
 
 Not sure which Mac you have? Apple menu → **About This Mac**: "Chip: Apple M…" means Apple Silicon, "Processor:
 Intel…" means Intel.
@@ -58,6 +60,17 @@ The builds are **not code-signed**, so the first launch needs one extra step.
 
 1. Run the installer (you can choose the install folder) or the portable `.exe`.
 2. When SmartScreen says "Windows protected your PC", click **More info**, then **Run anyway**.
+
+**Linux** (not yet tested with a pedal; please report how it goes)
+
+- **AppImage** (any distro, nothing to install): make it executable, then run it:
+  `chmod +x nano-cortex-editor-*.AppImage` and `./nano-cortex-editor-*.AppImage` (or double-click it in your file
+  manager). If it complains about FUSE, install FUSE 2: `sudo apt install libfuse2t64` on Ubuntu 24.04 and later,
+  `libfuse2` on older Debian/Ubuntu.
+- **deb** (Debian, Ubuntu, Mint, Raspberry Pi OS…): `sudo apt install ./nano-cortex-editor_<version>_amd64.deb`
+  (or `_arm64.deb`). **Nano Cortex Editor** then appears in your applications menu.
+- Bluetooth goes through BlueZ, the standard Linux Bluetooth stack: your adapter has to be on and the `bluetooth`
+  service running (see [Troubleshooting](#15-troubleshooting)).
 
 **Before you save anything**, back up your presets with the official Cortex Cloud app. Edits from this editor are live
 on the pedal, and saves are permanent.
@@ -423,7 +436,7 @@ needed.
 ## 14. Keyboard shortcuts
 
 Press **?** (or **Shortcuts** in the status bar) for this list in the app; **Full manual…** at the bottom opens this
-manual. On Windows use Ctrl for ⌘.
+manual. On Windows and Linux the keys are Ctrl for ⌘ and Shift for ⇧ (the in-app list shows them that way).
 
 ![The keyboard shortcuts sheet](images/shortcuts.png)
 
@@ -473,6 +486,16 @@ Applications → **Open**, or use **System Settings → Privacy & Security → O
 
 **Windows: SmartScreen blocks the app.** Click **More info → Run anyway**.
 
+**Linux: Bluetooth unavailable or no pedal found.** Check that the adapter is on (`bluetoothctl show` says
+`Powered: yes`; `bluetoothctl power on` if not, or `rfkill unblock bluetooth` if it is blocked) and that the service
+is running (`systemctl status bluetooth`; `sudo systemctl enable --now bluetooth`). Your user needs access to BlueZ,
+which desktop sessions normally have; on some distros that means being in the `bluetooth` group
+(`sudo usermod -aG bluetooth $USER`, then log out and back in).
+
+**Linux: the AppImage doesn't start.** Install FUSE 2 (see [section 1](#1-install-and-first-launch)). On distros that
+restrict unprivileged user namespaces (Ubuntu 24.04 and later), start it from a terminal with `--no-sandbox`, or
+use the deb instead.
+
 **Something on screen doesn't match the pedal.** Click **Refresh** in the header to re-read everything. If the problem
 stays, choose **Help → Show Log File** and attach `nano-cortex-editor.log` to a bug report.
 
@@ -485,7 +508,7 @@ trainer isn't in a muted bar.
 **Reporting a bug.** Open an [issue](https://github.com/AJs-Creations/nano-cortex-editor/issues) with your system,
 the app version (About), the pedal's firmware (Settings → Device), and the log file: reproduce the problem, choose
 **Help → Show Log File** and attach `nano-cortex-editor.log` (macOS: `~/Library/Logs/Nano Cortex Editor/`; Windows: the app's
-`logs` folder under `%APPDATA%`). It holds the last ~2 MB of activity (plus one older file, `nano-cortex-editor.1.log`) and
+`logs` folder under `%APPDATA%`; Linux: `~/.config/Nano Cortex Editor/logs/`). It holds the last ~2 MB of activity (plus one older file, `nano-cortex-editor.1.log`) and
 includes the pedal's serial number; remove anything you don't want to share. For developers: turn on
 [Developer tools](#developer-tools) for the live Activity drawer and session recording.
 

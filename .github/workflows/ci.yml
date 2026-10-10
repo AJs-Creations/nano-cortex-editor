@@ -5,6 +5,7 @@
 #    with mouse, wheel and key events and asserts the exact packets sent. GitHub's macOS runners are slow
 #    VMs, so the test waits on conditions (UI state, packets arriving, writes settling) rather than fixed
 #    sleeps. Screenshots and results are attached to every run.
+#  - ux-test-linux (not required): the same UX test on ubuntu-latest under Xvfb.
 name: CI
 
 on:
@@ -50,4 +51,29 @@ jobs:
         if: always()
         with:
           name: ux-test-output
+          path: test-output/
+
+  # The same UX test on Linux under a virtual display. Not one of the required checks on staging/main.
+  ux-test-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Libraries Electron needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libnss3 libatk-bridge2.0-0 libgtk-3-0 libxss1 libgbm1 libasound2t64
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which Chromium's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: npm ci
+      - name: UX test (demo data, Xvfb)
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" npm run test:ux
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ux-test-output-linux
           path: test-output/

@@ -6,6 +6,14 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 
 First public release.
 
+### Added after release (same version)
+
+- Linux builds: AppImage and deb, for x64 and arm64 (Raspberry Pi 4/5 with a 64-bit OS). Not yet tested with a pedal.
+- Keyboard shortcut labels show Ctrl (and Shift, Alt) on Windows and Linux instead of ⌘ (⇧, ⌥): tooltips, the Save
+  button and the shortcuts sheet.
+- macOS: the app is properly ad-hoc signed, so a downloaded copy opens with right-click → Open instead of being
+  reported as damaged.
+
 ### Help, About and support links
 
 - Settings → About (version, links to the repository, the manual and the native macOS edition), a Help menu (Manual,
@@ -46,7 +54,7 @@ First public release.
 
 ### Known limitations
 
-- The Windows build has not been tested with a pedal yet.
+- The Windows and Linux builds have not been tested with a pedal yet.
 - Some features have been verified only against recorded phone-app traffic and in demo mode, not yet end to end on a
   pedal from this app: footswitch assignment, expression assignments (including whether Save keeps them), preset
   tempo, the Device settings page, reconnect at launch and the slot usage scan.

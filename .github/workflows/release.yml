@@ -1,8 +1,21 @@
-# Builds the app for macOS (Apple Silicon + Intel) and Windows and publishes a GitHub Release with the installers.
-# Triggers: push a tag like v1.0.0, or run it by hand with an existing tag.
-# Release notes come from the matching "## <version>" section of CHANGELOG.md.
-# Builds are unsigned: on macOS right-click → Open the first time; on Windows SmartScreen asks for
-# "More info → Run anyway".
+# Builds the app for macOS (Apple Silicon + Intel), Windows (x64) and Linux (x64 + arm64: AppImage and deb) and
+# publishes the installers on a GitHub Release.
+#
+# Triggers:
+#  - push a tag like v1.2.0: builds every platform from the tag, creates (or updates) that release with notes
+#    from the matching "## <version>" section of CHANGELOG.md, and uploads the files.
+#  - run it by hand (workflow_dispatch) on a branch:
+#      release_tag empty (default): a dry run. Builds the chosen platforms and keeps the files as workflow
+#        artifacts only; no release is touched.
+#      release_tag set (e.g. v1.0.0): builds the chosen platforms from the dispatched branch and adds the files
+#        to that EXISTING release (gh release upload --clobber). It never creates a release, edits its notes or
+#        moves the tag. Used to add platforms or fixed builds to a release without a new version, e.g.
+#          gh workflow run release.yml --ref main -f release_tag=v1.0.0 -f platforms=mac,linux
+#    platforms: all | linux | mac,linux (default all).
+#
+# Builds are unsigned (no certificates). macOS gets an ad-hoc signature for the whole bundle (mac.identity "-" in
+# package.json) so a downloaded copy opens with right-click → Open instead of being reported as damaged; the
+# macOS job checks that signature on the app inside each zip. Windows: SmartScreen → More info → Run anyway.
 name: Release
 
 on:
@@ -10,34 +23,52 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to build and release (e.g. v1.0.0)'
-        required: true
+      release_tag:
+        description: 'Existing release to add the files to (e.g. v1.0.0). Empty: build only, keep the files as workflow artifacts.'
+        required: false
+        default: ''
+      platforms:
+        description: 'Platforms to build'
+        type: choice
+        options: ['all', 'linux', 'mac,linux']
+        default: 'all'
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  group: release-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
+        run: |
+          mac='{"os":"macos-latest","args":"--mac --arm64 --x64","name":"macos"}'
+          win='{"os":"windows-latest","args":"--win --x64","name":"windows"}'
+          linux='{"os":"ubuntu-latest","args":"--linux --x64 --arm64","name":"linux"}'
+          case "$PLATFORMS" in
+            all) list="$mac,$win,$linux" ;;
+            linux) list="$linux" ;;
+            mac,linux) list="$mac,$linux" ;;
+            *) echo "Unknown platforms: $PLATFORMS"; exit 1 ;;
+          esac
+          echo "matrix={\"include\":[$list]}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            args: --mac --arm64 --x64
-            name: macos
-          - os: windows-latest
-            args: --win --x64
-            name: windows
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -50,8 +81,22 @@ jobs:
       - name: Package
         run: npx electron-builder ${{ matrix.args }} --publish never
         env:
-          # Unsigned builds on purpose; no Apple Developer / code-signing certificate involved.
+          # No Apple Developer / code-signing certificate involved: macOS is signed ad hoc (mac.identity "-").
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - name: Check the macOS signature (the app inside each zip, as a download gets it)
+        if: runner.os == 'macOS'
+        run: |
+          set -e
+          for z in dist/*-mac-*.zip; do
+            d=$(mktemp -d)
+            ditto -x -k "$z" "$d"
+            codesign --verify --deep --strict --verbose=2 "$d/Nano Cortex Editor.app"
+            codesign -dv "$d/Nano Cortex Editor.app" 2>&1 | grep -E 'Signature=adhoc'
+            echo "$z: ad-hoc signature verifies"
+          done
+      - name: List the files
+        shell: bash
+        run: ls -la dist
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.name }}
@@ -59,32 +104,34 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
           if-no-files-found: error
 
+  # A version tag: create (or update) the release and upload everything.
   release:
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - name: Release notes from CHANGELOG.md
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${{ github.ref_name }}"
           VER="${TAG#v}"
           awk -v v="$VER" '
             /^## / { if (on) exit; if (index($0, "## " v) == 1) { on = 1; next } }
             on { print }
           ' CHANGELOG.md > notes.md
-          if [ ! -s notes.md ]; then echo "Builds for macOS and Windows." > notes.md; fi
+          if [ ! -s notes.md ]; then echo "Builds for macOS, Windows and Linux." > notes.md; fi
           {
             echo
             echo "---"
-            echo "Builds are unsigned. macOS: right-click the app → Open the first time (or System Settings → Privacy & Security → Open Anyway). Windows: SmartScreen → More info → Run anyway."
+            echo "Builds are unsigned. macOS: right-click the app → Open the first time (or System Settings → Privacy & Security → Open Anyway). Windows: SmartScreen → More info → Run anyway. Linux: make the AppImage executable (chmod +x; some distros also need libfuse2), or install the deb with sudo apt install ./file.deb."
             echo
             echo "Unofficial. Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or endorsed by Neural DSP."
             echo
@@ -95,11 +142,33 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${{ github.ref_name }}"
           ls -la dist
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file notes.md
           else
             gh release create "$TAG" --title "Nano Cortex Editor ${TAG#v}" --notes-file notes.md --verify-tag
           fi
-          gh release upload "$TAG" dist/*.dmg dist/*.zip dist/*.exe --clobber
+          shopt -s nullglob
+          gh release upload "$TAG" dist/*.dmg dist/*.zip dist/*.exe dist/*.AppImage dist/*.deb --clobber
+
+  # By hand with release_tag: add the files to that existing release; its notes and tag stay as they are.
+  add-to-release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Upload to the existing release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null   # fails if there is no such release
+          shopt -s nullglob
+          files=(dist/*.dmg dist/*.zip dist/*.exe dist/*.AppImage dist/*.deb)
+          ls -la "${files[@]}"
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

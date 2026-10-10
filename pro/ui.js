@@ -33,8 +33,21 @@
     for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
     return n;
   };
-  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-  const modKey = (e) => (isMac ? e.metaKey : e.ctrlKey);
+  // The platform: the shell's process.platform (src/editor-preload.js) when there is one, else the browser's.
+  // Key handlers always follow the real platform (modKey: ⌘ on macOS, Ctrl elsewhere). Shortcut labels follow
+  // `isMac`, which a test can override with ?platform=mac|win|linux to check the other platforms' labels.
+  const realMac = window.nanoShell && window.nanoShell.platform ? window.nanoShell.platform === 'darwin'
+    : /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const platformParam = (/[?&]platform=(mac|darwin|win|win32|linux)\b/.exec(location.search) || [])[1];
+  const isMac = platformParam ? /^(mac|darwin)$/.test(platformParam) : realMac;
+  const modKey = (e) => (realMac ? e.metaKey : e.ctrlKey);
+  // Shortcut labels are written the Mac way (⌘S, ⇧⌘S, ⌥⌘I) and shown as Ctrl+S, Ctrl+Shift+S, Ctrl+Alt+I on
+  // Windows and Linux. Works on a single shortcut or on any text containing them ("Save (⌘S)").
+  const keyLabel = (text) => isMac ? String(text) : String(text).replace(/[\u2325\u21e7\u2318]+(.)/gu, (_m, k) => {
+    const mods = _m.slice(0, -k.length);
+    return [mods.includes('\u2318') && 'Ctrl', mods.includes('\u2325') && 'Alt', mods.includes('\u21e7') && 'Shift'].filter(Boolean).join('+') + '+' + k;
+  });
+  window.__keyLabel = keyLabel;   // for the UX test
   const typingTarget = (t) => t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
   const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
@@ -1220,7 +1233,7 @@
       };
       window.addEventListener('pointermove', move); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
     });
-    const root = el('div', { class: 'tempo-ctl', title: 'The preset\u2019s tempo (delay and modulation sync follow it). Save (\u2318S) stores it.' },
+    const root = el('div', { class: 'tempo-ctl', title: keyLabel('The preset\u2019s tempo (delay and modulation sync follow it). Save (\u2318S) stores it.') },
       lbl,
       el('div', { class: 'stepper tempo-stepper' }, down, input, up),
       el('span', { class: 'tempo-unit', text: 'BPM' }), tap);
@@ -2417,7 +2430,7 @@
           title: 'Assign a knob or a block on/off to the expression pedal', onclick: (e) => openExpTargets(e.currentTarget) }, 'Add assignment'),
         el('button', { class: 'btn ghost small', dataset: { fk: 'exp-clear' }, disabled: !loaded || !rows.length,
           title: 'Remove every assignment from this preset', onclick: () => expClearAll() }, 'Clear all')),
-      el('p', { class: 'note', text: 'Sweeps follow the pedal from heel to toe; switches turn a block on or off. Edits are live on the pedal: Save (' + (isMac ? '⌘S' : 'Ctrl+S') + ') keeps them in the preset.' }),
+      el('p', { class: 'note', text: 'Sweeps follow the pedal from heel to toe; switches turn a block on or off. Edits are live on the pedal: Save (' + keyLabel('⌘S') + ') keeps them in the preset.' }),
       body));
     return out;
   }
@@ -2821,7 +2834,7 @@
   }
 
   function showShortcuts() {
-    const m = isMac ? '⌘' : 'Ctrl+';
+    const m = '⌘';   // keyLabel() below turns it into Ctrl+ on Windows and Linux
     const rows = [
       [m + 'S', 'Save to the current preset'],
       ['\u21e7' + m + 'S', 'Save as a new preset, in another slot'],
@@ -2845,7 +2858,7 @@
     ];
     modal({
       title: 'Keyboard shortcuts', wide: true,
-      content: el('div', {}, el('div', { class: 'keys' }, rows.flatMap(([k, d]) => [el('kbd', { text: k }), el('span', { text: d })])),
+      content: el('div', {}, el('div', { class: 'keys' }, rows.flatMap(([k, d]) => [el('kbd', { text: keyLabel(k) }), el('span', { text: d })])),
         el('p', { class: 'keys-foot' }, linkEl(LINKS.manual, 'Full manual\u2026', 'keys-manual'))),
       buttons: [{ id: 'ok', label: 'Done', primary: true }],
     });
@@ -3682,13 +3695,9 @@
   window.__demo = demo;
 
   // ------------------------------------------------------------------ boot
-  if (!isMac) {
-    document.querySelector('#saveBtn kbd').textContent = 'Ctrl+S';
-    $('saveAsBtn').title = 'Save the current sound into another preset slot (Ctrl+Shift+S)';
-    $('saveBtn').title = 'Save changes to this preset on the pedal (Ctrl+S)';
-    $('drawerBtn').title = 'Show Bluetooth activity (Ctrl+L)';
-    $('settingsBtn').title = 'Settings (Ctrl+,)';
-  }
+  // index.html writes shortcuts the Mac way; show Ctrl+… on Windows and Linux.
+  for (const n of document.querySelectorAll('[title]')) n.title = keyLabel(n.title);
+  for (const n of document.querySelectorAll('kbd')) n.textContent = keyLabel(n.textContent);
   applyDevTools();
   render();
   if (devTools && pref.get('drawerAtLaunch', false)) toggleDrawer();
