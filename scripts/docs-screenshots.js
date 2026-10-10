@@ -214,7 +214,7 @@ async function run() {
 
 app.whenReady().then(async () => {
   await toolbarShots();
-  win = new BrowserWindow({ width: W, height: H, useContentSize: true, show: true, backgroundColor: '#121212',
+  win = new BrowserWindow({ width: W, height: H, useContentSize: true, show: true, enableLargerThanScreen: true, backgroundColor: '#121212',
     webPreferences: { preload: path.join(ROOT, 'src', 'editor-preload.js'), contextIsolation: true, sandbox: true, partition: 'docs-shots', backgroundThrottling: false } });
   wc = win.webContents;
   await win.loadFile(path.join(ROOT, 'pro', 'index.html'), { search: 'demo' }).catch((err) => console.log('load: ' + err.message));

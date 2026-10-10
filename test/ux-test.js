@@ -1409,7 +1409,8 @@ async function run() {
 app.whenReady().then(async () => {
   // backgroundThrottling off: on macOS an occluded window gets almost no animation
   // frames, and every step here waits for one.
-  win = new BrowserWindow({ width: 1400, height: 900, useContentSize: true, show: true, webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+  // enableLargerThanScreen: CI runners (macOS) have a small display, and the layout checks need the full 1400×900.
+  win = new BrowserWindow({ width: 1400, height: 900, useContentSize: true, show: true, enableLargerThanScreen: true, webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   wc = win.webContents;
   wc.on('console-message', (e) => {
     const level = e.level ?? e.params?.level;
@@ -1419,6 +1420,7 @@ app.whenReady().then(async () => {
   wc.on('preload-error', (_e, p, err) => consoleErrors.push('preload ' + err));
   for (const f of fs.readdirSync(OUT)) if (/^nano-session-.*\.json$/.test(f)) fs.unlinkSync(path.join(OUT, f));
   wc.session.on('will-download', (_e, item) => item.setSavePath(path.join(OUT, item.getFilename())));
+  console.log('window content size: ' + win.getContentSize().join('×') + ', screen work area: ' + JSON.stringify(require('electron').screen.getPrimaryDisplay().workAreaSize));
   await win.loadURL('file://' + PAGE + '?demo');
   try { await run(); }
   catch (err) { check('harness crashed', false, err.stack); }
