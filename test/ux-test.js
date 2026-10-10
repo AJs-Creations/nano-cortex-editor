@@ -1712,6 +1712,7 @@ async function run() {
   const hostMac = process.platform === 'darwin';
   expectLabels('labels on this platform (' + process.platform + ')', await labelsFor(''), hostMac);
   for (const plat of hostMac ? ['win', 'linux'] : ['mac']) expectLabels('labels with ?platform=' + plat, await labelsFor(plat), plat === 'mac');
+  if (!hostMac) await labelsFor('linux');   // the page is on mac labels after the loop above
   check('keyLabel off-Mac: \u2325\u2318I → Ctrl+Alt+I, \u2318\u2191 → Ctrl+\u2191', (await js('__keyLabel("\u2325\u2318I / \u2318\u2191")')) === 'Ctrl+Alt+I / Ctrl+\u2191');
   await labelsFor('');
 
