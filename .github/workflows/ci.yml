@@ -1,0 +1,53 @@
+# Pull-request checks.
+#  - smoke (required): npm ci, regenerate the protocol layer from the vendored editor (fails loudly if
+#    upstream moved anything), and syntax-check every script.
+#  - ux-test (required): the full input-driven UX test on demo data. It drives a real Electron window
+#    with mouse, wheel and key events and asserts the exact packets sent. GitHub's macOS runners are slow
+#    VMs, so the test waits on conditions (UI state, packets arriving, writes settling) rather than fixed
+#    sleeps. Screenshots and results are attached to every run.
+name: CI
+
+on:
+  pull_request:
+    branches: [staging, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:core
+      - name: Syntax check
+        run: for f in src/*.js pro/*.js scripts/*.js test/*.js; do node --check "$f"; done
+
+  ux-test:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: UX test (demo data)
+        run: npm run test:ux
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ux-test-output
+          path: test-output/

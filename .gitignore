@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.DS_Store
+dist-preview/
+test-output/
+*.pkg
+
+# agent worktrees
+.claude/worktrees/
+
+# recordings and traces from a real pedal or phone: never committed (privacy)
+test/fixtures/sessions/
+*.pklg
+*.pcap
+*.pcapng
+*.btsnoop
+*.tar.gz
+nano-session-*.json
