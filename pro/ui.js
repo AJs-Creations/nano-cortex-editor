@@ -112,6 +112,7 @@
     sideSig: '',
     lastAction: '',
     logs: [],
+    logSeq: 0,   // lines ever logged; each entry carries its number, so readers can index past the trim below
     usage: null,          // last slot usage scan: { captures, cabs, library, cabLibrary, date, complete, scanned, total }
     scanning: false,
     scanStop: false,
@@ -1573,8 +1574,8 @@
   window.log = function (message) {
     const text = String(message);
     const cls = text.startsWith('TX ') ? 'tx' : /^ERROR|failed/i.test(text) ? 'er' : /^RX|C305|CURRENT STATE|FE /.test(text) ? 'rx' : '';
-    ui.logs.push({ ts: new Date().toLocaleTimeString(), text, cls });
-    if (ui.logs.length > 500) ui.logs.splice(0, ui.logs.length - 500);
+    ui.logs.push({ ts: new Date().toLocaleTimeString(), text, cls, seq: ++ui.logSeq });
+    if (ui.logs.length > 1000) ui.logs.splice(0, ui.logs.length - 1000);
     if (cls === 'tx') {
       const label = text.slice(3).split(':')[0];
       if (!ui.scanning) ui.lastAction = 'Sent: ' + label;
