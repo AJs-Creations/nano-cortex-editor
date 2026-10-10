@@ -12,8 +12,9 @@ const html = read('pro/index.html');
 const css = read('pro/ui.css');
 const core = read('pro/core.js');
 const ui = read('pro/ui.js');
+const links = read('pro/links.js');
 
-for (const [name, src] of [['core.js', core], ['ui.js', ui]]) {
+for (const [name, src] of [['core.js', core], ['links.js', links], ['ui.js', ui]]) {
   if (/<\/script/i.test(src)) throw new Error(name + ' contains "</script", which would break inlining');
 }
 
@@ -34,6 +35,9 @@ ${body}
 <script>window.__FORCE_DEMO = true;</script>
 <script>
 ${core}
+</script>
+<script>
+${links}
 </script>
 <script>
 ${ui}

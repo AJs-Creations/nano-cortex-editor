@@ -13,6 +13,9 @@ const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
 const { renderAccentIcon, normHex, DEFAULT_ACCENT } = require('./accent-icon');
+const LINKS = require('../pro/links');   // repo, manual, issues, support: the same constants the editor page uses
+const { menuTemplate, menuLabels } = require('./menu');
+const { createActivityLog } = require('./activity-log');
 
 // Capture pages live under /cloud/discover/… and under pack pages like /cloud/<pack>/…
 const CAPTURE_PAGE = /\/neural-capture\/view\/([0-9a-f-]{36})/i;
@@ -49,7 +52,8 @@ app.setAboutPanelOptions({
   applicationVersion: app.getVersion(),
   version: '',
   copyright: '© 2026 AJs Creations, MIT licence. Unofficial; not affiliated with or endorsed by Neural DSP.',
-  credits: 'Protocol layer from the community Nano Cortex Editor (DrD85, MIT) and nano-cortex-web-editor (choldy, MIT). IBM Plex Sans (OFL).',
+  credits: 'Protocol layer from the community Nano Cortex Editor (DrD85, MIT) and nano-cortex-web-editor (choldy, MIT). IBM Plex Sans (OFL).\n'
+    + 'If this editor saves you time, you can buy me a coffee: ' + LINKS.support,
   iconPath: path.join(__dirname, '..', 'pro', 'assets', 'icon-512.png'),
 });
 
@@ -61,10 +65,10 @@ let autoConnecting = false;
 let active = 'editor';
 
 // ---------- shell settings (userData/settings.json) ----------
-// What the main process needs before the editor page has loaded: the accent (for the Dock icon) and the
-// remembered pedal. Everything else lives in the editor page's localStorage.
+// What the main process needs before the editor page has loaded: the accent (for the Dock icon), the
+// remembered pedal and Developer tools (for the menu). Everything else lives in the editor page's localStorage.
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
-let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null };
+let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false };
 function loadShellSettings() {
   try { Object.assign(shellSettings, JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))); } catch { /* defaults */ }
 }
@@ -214,16 +218,17 @@ function createWindow() {
   wireBluetooth(editor.webContents);
   loadEditor('pro');
   editor.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
-  // Running from source: mirror the editor's Activity log to the terminal.
-  if (!app.isPackaged) {
-    editor.webContents.on('console-message', (e) => {
-      const m = e.message ?? e.params?.message;
-      if (m == null) return;
-      console.log('[editor] ' + m);
-      devLog.push({ t: Date.now(), text: String(m) });
-      if (devLog.length > 5000) devLog.splice(0, devLog.length - 5000);
-    });
-  }
+  // The editor's Activity log goes to the log file for everyone (Help → Show Log File). Running from source it is
+  // also mirrored to the terminal and kept for the dev remote's /log.
+  editor.webContents.on('console-message', (e) => {
+    const m = e.message ?? e.params?.message;
+    if (m == null) return;
+    activityLog().write(String(m));
+    if (app.isPackaged) return;
+    console.log('[editor] ' + m);
+    devLog.push({ t: Date.now(), text: String(m) });
+    if (devLog.length > 5000) devLog.splice(0, devLog.length - 5000);
+  });
   if (DEV_PORT) startDevRemote();
   editor.webContents.session.on('will-download', (_e, item) => {
     const dir = recordingsDir();
@@ -292,6 +297,8 @@ function startDevRemote() {
           const file = url.searchParams.get('file') || path.join(app.getPath('temp'), 'nano-shot.png');
           fs.writeFileSync(file, img.toPNG());
           res.end(JSON.stringify({ ok: true, file, url: target.webContents.getURL() }));
+        } else if (url.pathname === '/menu') {
+          res.end(JSON.stringify({ devTools: shellSettings.devTools, labels: menuLabels(Menu.getApplicationMenu().items.map(function walk(i) { return { label: i.label, submenu: i.submenu ? i.submenu.items.map(walk) : null }; })) }));
         } else if (url.pathname === '/log') {
           const since = Number(url.searchParams.get('since') || 0);
           res.end(JSON.stringify({ next: devLog.length, lines: devLog.slice(since).map(l => l.text) }));
@@ -329,8 +336,34 @@ ipcMain.on('editor-reload', () => editor.webContents.reload());
 const fromEditor = (e) => editor && e.sender === editor.webContents;
 ipcMain.handle('settings-get', (e) => (fromEditor(e) ? {
   platform: process.platform, accent: shellSettings.accent, dockFollowsAccent: shellSettings.dockFollowsAccent,
-  pedal: shellSettings.pedal, recordingsDir: recordingsDir(),
+  pedal: shellSettings.pedal, recordingsDir: recordingsDir(), version: app.getVersion(), devTools: shellSettings.devTools,
+  logFile: activityLog().file,
 } : null));
+// Developer tools (Settings → General → Advanced): the page sends it on every change and at launch; the menu follows.
+ipcMain.handle('set-dev-tools', (e, on) => {
+  if (!fromEditor(e)) return null;
+  on = !!on;
+  if (on === shellSettings.devTools) return on;
+  shellSettings.devTools = on;
+  saveShellSettings();
+  if (!on) {
+    for (const v of [editor, cloud]) if (v && v.webContents.isDevToolsOpened()) v.webContents.closeDevTools();
+    if (editorFlavor === 'classic') loadEditor('pro');   // Classic Editor is a developer view now
+  }
+  buildMenu();
+  return on;
+});
+// Outside links from the editor page (manual, repo, support): only our own known https links, always in the
+// default browser.
+const OUTSIDE_HOSTS = new Set(['github.com', 'buymeacoffee.com']);
+function openOutside(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:' && OUTSIDE_HOSTS.has(u.hostname)) { shell.openExternal(u.href); return true; }
+  } catch { /* not a URL */ }
+  return false;
+}
+ipcMain.handle('open-external', (e, url) => (fromEditor(e) ? openOutside(String(url)) : false));
 ipcMain.handle('set-accent', async (e, hex, follow) => {
   if (!fromEditor(e)) return null;
   const accent = normHex(hex);
@@ -348,6 +381,15 @@ ipcMain.handle('reveal-recordings', async (e) => {
   const dir = recordingsDir();
   fs.mkdirSync(dir, { recursive: true });
   return shell.openPath(dir);
+});
+// A recording stopped by turning Developer tools off: straight into the recordings folder, no dialog.
+ipcMain.handle('save-recording', async (e, name, json) => {
+  if (!fromEditor(e) || !/^nano-session-[\w-]+\.json$/.test(name)) return '';
+  const file = path.join(recordingsDir(), name);
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  await fs.promises.writeFile(file, json);
+  console.log('[download] completed ' + file);
+  return file;
 });
 // Reconnect at launch: requestDevice() needs a user gesture, which executeJavaScript can grant.
 ipcMain.handle('auto-connect', async (e) => {
@@ -428,44 +470,31 @@ ipcMain.handle('sign-out', async () => {
   return true;
 });
 
+// ---------- Activity log file (Help → Show Log File) ----------
+let actLog = null;
+function activityLog() {
+  if (!actLog) {
+    actLog = createActivityLog(path.join(app.getPath('logs'), 'nano-cortex-editor.log'));
+    actLog.write('--- Nano Cortex Editor ' + app.getVersion() + ' started (' + process.platform + ' ' + process.arch + ', Electron ' + process.versions.electron + ')');
+  }
+  return actLog;
+}
+function showLogFile() { shell.showItemInFolder(activityLog().ensureFile()); }
+app.on('will-quit', () => { if (actLog) actLog.flushSync(); });
+
 function buildMenu() {
-  const isMac = process.platform === 'darwin';
-  const settingsItem = { label: 'Settings\u2026', accelerator: 'CmdOrCtrl+,', enabled: editorFlavor === 'pro', click: openSettings };
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    ...(isMac ? [{
-      label: app.name,
-      submenu: [
-        { role: 'about' }, { type: 'separator' }, settingsItem, { type: 'separator' },
-        { role: 'services' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
-        { type: 'separator' }, { role: 'quit' },
-      ],
-    }] : []),
-    isMac ? { role: 'editMenu' } : {
-      label: 'Edit',
-      submenu: [
-        { role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' },
-        { role: 'selectAll' }, { type: 'separator' }, settingsItem,
-      ],
+  Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate({
+    isMac: process.platform === 'darwin', appName: app.name, devTools: shellSettings.devTools, editorFlavor, links: LINKS,
+    a: {
+      show,
+      toggleClassic: () => { loadEditor(editorFlavor === 'classic' ? 'pro' : 'classic'); show('editor'); },
+      reload: () => (active === 'cloud' ? cloud : editor).webContents.reload(),
+      toggleDevTools: () => (active === 'cloud' ? cloud : editor).webContents.toggleDevTools(),
+      openSettings,
+      openLink: (url) => shell.openExternal(url),
+      showLogFile,
     },
-    {
-      label: 'View',
-      submenu: [
-        { label: 'Editor', accelerator: 'CmdOrCtrl+1', click: () => show('editor') },
-        { label: 'Cortex Cloud', accelerator: 'CmdOrCtrl+2', click: () => show('cloud') },
-        { type: 'separator' },
-        { label: 'Classic Editor', type: 'checkbox', checked: editorFlavor === 'classic',
-          click: () => { loadEditor(editorFlavor === 'classic' ? 'pro' : 'classic'); show('editor'); } },
-        { type: 'separator' },
-        { label: 'Reload Current', accelerator: 'CmdOrCtrl+R',
-          click: () => (active === 'cloud' ? cloud : editor).webContents.reload() },
-        { label: 'Developer Tools', accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
-          click: () => (active === 'cloud' ? cloud : editor).webContents.toggleDevTools() },
-        { type: 'separator' },
-        { role: 'togglefullscreen' }
-      ]
-    },
-    { role: 'windowMenu' }
-  ]));
+  })));
 }
 
 app.whenReady().then(() => {

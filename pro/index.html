@@ -60,7 +60,7 @@
       <div class="veil" id="veil" hidden></div>
     </main>
 
-    <div class="drawer" id="drawer"><div class="drawer-inner" id="logView"></div></div>
+    <div class="drawer dev-only" id="drawer"><div class="drawer-inner" id="logView"></div></div>
 
     <footer class="status">
       <span class="item"><span class="led" id="bleLed"></span><span id="bleText">No pedal</span></span>
@@ -68,8 +68,9 @@
       <span class="grow" id="lastAction"></span>
       <button id="settingsBtn" title="Settings (⌘,)">Settings</button>
       <button id="keysBtn" title="Keyboard shortcuts (?)">Shortcuts</button>
-      <button id="recBtn" title="Record every packet sent and received, then save it as JSON">Record</button>
-      <button id="drawerBtn" title="Show Bluetooth activity (⌘L)">Activity</button>
+      <button id="recBtn" class="dev-only" title="Record every packet sent and received, then save it as JSON">Record</button>
+      <button id="drawerBtn" class="dev-only" title="Show Bluetooth activity (⌘L)">Activity</button>
+      <button id="supportBtn" title="Support the project on Buy Me a Coffee (opens your browser)">♥ Support</button>
     </footer>
   </div>
 
@@ -116,6 +117,7 @@
   <div class="toast" id="toast" role="status"></div>
 
   <script src="core.js"></script>
+  <script src="links.js"></script>
   <script src="transfer.js"></script>
   <script src="ui.js"></script>
 </body>

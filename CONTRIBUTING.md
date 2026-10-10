@@ -30,7 +30,8 @@ If a change affects what users see, update `docs/MANUAL.md` and, where it helps,
 ## Hardware in the loop
 
 The protocol is reverse-engineered. For anything protocol-related, verify on a real pedal: do the physical step, read
-the Activity log (⌘L / Ctrl+L), and describe what you saw in the PR. Don't guess byte formats. Back up your presets in
+the Activity log (turn on **Developer tools** in Settings → General → Advanced, then ⌘L / Ctrl+L; it also enables
+Record, protocol details and View → Classic Editor / Developer Tools), and describe what you saw in the PR. Don't guess byte formats. Back up your presets in
 the official app before writing to a pedal, and never save without an explicit user action.
 
 ## Privacy: recordings are never committed

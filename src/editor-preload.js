@@ -10,7 +10,10 @@ contextBridge.exposeInMainWorld('nanoShell', {
   getSettings: () => ipcRenderer.invoke('settings-get'),
   setAccent: (hex, followDock) => ipcRenderer.invoke('set-accent', String(hex), typeof followDock === 'boolean' ? followDock : undefined),
   forgetPedal: () => ipcRenderer.invoke('forget-pedal'),
+  setDevTools: (on) => ipcRenderer.invoke('set-dev-tools', !!on),
   revealRecordings: () => ipcRenderer.invoke('reveal-recordings'),
+  saveRecording: (name, json) => ipcRenderer.invoke('save-recording', String(name), String(json)),
   autoConnect: () => ipcRenderer.invoke('auto-connect'),
+  openExternal: (url) => ipcRenderer.invoke('open-external', String(url)),
   onOpenSettings: (fn) => ipcRenderer.on('open-settings', () => fn()),
 });

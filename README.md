@@ -9,6 +9,9 @@ whole editor on sample data.
 
 ![The editor in demo mode: the Editor and Cortex Cloud tabs at the top, the preset list on the left, the signal chain across the top and the capture's amp knobs and slots below](docs/images/hero.png)
 
+**[⬇ Download](https://github.com/AJs-Creations/nano-cortex-editor/releases/latest)** ·
+**[📖 Manual](docs/MANUAL.md)**
+
 > **Unofficial.** Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not
 > affiliated with or endorsed by Neural DSP.
 
@@ -32,11 +35,12 @@ whole editor on sample data.
 - **Tuner** with reference pitch and output mute.
 - **Metronome** with **Simple** and **Advanced** modes: time signatures, accents, subdivisions and swing, count-in,
   tempo trainer, gap trainer and **Levels**; it can follow the preset's tempo.
-- **Settings** (⌘, / Ctrl+,): accent colour, metronome defaults and click sounds, reconnect at launch, and a
-  **Device** page with the pedal's details, LED brightness and USB playback volume.
+- **Settings** (⌘, / Ctrl+,): accent colour, metronome defaults and click sounds, reconnect at launch, a
+  **Device** page with the pedal's details, LED brightness and USB playback volume, and **About**.
 - **Cortex Cloud tab**: the Cortex Cloud website with your own login; on a capture's page, **Send to Nano Cortex**
   puts it in the pedal's library over Bluetooth.
-- **Activity log and session recording** of the Bluetooth traffic, for troubleshooting.
+- **A log file for bug reports** (Help → Show Log File), and for developers an Activity log and session recording of
+  the Bluetooth traffic (Settings → Developer tools).
 - **Keyboard shortcuts** for everything common (press `?` in the app).
 - **Demo mode**: try every feature without a pedal.
 
@@ -99,7 +103,7 @@ help out and [CHANGELOG.md](CHANGELOG.md) for what changed.
 The Bluetooth protocol layer comes from the community
 [Nano Cortex Editor by DrD85](https://github.com/DrD85/nano-cortex-editor) (MIT), which builds on
 [nano-cortex-web-editor by choldy](https://github.com/choldy/nano-cortex-web-editor) (MIT). DrD85's original
-interface is still in the app under **View → Classic Editor**. Thanks to both projects. Full notices:
+interface is still in the app under **View → Classic Editor** (with Developer tools on). Thanks to both projects. Full notices:
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Trademarks
@@ -111,3 +115,5 @@ describe compatibility. This is an independent tool; use it at your own risk.
 ## License
 
 [MIT](LICENSE) © 2026 AJs Creations.
+
+If this editor saves you time, you can [buy me a coffee](https://buymeacoffee.com/ajscreations).

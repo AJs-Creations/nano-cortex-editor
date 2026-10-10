@@ -87,6 +87,8 @@ jobs:
             echo "Builds are unsigned. macOS: right-click the app → Open the first time (or System Settings → Privacy & Security → Open Anyway). Windows: SmartScreen → More info → Run anyway."
             echo
             echo "Unofficial. Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or endorsed by Neural DSP."
+            echo
+            echo "If this saves you time, you can [buy me a coffee](https://buymeacoffee.com/ajscreations) ☕"
           } >> notes.md
           cat notes.md
       - name: Create or update the GitHub Release
