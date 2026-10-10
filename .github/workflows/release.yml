@@ -178,7 +178,7 @@ jobs:
           check_app() {
             codesign --verify --deep --strict --verbose=2 "$1"
             if [ "$SIGNED" = true ]; then
-              codesign -dv "$1" 2>&1 | grep -F 'Authority=Developer ID Application: Anup Sebastian (272K9YT73Z)'
+              codesign -dvv "$1" 2>&1 | grep -F 'Authority=Developer ID Application: Anup Sebastian (272K9YT73Z)'
               codesign -dv "$1" 2>&1 | grep -E 'flags=.*runtime'
               spctl -a -vv -t execute "$1" 2>&1 | tee /dev/stderr | grep -F 'source=Notarized Developer ID'
               xcrun stapler validate "$1"
