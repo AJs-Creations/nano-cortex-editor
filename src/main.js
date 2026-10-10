@@ -474,7 +474,7 @@ ipcMain.handle('sign-out', async () => {
 let actLog = null;
 function activityLog() {
   if (!actLog) {
-    actLog = createActivityLog(path.join(app.getPath('logs'), 'activity.log'));
+    actLog = createActivityLog(path.join(app.getPath('logs'), 'nano-cortex-editor.log'));
     actLog.write('--- Nano Cortex Editor ' + app.getVersion() + ' started (' + process.platform + ' ' + process.arch + ', Electron ' + process.versions.electron + ')');
   }
   return actLog;

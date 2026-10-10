@@ -15,7 +15,7 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
   Raw settings and the device and capture hashes, and View → Classic Editor, Reload Current and Developer Tools.
   Everything appears and disappears at once when you flip it; turning it off stops a recording in progress (saving
   it to the recordings folder) and closes the Activity drawer.
-- **Help → Show Log File**, for everyone: the Activity log is also written to `activity.log` in the app's logs folder
+- **Help → Show Log File**, for everyone: the Activity log is also written to `nano-cortex-editor.log` in the app's logs folder
   (the last ~2 MB plus one older file). The bug report template asks for it.
 
 ## 1.0.0 — 2026-10-09

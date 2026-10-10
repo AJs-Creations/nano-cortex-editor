@@ -23,7 +23,7 @@ A clear description of the problem.
 - Connected to a pedal, or demo mode?
 
 **Log file**
-Reproduce the problem, then choose **Help → Show Log File** and attach `activity.log` here (drag it into this box).
+Reproduce the problem, then choose **Help → Show Log File** and attach `nano-cortex-editor.log` here (drag it into this box).
 Remove anything you don't want to share first (the Device info lines show the pedal's serial number). If you have
 Developer tools on (Settings → General → Advanced), pasting the relevant Activity lines (⌘L / Ctrl+L) works too.
 

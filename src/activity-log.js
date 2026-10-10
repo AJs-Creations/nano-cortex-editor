@@ -1,5 +1,5 @@
 // The Activity log on disk, for everyone (Help → Show Log File): every line the editor page logs, written by the
-// main process to app.getPath('logs')/activity.log. Lines are buffered and appended about once a second, never one
+// main process to app.getPath('logs')/nano-cortex-editor.log. Lines are buffered and appended about once a second, never one
 // synchronous write per packet. The file is capped: past `max` bytes it becomes activity.1.log (replacing the old
 // one), so the two together stay under about twice the cap. No Electron in here, so the UX test can unit-test it.
 const fs = require('fs');

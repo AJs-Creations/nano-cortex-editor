@@ -474,7 +474,7 @@ Applications → **Open**, or use **System Settings → Privacy & Security → O
 **Windows: SmartScreen blocks the app.** Click **More info → Run anyway**.
 
 **Something on screen doesn't match the pedal.** Click **Refresh** in the header to re-read everything. If the problem
-stays, choose **Help → Show Log File** and attach `activity.log` to a bug report.
+stays, choose **Help → Show Log File** and attach `nano-cortex-editor.log` to a bug report.
 
 **Reconnect at launch doesn't find the pedal.** The pedal needs to be on and visible before the app starts; otherwise
 click **Connect** once it is.
@@ -484,8 +484,8 @@ trainer isn't in a muted bar.
 
 **Reporting a bug.** Open an [issue](https://github.com/AJs-Creations/nano-cortex-editor/issues) with your system,
 the app version (About), the pedal's firmware (Settings → Device), and the log file: reproduce the problem, choose
-**Help → Show Log File** and attach `activity.log` (macOS: `~/Library/Logs/Nano Cortex Editor/`; Windows: the app's
-`logs` folder under `%APPDATA%`). It holds the last ~2 MB of activity (plus one older file, `activity.1.log`) and
+**Help → Show Log File** and attach `nano-cortex-editor.log` (macOS: `~/Library/Logs/Nano Cortex Editor/`; Windows: the app's
+`logs` folder under `%APPDATA%`). It holds the last ~2 MB of activity (plus one older file, `nano-cortex-editor.1.log`) and
 includes the pedal's serial number; remove anything you don't want to share. For developers: turn on
 [Developer tools](#developer-tools) for the live Activity drawer and session recording.
 
