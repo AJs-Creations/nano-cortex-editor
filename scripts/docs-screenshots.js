@@ -23,6 +23,8 @@ ipcMain.handle('set-accent', () => null);
 ipcMain.handle('forget-pedal', () => true);
 ipcMain.handle('reveal-recordings', () => true);
 ipcMain.handle('auto-connect', () => false);
+ipcMain.handle('set-dev-tools', (_e, on) => !!on);
+ipcMain.handle('open-external', () => false);
 
 let win, wc;
 app.on('window-all-closed', () => {}); // the toolbar window closes before the editor opens
@@ -187,6 +189,9 @@ async function run() {
   // settings
   await js('void __openSettings()'); await sleep(250);
   await shot('settings-general', '.modal', 16);
+  // the bottom of General: Advanced with the Developer tools switch (off, as on a fresh install)
+  await js('document.querySelectorAll(".modal *").forEach(e => { if (e.scrollHeight > e.clientHeight + 4) e.scrollTop = e.scrollHeight; }); 0'); await sleep(150);
+  await shot('settings-advanced', '.modal', 16);
   await key('Escape');
   await js('void __openSettings("device")'); await sleep(350);
   await shot('settings-device', '.modal', 16);
@@ -195,10 +200,12 @@ async function run() {
   await shot('settings-about', '.modal', 16);
   await key('Escape');
 
-  // activity + shortcuts
+  // activity (a developer tool: taken with Developer tools on, then back to normal) + shortcuts
+  await js('__devTools.set(true); 0'); await sleep(100);
   await key('l', [MOD]); await sleep(300); await hideToast();
   await shot('activity', ['.drawer', '.status'], 0);
   await key('l', [MOD]); await sleep(200);
+  await js('__devTools.set(false); 0'); await sleep(100);
   await js('document.activeElement.blur()');
   await key('?'); await sleep(150);
   await shot('shortcuts', '.modal', 16);

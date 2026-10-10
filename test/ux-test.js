@@ -191,6 +191,83 @@ async function run() {
   check('default inspector is Capture', (await js('document.querySelector(".insp-head h1").textContent')) === 'Capture');
   await shot('01-capture');
 
+  // ---------------------------------------------------------------- developer tools: off by default
+  // Settings → General → Advanced → Developer tools. Off (a fresh install): no Record, no Activity, no ⌘L, no
+  // "Sent: …", no hashes or raw settings, and the shell's menu has no Classic Editor / Reload / Developer Tools.
+  const shown = (sel) => js(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); return !!e && e.getClientRects().length > 0; })()`);
+  const settingsUp = () => js('!!document.querySelector(".modal.settings-modal")');
+  check('Developer tools are off on a fresh install', await js('!__devTools.on && !document.body.classList.contains("dev-tools") && localStorage.getItem("settings.devTools") === null'));
+  check('dev tools off: no Record or Activity button in the status bar', !(await shown('#recBtn')) && !(await shown('#drawerBtn')) && await shown('#settingsBtn') && await shown('#keysBtn') && await shown('#supportBtn'));
+  await js('document.activeElement.blur()');
+  await key('l', [MOD]);
+  check('dev tools off: ⌘L does nothing', await js('!__ui.drawerOpen && !document.getElementById("drawer").classList.contains("open")'));
+  await js('document.getElementById("recBtn").click()');
+  check('dev tools off: Record cannot be armed', await js('!__rec.on'));
+  let dn = await mark();
+  await dblclick('[data-fk="amp-gain"] svg');
+  await txWait(dn);
+  check('dev tools off: the log is still kept, the status bar shows no "Sent: …"', /^Sent: /.test(await js('__ui.lastAction')) && (await js('document.getElementById("lastAction").textContent')) === '' && (await txSince(dn)).length >= 1, await js('document.getElementById("lastAction").textContent'));
+  await js('__ui.dirty = false; render(); document.activeElement.blur()'); await frame();
+  await key('?'); await waitFor('!!document.querySelector(".modal .keys")');
+  check('dev tools off: the shortcuts sheet has no ⌘L or Record row', await js('!!document.querySelector(".modal .keys") && ![...document.querySelectorAll(".modal .keys kbd")].some(k => /^(⌘|Ctrl\\+)L$/.test(k.textContent) || k.textContent === "Record")'));
+  await key('Escape');
+  await js('document.activeElement.blur()');
+  await key(',', [MOD]); await waitFor(settingsUp);
+  check('dev tools off: Settings → Advanced shows the switch, off, with its detail', await js('(() => { const b = document.querySelector(\'[data-fk="set-devtools"]\'); return !!b && b.textContent === "Developer tools" && b.getAttribute("aria-checked") === "false" && b.closest("section").querySelector("h3").textContent === "Advanced"; })()') && (await js('document.querySelector(\'[data-fk="set-devtools-note"]\').textContent')) === 'Shows the Activity log, session recording and protocol details. For troubleshooting and development.');
+  check('dev tools off: no "Show the Activity drawer at launch" or recordings folder', !(await shown('[data-fk="set-drawer"]')) && !(await shown('[data-fk="set-reveal"]')));
+  await click('[data-fk="set-tab-device"]');
+  await waitFor(async () => (await js('document.querySelector(\'[data-fk="dev-serial"]\')?.textContent')) === 'NP00XXXXXX');
+  check('dev tools off: Settings → Device has no Hash row and no Raw settings', !(await shown('[data-fk="dev-hash"]')) && !(await shown('[data-fk="dev-raw"]')) && await shown('[data-fk="dev-serial"]') && await shown('[data-fk="dev-brightness"]'));
+  await key('Escape'); await waitFor(async () => !(await settingsUp())); await settle();
+  await rightClick('[data-fk="capslot-1"]');
+  await js(ctxItem('Info') + '.click()');
+  await waitFor('!!document.querySelector(\'[data-fk="cap-author"]\')');
+  check('dev tools off: capture Info… has no Hash line or Copy button', !(await shown('[data-fk="cap-hash"]')) && !(await shown('[data-fk="cap-copy"]')) && await shown('[data-fk="cap-author"]'));
+  await key('Escape'); await waitFor('!document.querySelector(".cap-info")'); await settle();
+  // the shell's menu (src/menu.js builds the template main.js uses)
+  const { menuTemplate, menuLabels } = require('../src/menu');
+  const menuFor = (devTools, isMac = true) => menuLabels(menuTemplate({ isMac, appName: 'Nano Cortex Editor', devTools, editorFlavor: 'pro', links: LINKS, a: new Proxy({}, { get: () => () => {} }) }));
+  for (const mac of [true, false]) {
+    const off = menuFor(false, mac), on = menuFor(true, mac);
+    check('menu (' + (mac ? 'macOS' : 'Windows') + ', dev tools off): no Classic Editor, Reload Current or Developer Tools; Help → Show Log File', !off.includes('Classic Editor') && !off.includes('Reload Current') && !off.includes('Developer Tools') && off.includes('Show Log File'), off.join(','));
+    check('menu (' + (mac ? 'macOS' : 'Windows') + ', dev tools on): Classic Editor, Reload Current and Developer Tools are back; Show Log File stays', on.includes('Classic Editor') && on.includes('Reload Current') && on.includes('Developer Tools') && on.includes('Show Log File'), on.join(','));
+  }
+  // the log file on disk (src/activity-log.js, written by main for everyone): batched, capped at 2 MB, one old file
+  {
+    const { createActivityLog, rotateIfNeeded, MAX_BYTES } = require('../src/activity-log');
+    const os = require('os');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nano-log-'));
+    const file = path.join(dir, 'activity.log');
+    check('the log file cap is 2 MB', MAX_BYTES === 2 * 1024 * 1024);
+    const lg = createActivityLog(file, { max: 4096, flushMs: 50 });
+    lg.write('TX Amp gain = 128: 0A C0 08 01', new Date(0));
+    check('log lines are batched, not written per line', !fs.existsSync(file));
+    await lg.flush();
+    check('the log file is written with timestamps', fs.readFileSync(file, 'utf8') === '1970-01-01T00:00:00.000Z TX Amp gain = 128: 0A C0 08 01\n', JSON.stringify(fs.readFileSync(file, 'utf8')));
+    for (let round = 0; round < 7; round++) { for (let i = 0; i < 10; i++) lg.write('RX line ' + round + '.' + i + ' ' + 'x'.repeat(40)); await lg.flush(); }
+    const files = fs.readdirSync(dir).sort();
+    const size = (f) => fs.statSync(path.join(dir, f)).size;
+    check('rotation keeps the current file under the cap and one old file', files.join(',') === 'activity.1.log,activity.log' && size('activity.log') <= 4096 && size('activity.1.log') > 4096, files.map(f => f + ':' + size(f)).join(','));
+    check('the newest lines are in activity.log', /RX line 6\.9 /.test(fs.readFileSync(file, 'utf8')));
+    fs.writeFileSync(file, 'y'.repeat(5000));
+    check('rotateIfNeeded moves an oversized file to activity.1.log, replacing the old one', rotateIfNeeded(file, 4096) && !fs.existsSync(file) && size('activity.1.log') === 5000 && !rotateIfNeeded(file, 4096));
+    lg.write('after rotation'); lg.flushSync();
+    check('writing continues in a fresh activity.log', fs.readFileSync(file, 'utf8').endsWith(' after rotation\n'));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // ---------------------------------------------------------------- developer tools: on (once, with the real switch)
+  await key(',', [MOD]); await waitFor(settingsUp);
+  await click('[data-fk="set-devtools"]');
+  check('the Developer tools switch is stored (settings.devTools)', (await js('localStorage.getItem("settings.devTools")')) === 'true' && await js('__devTools.on && document.body.classList.contains("dev-tools")'));
+  check('dev tools on: the Activity-at-launch and recordings rows appear live in Settings', await shown('[data-fk="set-drawer"]') && await shown('[data-fk="set-reveal"]'));
+  await click('[data-fk="set-tab-device"]');
+  await waitFor(() => shown('[data-fk="dev-hash"]'));
+  check('dev tools on: Settings → Device shows Hash and Raw settings', await shown('[data-fk="dev-hash"]') && await shown('[data-fk="dev-raw"]'));
+  await key('Escape'); await waitFor(async () => !(await settingsUp())); await settle();
+  check('dev tools on: Record and Activity are back in the status bar', await shown('#recBtn') && await shown('#drawerBtn'));
+  check('dev tools on: the status bar shows the last "Sent: …"', /^Sent: /.test(await js('document.getElementById("lastAction").textContent')));
+
   // ---------------------------------------------------------------- capture amp knob
   // double-click reset (also puts Gain mid-travel for the drag tests)
   let n0 = await mark();
@@ -1177,6 +1254,8 @@ async function run() {
   await js('document.activeElement.blur()');
   await key('?');
   check('? opens shortcuts', await js('!!document.querySelector(".modal .keys")'));
+  check('(dev tools on) the shortcuts sheet lists ⌘L', await js('[...document.querySelectorAll(".modal .keys kbd")].some(k => /^(⌘|Ctrl\\+)L$/.test(k.textContent) && k.nextElementSibling.textContent === "Show Bluetooth activity")'));
+  check('(dev tools on) the shortcuts sheet lists Record', await js('[...document.querySelectorAll(".modal .keys kbd")].some(k => k.textContent === "Record" && k.nextElementSibling.textContent === "In the status bar: record every packet, then save it as JSON")'));
   check('the shortcuts sheet ends with "Full manual…" pointing at the manual', (await js('(() => { const a = document.querySelector(\'[data-fk="keys-manual"]\'); return a ? a.textContent + "|" + a.href : ""; })()')) === 'Full manual\u2026|' + LINKS.manual);
   await shot('11-shortcuts');
   await key('Escape');
@@ -1520,6 +1599,25 @@ async function run() {
   check('the traced 66 reply parses: name, brightness 153, USB −6.0 dB', await js('__dev.settings.name === "Neural DSP Nano Cortex" && __dev.settings.brightness === 153 && __dev.settings.usbDb === -6'), await js('JSON.stringify(__dev.settings)'));
   await js(`__dev.settings = ${devBefore}`);
 
+  // ---------------------------------------------------------------- developer tools: off again, live
+  for (const f of fs.readdirSync(OUT)) if (/^nano-session-.*\.json$/.test(f)) fs.unlinkSync(path.join(OUT, f));
+  await js('document.activeElement.blur()');
+  await click('#recBtn');
+  await key('l', [MOD]);
+  check('(dev tools on) recording and the Activity drawer are running', await js('__rec.on && __ui.drawerOpen'));
+  await key(',', [MOD]); await waitFor(settingsOpen);
+  await click('[data-fk="set-devtools"]');
+  check('turning Developer tools off stops the recording and closes the drawer', await js('!__rec.on && !__ui.drawerOpen && !document.getElementById("drawer").classList.contains("open")'));
+  check('turning it off hides the Activity-at-launch row live', !(await shown('[data-fk="set-drawer"]')) && (await js('localStorage.getItem("settings.devTools")')) === 'false');
+  await key('Escape'); await waitFor(async () => !(await settingsOpen()));
+  check('turning it off hides Record, Activity and "Sent: …" at once', !(await shown('#recBtn')) && !(await shown('#drawerBtn')) && !/^Sent: /.test(await js('document.getElementById("lastAction").textContent')));
+  const stopped = await waitFor(async () => fs.readdirSync(OUT).find(f => { if (!/^nano-session-.*\.json$/.test(f)) return false; try { JSON.parse(fs.readFileSync(path.join(OUT, f), 'utf8')); return true; } catch { return false; } }));
+  check('the stopped recording is saved, as clicking Record would', !!stopped, String(stopped));
+  await js('document.activeElement.blur()');
+  await key('l', [MOD]);
+  check('⌘L does nothing again', await js('!__ui.drawerOpen'));
+  await settle();
+
   // ---------------------------------------------------------------- disconnected / demo exit
   await click('#connectBtn');
   await checkSoon('Exit demo shows connect screen', '!document.getElementById("veil").hidden');
@@ -1582,6 +1680,12 @@ async function run() {
   // ---------------------------------------------------------------- render cost sanity
   const t = await js(`(() => { const t0 = performance.now(); for (let i=0;i<20;i++){ __ui.sideSig=''; render(); } return new Promise(r => requestAnimationFrame(() => r(performance.now()-t0))); })()`);
   check('full render is fast', t < 120, t.toFixed(1) + ' ms');
+
+  // ---------------------------------------------------------------- the Activity drawer never opens at launch while dev tools are off
+  await js('localStorage.setItem("settings.drawerAtLaunch", "true"); localStorage.setItem("settings.devTools", "false")');
+  await reloadPage();
+  check('with Developer tools off, "Activity at launch" does not open the drawer', await js('!__ui.drawerOpen && !__devTools.on && !document.body.classList.contains("dev-tools")'));
+  await js('localStorage.removeItem("settings.drawerAtLaunch"); localStorage.removeItem("settings.devTools")');
 
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }

@@ -408,6 +408,10 @@ button, input, select { font: inherit; color: inherit; }
 .veil-card .row .btn { height: 34px; padding: 0 16px; }
 .veil-card .err { color: var(--danger); margin: -6px 0 14px; }
 
+/* ---------- developer tools ---------- */
+/* Settings → General → Advanced → Developer tools adds body.dev-tools; without it these are gone. */
+body:not(.dev-tools) .dev-only { display: none !important; }
+
 /* ---------- activity drawer + status bar ---------- */
 .drawer {
   grid-area: drawer;
