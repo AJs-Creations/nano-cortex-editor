@@ -2,6 +2,15 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Settings → About (version, links to the repository, the manual and the native macOS edition), a Help menu (Manual,
+  GitHub Repository, Report an Issue, Support the Project…), links to the manual on the connect screen, in the
+  shortcuts sheet and in connection errors, and a quiet "♥ Support" link in the status bar. Every link opens in
+  your browser.
+
 ## 1.0.0 — 2026-10-09
 
 First public release.

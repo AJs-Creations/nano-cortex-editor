@@ -66,7 +66,7 @@ on the pedal, and saves are permanent.
 
 The editor opens on the connect screen.
 
-![The connect screen: three steps (power on the pedal, make it visible, connect) and the Connect and Explore with demo data buttons](images/connect.png)
+![The connect screen: three steps (power on the pedal, make it visible, connect), the Connect and Explore with demo data buttons, and a Read the manual link](images/connect.png)
 
 1. **Power on the pedal** and quit Cortex Cloud on your phone (or turn off the phone's Bluetooth). **The pedal accepts
    only one Bluetooth connection at a time**; while the phone holds it, the editor cannot see the pedal.
@@ -74,6 +74,9 @@ The editor opens on the connect screen.
    up. After a plain disconnect from the editor it stays reachable without this.
 3. **Click Connect.** The app scans for a few seconds and picks your Nano Cortex automatically. If it can't tell which
    device is the pedal, it shows a list to choose from. No USB cable is needed.
+
+If the pedal doesn't show up or Bluetooth is off, the message on the connect screen has a **Troubleshooting** link to
+[section 15](#15-troubleshooting). **Read the manual** at the bottom opens this manual in your browser.
 
 Once connected, the editor reads the current preset, the preset list, the slots and the library. The status bar shows
 a green light and the pedal's name.
@@ -119,10 +122,14 @@ stage's **On** switch.
 
 ![The capture inspector: amp knobs, capture volume and the 25 capture slots on the pedal](images/inspector-capture.png)
 
-**Status bar** (bottom): connection state, the last action sent, and the **Settings**, **Shortcuts**, **Record** and
-**Activity** buttons.
+**Status bar** (bottom): connection state, the last action sent, and the **Settings**, **Shortcuts**, **Record**,
+**Activity** and **♥ Support** buttons. **♥ Support** opens the project's Buy Me a Coffee page in your browser; it's
+entirely optional.
 
-![The status bar: demo-mode indicator, the last action, and the Settings, Shortcuts, Record and Activity buttons](images/status-bar.png)
+![The status bar: demo-mode indicator, the last action, and the Settings, Shortcuts, Record, Activity and Support buttons](images/status-bar.png)
+
+**Help menu**: **Manual** (this page), **GitHub Repository**, **Report an Issue** and **Support the Project…**. Each
+opens in your default browser.
 
 ## 4. Presets
 
@@ -376,6 +383,11 @@ Open Settings with ⌘, (Ctrl+, on Windows), from the app menu, or with **Settin
 - **Raw settings** lists the other values the pedal reports, read-only.
 - **Read again** refreshes everything.
 
+**About** shows the app's version and who makes it, with links to the GitHub repository, this manual, the native
+macOS edition and **Buy me a coffee** (all open in your browser), plus the trademark note and the licence.
+
+![Settings, About tab: Nano Cortex Editor and its version, Made by AJs Creations, links, the trademark note and the licence](images/settings-about.png)
+
 ## 13. Session recording and the Activity log
 
 **Activity** in the status bar (⌘L) opens the Activity log: every Bluetooth message sent (TX) and received (RX), with
@@ -390,7 +402,8 @@ needed.
 
 ## 14. Keyboard shortcuts
 
-Press **?** (or **Shortcuts** in the status bar) for this list in the app. On Windows use Ctrl for ⌘.
+Press **?** (or **Shortcuts** in the status bar) for this list in the app; **Full manual…** at the bottom opens this
+manual. On Windows use Ctrl for ⌘.
 
 ![The keyboard shortcuts sheet](images/shortcuts.png)
 
@@ -479,6 +492,9 @@ resulting session to download a capture when you click **Send to Nano Cortex**.
 
 **What is View → Classic Editor?** The original community editor by DrD85 that this app's protocol layer comes from,
 kept as a fallback.
+
+**Can I support the project?** It's free and always will be. If this editor saves you time, you can
+[buy me a coffee](https://buymeacoffee.com/ajscreations).
 
 ## 17. Trademark note
 

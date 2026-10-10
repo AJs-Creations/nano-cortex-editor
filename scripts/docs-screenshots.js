@@ -191,6 +191,9 @@ async function run() {
   await js('void __openSettings("device")'); await sleep(350);
   await shot('settings-device', '.modal', 16);
   await key('Escape');
+  await js('void __openSettings("about")'); await sleep(250);
+  await shot('settings-about', '.modal', 16);
+  await key('Escape');
 
   // activity + shortcuts
   await key('l', [MOD]); await sleep(300); await hideToast();
