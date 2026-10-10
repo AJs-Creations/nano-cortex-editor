@@ -5,9 +5,9 @@
 | Your computer | Edition | What it is | Get it |
 |---|---|---|---|
 | **Mac** (macOS 14 or later) | [Nano Cortex Editor for Mac](https://github.com/AJs-Creations/nano-cortex-editor-mac) | Native SwiftUI app: smaller and faster, remembers and reconnects to the pedal, menu bar extra | [Download](https://github.com/AJs-Creations/nano-cortex-editor-mac/releases/latest) |
-| **Windows**, or macOS 12–13 | **You are here:** [Nano Cortex Editor](https://github.com/AJs-Creations/nano-cortex-editor) | Cross-platform (Electron) app, the same features and look on macOS and Windows | [Download](https://github.com/AJs-Creations/nano-cortex-editor/releases/latest) |
+| **Windows**, **Linux**, or macOS 12–13 | **You are here:** [Nano Cortex Editor](https://github.com/AJs-Creations/nano-cortex-editor) | Cross-platform (Electron) app, the same features and look on macOS, Windows and Linux | [Download](https://github.com/AJs-Creations/nano-cortex-editor/releases/latest) |
 
-An unofficial desktop editor for the Neural DSP Nano Cortex, for macOS and Windows. It connects to the pedal over
+An unofficial desktop editor for the Neural DSP Nano Cortex, for macOS, Windows and Linux. It connects to the pedal over
 Bluetooth and gives you a full-size editor: browse and manage your 64 presets, edit every block in the signal chain,
 load captures and IRs from the pedal's library, set up footswitches and the expression pedal, and tune or practise
 with the built-in tuner and metronome. A second tab opens the Cortex Cloud website, where you sign in with your own
@@ -34,7 +34,7 @@ whole editor on sample data.
 - **Captures and IRs from the pedal's library** (factory and your own) into any slot, with icons for the capture kind
   (amp head, combo, pedal, preamp, rack, cab…) and instrument; **Info…** shows author, tags and description, and a
   usage scan shows which presets use each slot.
-- **Save, Save as…, Rename, Delete and Discard**: edits are live; **Save** (⌘S / Ctrl+S) commits them.
+- **Save, Save as…, Rename, Delete and Discard**: edits are live; **Save** (⌘S, or Ctrl+S on Windows and Linux) commits them.
 - **Footswitch assignment** for the four 4-Preset-mode slots IA, IB, IIA and IIB.
 - **Expression pedal assignments** per preset: sweeps with heel and toe values and invert; block switches with
   heel-toe, switch or stop modes, delay, latch and invert.
@@ -42,7 +42,7 @@ whole editor on sample data.
 - **Tuner** with reference pitch and output mute.
 - **Metronome** with **Simple** and **Advanced** modes: time signatures, accents, subdivisions and swing, count-in,
   tempo trainer, gap trainer and **Levels**; it can follow the preset's tempo.
-- **Settings** (⌘, / Ctrl+,): accent colour, metronome defaults and click sounds, reconnect at launch, a
+- **Settings** (⌘, or Ctrl+,): accent colour, metronome defaults and click sounds, reconnect at launch, a
   **Device** page with the pedal's details, LED brightness and USB playback volume, and **About**.
 - **Cortex Cloud tab**: the Cortex Cloud website with your own login; on a capture's page, **Send to Nano Cortex**
   puts it in the pedal's library over Bluetooth.
@@ -60,6 +60,8 @@ Get the latest build from [GitHub Releases](https://github.com/AJs-Creations/nan
 | macOS, Apple Silicon (M1 and later) | `nano-cortex-editor-<version>-mac-arm64.dmg` (or `.zip`) |
 | macOS, Intel | `nano-cortex-editor-<version>-mac-x64.dmg` (or `.zip`) |
 | Windows 10/11, 64-bit | `nano-cortex-editor-<version>-win-x64.exe` (installer) or `…-win-x64-portable.exe` (runs without installing) |
+| Linux, x86-64 | `nano-cortex-editor-<version>-linux-x86_64.AppImage` (any distro) or `nano-cortex-editor_<version>_amd64.deb` (Debian, Ubuntu, Mint…) |
+| Linux, ARM 64-bit (Raspberry Pi 4/5 with a 64-bit OS) | `nano-cortex-editor-<version>-linux-arm64.AppImage` or `nano-cortex-editor_<version>_arm64.deb` |
 
 The builds are **not code-signed** (that needs paid developer certificates), so your system warns you the first time:
 
@@ -69,13 +71,19 @@ The builds are **not code-signed** (that needs paid developer certificates), so 
   Nano Cortex Editor.
 - **Windows**: run the installer or the portable `.exe`. When SmartScreen says "Windows protected your PC", click
   **More info → Run anyway**.
+- **Linux, AppImage**: make it executable and run it: `chmod +x nano-cortex-editor-*.AppImage`, then
+  `./nano-cortex-editor-*.AppImage` (or double-click it). Some distros need FUSE 2 first (`sudo apt install libfuse2t64` on
+  Ubuntu 24.04 and later, `libfuse2` on older Debian and Ubuntu).
+- **Linux, deb**: `sudo apt install ./nano-cortex-editor_<version>_amd64.deb` (or `_arm64.deb`); the app then
+  appears in your applications menu as **Nano Cortex Editor**.
 
 ## Requirements
 
 - A Nano Cortex. Tested with firmware **2.2.1**.
 - Bluetooth Low Energy (Bluetooth 4.0 or later) on your computer.
-- macOS 12 Monterey or later, or Windows 10/11 (64-bit). The Windows build has not been tested with a pedal yet;
-  please [report](https://github.com/AJs-Creations/nano-cortex-editor/issues) how it goes.
+- macOS 12 Monterey or later, Windows 10/11 (64-bit), or a 64-bit Linux desktop (x86-64 or ARM64) with BlueZ, the
+  standard Linux Bluetooth stack, and the `bluetooth` service running. The Windows and Linux builds have not been
+  tested with a pedal yet; please [report](https://github.com/AJs-Creations/nano-cortex-editor/issues) how it goes.
 - **The pedal accepts one Bluetooth connection at a time.** Quit the Cortex Cloud app on your phone (or turn off the
   phone's Bluetooth) before you connect.
 - **Back up your presets** in the official app before you save anything from here. Saves are permanent.
@@ -84,7 +92,7 @@ The builds are **not code-signed** (that needs paid developer certificates), so 
 
 [Nano Cortex Editor for Mac](https://github.com/AJs-Creations/nano-cortex-editor-mac) is a native SwiftUI version
 with the same features and look, plus a menu bar extra. Pick the native edition if you are on macOS 14 or later and
-want a smaller, Mac-only app; pick this one for Windows, for macOS 12–13, or to use the same app on both systems.
+want a smaller, Mac-only app; pick this one for Windows, Linux, macOS 12–13, or to use the same app on both systems.
 
 ## Manual
 
@@ -100,6 +108,7 @@ npm install
 npm start            # run the app from source
 npm run test:ux      # automated UX test on demo data (screenshots in test-output/)
 npm run dist         # unsigned macOS .dmg/.zip for Apple Silicon and Intel (run on a Mac)
+npm run dist:linux   # Linux AppImage and .deb for x64 and arm64 (run on Linux)
 ```
 
 Developer and protocol documentation lives in [docs/](docs/README.md); see [CONTRIBUTING.md](CONTRIBUTING.md) to
