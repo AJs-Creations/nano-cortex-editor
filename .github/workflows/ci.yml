@@ -1,0 +1,37 @@
+# Pull-request checks: regenerate the protocol layer and run the input-driven UX test on demo data.
+# The test drives a real Electron window with mouse, wheel and key events, so it runs on a macOS runner
+# (which has a window server); the screenshots are attached when it fails.
+name: CI
+
+on:
+  pull_request:
+    branches: [staging, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ux-test:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Syntax check
+        run: for f in src/*.js pro/*.js scripts/*.js test/*.js; do node --check "$f"; done
+      - name: UX test (demo data)
+        run: npm run test:ux
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ux-test-output
+          path: test-output/

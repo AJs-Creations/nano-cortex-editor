@@ -1,0 +1,103 @@
+# Builds the app for macOS (Apple Silicon + Intel) and Windows and publishes a GitHub Release with the installers.
+# Triggers: push a tag like v1.0.0, or run it by hand with an existing tag.
+# Release notes come from the matching "## <version>" section of CHANGELOG.md.
+# Builds are unsigned: on macOS right-click → Open the first time; on Windows SmartScreen asks for
+# "More info → Run anyway".
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --mac --arm64 --x64
+            name: macos
+          - os: windows-latest
+            args: --win --x64
+            name: windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:core
+      - name: Build icon (macOS only; the .icns and .png are also committed)
+        if: runner.os == 'macOS'
+        run: npm run build:icon
+      - name: Package
+        run: npx electron-builder ${{ matrix.args }} --publish never
+        env:
+          # Unsigned builds on purpose; no Apple Developer / code-signing certificate involved.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from CHANGELOG.md
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          awk -v v="$VER" '
+            /^## / { if (on) exit; if (index($0, "## " v) == 1) { on = 1; next } }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "Builds for macOS and Windows." > notes.md; fi
+          {
+            echo
+            echo "---"
+            echo "Builds are unsigned. macOS: right-click the app → Open the first time (or System Settings → Privacy & Security → Open Anyway). Windows: SmartScreen → More info → Run anyway."
+            echo
+            echo "Unofficial. Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or endorsed by Neural DSP."
+          } >> notes.md
+          cat notes.md
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          ls -la dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --title "Nano Cortex Editor ${TAG#v}" --notes-file notes.md --verify-tag
+          fi
+          gh release upload "$TAG" dist/*.dmg dist/*.zip dist/*.exe --clobber
