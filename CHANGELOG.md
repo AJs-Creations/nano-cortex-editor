@@ -2,9 +2,11 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.0.0 — 2026-10-10
 
-### Added
+First public release.
+
+### Help, About and support links
 
 - Settings → About (version, links to the repository, the manual and the native macOS edition), a Help menu (Manual,
   GitHub Repository, Report an Issue, Support the Project…), links to the manual on the connect screen, in the
@@ -17,10 +19,6 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
   it to the recordings folder) and closes the Activity drawer.
 - **Help → Show Log File**, for everyone: the Activity log is also written to `nano-cortex-editor.log` in the app's logs folder
   (the last ~2 MB plus one older file). The bug report template asks for it.
-
-## 1.0.0 — 2026-10-09
-
-First public release.
 
 ### Features
 
