@@ -11,11 +11,17 @@
 #        to that EXISTING release (gh release upload --clobber). It never creates a release, edits its notes or
 #        moves the tag. Used to add platforms or fixed builds to a release without a new version, e.g.
 #          gh workflow run release.yml --ref main -f release_tag=v1.0.0 -f platforms=mac,linux
-#    platforms: all | linux | mac,linux (default all).
+#    platforms: all | mac | linux | mac,linux (default all).
 #
-# Builds are unsigned (no certificates). macOS gets an ad-hoc signature for the whole bundle (mac.identity "-" in
-# package.json) so a downloaded copy opens with right-click → Open instead of being reported as damaged; the
-# macOS job checks that signature on the app inside each zip. Windows: SmartScreen → More info → Run anyway.
+# macOS signing: with the OP_SERVICE_ACCOUNT_TOKEN secret (a 1Password service account that reads only the vault
+# "Apple Signing"), the macOS job fetches the Developer ID certificate and the App Store Connect API key, and
+# electron-builder signs with "Developer ID Application: Anup Sebastian (272K9YT73Z)" under the hardened runtime
+# (entitlements in build/entitlements.mac*.plist), notarises and staples the app; the dmg is signed, notarised and
+# stapled here. Without the secret (forks, or anyone building from source) the build falls back to the ad-hoc
+# signature in package.json (mac.identity "-", no notarisation); a tag push or a release_tag run refuses to ship
+# that. The macOS job then checks the app inside each zip (and each dmg) the way a download sees it.
+# Windows and Linux builds are unsigned and never see the Apple credentials. Windows: SmartScreen → More info → Run
+# anyway.
 name: Release
 
 on:
@@ -30,7 +36,7 @@ on:
       platforms:
         description: 'Platforms to build'
         type: choice
-        options: ['all', 'linux', 'mac,linux']
+        options: ['all', 'mac', 'linux', 'mac,linux']
         default: 'all'
 
 permissions:
@@ -55,6 +61,7 @@ jobs:
           linux='{"os":"ubuntu-latest","args":"--linux --x64 --arm64","name":"linux"}'
           case "$PLATFORMS" in
             all) list="$mac,$win,$linux" ;;
+            mac) list="$mac" ;;
             linux) list="$linux" ;;
             mac,linux) list="$mac,$linux" ;;
             *) echo "Unknown platforms: $PLATFORMS"; exit 1 ;;
@@ -78,22 +85,130 @@ jobs:
       - name: Build icon (macOS only; the .icns and .png are also committed)
         if: runner.os == 'macOS'
         run: npm run build:icon
-      - name: Package
-        run: npx electron-builder ${{ matrix.args }} --publish never
-        env:
-          # No Apple Developer / code-signing certificate involved: macOS is signed ad hoc (mac.identity "-").
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-      - name: Check the macOS signature (the app inside each zip, as a download gets it)
+      # macOS signing credentials. Secrets can't be tested in `if:`, so this step decides and later steps follow it.
+      - name: Signing mode (macOS)
+        id: mode
         if: runner.os == 'macOS'
+        env:
+          HAS_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+          SHIPS: ${{ github.event_name == 'push' || inputs.release_tag != '' }}
+        run: |
+          if [ "$HAS_TOKEN" = true ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Developer ID signing and notarisation"
+          elif [ "$SHIPS" = true ]; then
+            echo "::error::OP_SERVICE_ACCOUNT_TOKEN is not set: refusing to publish an ad-hoc signed macOS build"
+            exit 1
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No signing credentials: ad-hoc signature only (dry run)"
+          fi
+      - name: Install the 1Password CLI
+        if: steps.mode.outputs.signed == 'true'
+        uses: 1password/install-cli-action@v1
+      - name: Fetch the Developer ID certificate and the App Store Connect API key; set up a signing keychain
+        if: steps.mode.outputs.signed == 'true'
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+        run: |
+          set -eo pipefail
+          d="$RUNNER_TEMP/apple-signing"
+          mkdir -p "$d" && chmod 700 "$d"
+          op document get "Apple Developer ID" --vault "Apple Signing" --out-file "$d/developer-id.p12"
+          op document get "App Store Connect API Key" --vault "Apple Signing" --out-file "$d/AuthKey.p8"
+          pass=$(op read "op://Apple Signing/Apple Developer ID/password");          echo "::add-mask::$pass"
+          team=$(op read "op://Apple Signing/Apple Developer ID/team id")
+          kid=$(op read "op://Apple Signing/App Store Connect API Key/key id");      echo "::add-mask::$kid"
+          issuer=$(op read "op://Apple Signing/App Store Connect API Key/issuer id"); echo "::add-mask::$issuer"
+          # Our own temporary keychain instead of CSC_LINK: electron-builder 26.15's keychain import passes the .p12
+          # password to `security set-key-partition-list` as the keychain password, which fails ("SecKeychainUnlock:
+          # The user name or passphrase you entered is not correct"). The keychain is added to the search list, so
+          # electron-builder finds the identity named on its command line there.
+          kc="$d/signing.keychain-db"
+          kcpass=$(openssl rand -base64 32); echo "::add-mask::$kcpass"
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$d/developer-id.p12" -k "$kc" -P "$pass" -T /usr/bin/codesign -T /usr/bin/productbuild
+          rm -f "$d/developer-id.p12"
+          # Apple's Developer ID intermediates, so codesign can build the chain (the .p12 may hold only the leaf).
+          for ca in DeveloperIDG2CA DeveloperIDCA; do
+            curl -fsSL "https://www.apple.com/certificateauthority/$ca.cer" -o "$d/$ca.cer"
+            security import "$d/$ca.cer" -k "$kc" || true
+          done
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$kc" | grep -F "Developer ID Application: Anup Sebastian ($team)"
+          {
+            echo "SIGNING_KEYCHAIN=$kc"
+            echo "APPLE_API_KEY=$d/AuthKey.p8"
+            echo "APPLE_API_KEY_ID=$kid"
+            echo "APPLE_API_ISSUER=$issuer"
+            echo "APPLE_TEAM_ID=$team"
+          } >> "$GITHUB_ENV"
+      - name: Package
+        shell: bash
+        env:
+          # Never pick up an identity from the runner's keychains; the identity is named explicitly below.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+          SIGNED: ${{ steps.mode.outputs.signed }}
+        run: |
+          if [ "$SIGNED" = true ]; then
+            # Developer ID + hardened runtime + notarisation (electron-builder notarises and staples the .app before
+            # it builds the zip and the dmg). package.json keeps the ad-hoc defaults for everyone else.
+            npx electron-builder ${{ matrix.args }} --publish never "-c.mac.identity=Anup Sebastian ($APPLE_TEAM_ID)" \
+              -c.mac.hardenedRuntime=true -c.mac.notarize=true -c.dmg.sign=true
+          else
+            npx electron-builder ${{ matrix.args }} --publish never
+          fi
+      - name: Notarise and staple the dmgs
+        if: steps.mode.outputs.signed == 'true'
         run: |
           set -e
+          for f in dist/*-mac-*.dmg; do
+            xcrun notarytool submit "$f" --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait --timeout 30m
+            xcrun stapler staple "$f"
+          done
+      - name: Check the macOS signature (the app inside each zip and dmg, as a download gets it)
+        if: runner.os == 'macOS'
+        env:
+          SIGNED: ${{ steps.mode.outputs.signed }}
+        run: |
+          set -e
+          check_app() {
+            codesign --verify --deep --strict --verbose=2 "$1"
+            if [ "$SIGNED" = true ]; then
+              codesign -dvv "$1" 2>&1 | grep -F 'Authority=Developer ID Application: Anup Sebastian (272K9YT73Z)'
+              codesign -dv "$1" 2>&1 | grep -E 'flags=.*runtime'
+              spctl -a -vv -t execute "$1" 2>&1 | tee /dev/stderr | grep -F 'source=Notarized Developer ID'
+              xcrun stapler validate "$1"
+            else
+              codesign -dv "$1" 2>&1 | grep -E 'Signature=adhoc'
+            fi
+          }
           for z in dist/*-mac-*.zip; do
             d=$(mktemp -d)
             ditto -x -k "$z" "$d"
-            codesign --verify --deep --strict --verbose=2 "$d/Nano Cortex Editor.app"
-            codesign -dv "$d/Nano Cortex Editor.app" 2>&1 | grep -E 'Signature=adhoc'
-            echo "$z: ad-hoc signature verifies"
+            check_app "$d/Nano Cortex Editor.app"
+            echo "$z: OK"
           done
+          for g in dist/*-mac-*.dmg; do
+            if [ "$SIGNED" = true ]; then
+              spctl -a -vv -t open --context context:primary-signature "$g" 2>&1 | tee /dev/stderr | grep -F 'source=Notarized Developer ID'
+              xcrun stapler validate "$g"
+            fi
+            m=$(mktemp -d); c=$(mktemp -d)
+            hdiutil attach -nobrowse -readonly -mountpoint "$m" "$g" >/dev/null
+            ditto "$m/Nano Cortex Editor.app" "$c/Nano Cortex Editor.app"
+            hdiutil detach "$m" >/dev/null
+            check_app "$c/Nano Cortex Editor.app"
+            echo "$g: OK"
+          done
+      - name: Remove the signing files
+        if: always() && runner.os == 'macOS'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/apple-signing/signing.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/apple-signing"
       - name: List the files
         shell: bash
         run: ls -la dist
@@ -131,7 +246,7 @@ jobs:
           {
             echo
             echo "---"
-            echo "Builds are unsigned. macOS: right-click the app → Open the first time (or System Settings → Privacy & Security → Open Anyway). Windows: SmartScreen → More info → Run anyway. Linux: make the AppImage executable (chmod +x; some distros also need libfuse2), or install the deb with sudo apt install ./file.deb."
+            echo "macOS builds are signed with a Developer ID and notarised by Apple: drag the app to Applications and open it. Windows builds are unsigned: SmartScreen → More info → Run anyway. Linux: make the AppImage executable (chmod +x; some distros also need libfuse2), or install the deb with sudo apt install ./file.deb."
             echo
             echo "Unofficial. Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or endorsed by Neural DSP."
             echo
