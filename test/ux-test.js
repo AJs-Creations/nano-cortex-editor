@@ -280,11 +280,12 @@ async function run() {
   await click('[data-stage="pre1"] .stomp');
   check('stomp click toggles without selecting', (await js('__ui.selected')) === 'post3' && (await txSince(n0)).some(t => /Pre FX 1/.test(t)), JSON.stringify(await txSince(n0)));
   await click('[data-stage="pre1"] .stomp'); // put it back
+  await sleep(200); // let that write leave the queue first (slow CI runners log it late)
   // stomp on an empty slot: selects it and explains
   n0 = await txCount();
   await click('[data-stage="post1"] .stomp');
   check('stomp on empty slot selects it', (await js('__ui.selected')) === 'post1');
-  check('stomp on empty slot explains, sends nothing', (await js('document.getElementById("toast").textContent')).includes('Choose an effect') && (await txSince(n0)).length === 0);
+  check('stomp on empty slot explains, sends nothing', (await js('document.getElementById("toast").textContent')).includes('Choose an effect') && (await txSince(n0)).length === 0, (await js('document.getElementById("toast").textContent')) + ' ' + JSON.stringify(await txSince(n0)));
   await key('8');
   // set a slot to None
   await key('2');
