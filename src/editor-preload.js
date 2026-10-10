@@ -12,5 +12,6 @@ contextBridge.exposeInMainWorld('nanoShell', {
   forgetPedal: () => ipcRenderer.invoke('forget-pedal'),
   revealRecordings: () => ipcRenderer.invoke('reveal-recordings'),
   autoConnect: () => ipcRenderer.invoke('auto-connect'),
+  openExternal: (url) => ipcRenderer.invoke('open-external', String(url)),
   onOpenSettings: (fn) => ipcRenderer.on('open-settings', () => fn()),
 });

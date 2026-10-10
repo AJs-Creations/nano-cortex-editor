@@ -105,6 +105,7 @@
     connText: 'Not connected',
     connecting: false,
     connectError: '',
+    connectHelp: false,   // the error has a Troubleshooting link (pedal not found, Bluetooth off)
     filter: '',
     drawerOpen: false,
     editing: false,       // an inline value editor is open
@@ -164,6 +165,19 @@
   }
   applyAccent(pref.get('accent', ACCENTS[0].hex));
   window.__accent = { ACCENTS, set: setAccent };
+
+  // Outside links (pro/links.js) always open in the default browser: through the shell when there is one,
+  // otherwise as a new window, which the desktop shell (and the UX test) hand to the system instead.
+  const LINKS = window.NANO_LINKS || {};
+  function openLink(url) {
+    if (!/^https:\/\//.test(url || '')) return;
+    if (shellBridge && shellBridge.openExternal) shellBridge.openExternal(url).catch(() => {});
+    else window.open(url, '_blank', 'noopener');
+  }
+  // A quiet text link: real href (so it reads as a link), opened by openLink.
+  const linkEl = (url, label, fk, extra = {}) => el('a', { class: 'ext-link', href: url, dataset: { fk }, ...extra,
+    onclick: (e) => { e.preventDefault(); openLink(url); } }, label);
+  window.__openLink = openLink;
 
   // ------------------------------------------------------------------ chain model
   const STAGES = [
@@ -1582,7 +1596,7 @@
       ui.lastTxLabel = label;
     }
     if (rec.on) rec.lines.push({ t: Date.now() - rec.started, text });
-    if (/^Connect failed:/.test(text)) ui.connectError = friendlyConnectError(text.replace(/^Connect failed:\s*/, ''));
+    if (/^Connect failed:/.test(text)) { ui.connectError = friendlyConnectError(text.replace(/^Connect failed:\s*/, '')); ui.connectHelp = /show(ed)? up|Bluetooth is off/.test(ui.connectError); }
     if (ui.drawerOpen) renderLog();
     renderStatusSoon();
     console.log(text);
@@ -2691,10 +2705,11 @@
         el('li', {}, el('b', { text: 'Make it visible.' }), ' After a power-up, hold ', kbd('EXIT'), ' + ', kbd('CAPTURE'), ' for a second until the Gain ring lights up. After a plain disconnect it stays reachable.'),
         el('li', {}, el('b', { text: 'Connect.' }), ' Allow Bluetooth if your Mac asks; the app picks the pedal by itself.'))
         : el('p', { text: 'This window can’t reach Bluetooth devices. You can still explore the editor with demo data.' }),
-      ui.connectError ? el('p', { class: 'err', text: ui.connectError }) : null,
+      ui.connectError ? el('p', { class: 'err' }, ui.connectError, ui.connectHelp ? [' ', linkEl(LINKS.troubleshooting, 'Troubleshooting', 'veil-troubleshoot')] : null) : null,
       el('div', { class: 'row' },
         bt ? el('button', { class: 'btn primary', disabled: busy, onclick: doConnect, dataset: { fk: 'veil-connect' } }, busy ? 'Connecting…' : 'Connect') : null,
-        el('button', { class: 'btn' + (bt ? '' : ' primary'), onclick: () => demo.start(), dataset: { fk: 'veil-demo' } }, 'Explore with demo data'))));
+        el('button', { class: 'btn' + (bt ? '' : ' primary'), onclick: () => demo.start(), dataset: { fk: 'veil-demo' } }, 'Explore with demo data')),
+      el('p', { class: 'veil-help' }, 'New here? ', linkEl(LINKS.manual, 'Read the manual', 'veil-manual'))));
   }
 
   const renderStatusSoon = debounce(() => renderStatus(), 60);
@@ -2800,7 +2815,8 @@
     ];
     modal({
       title: 'Keyboard shortcuts', wide: true,
-      content: el('div', { class: 'keys' }, rows.flatMap(([k, d]) => [el('kbd', { text: k }), el('span', { text: d })])),
+      content: el('div', {}, el('div', { class: 'keys' }, rows.flatMap(([k, d]) => [el('kbd', { text: k }), el('span', { text: d })])),
+        el('p', { class: 'keys-foot' }, linkEl(LINKS.manual, 'Full manual\u2026', 'keys-manual'))),
       buttons: [{ id: 'ok', label: 'Done', primary: true }],
     });
   }
@@ -3056,7 +3072,7 @@
   const setRow = (label, ...ctl) => el('div', { class: 'set-row' }, el('span', { class: 'set-label', text: label }), el('div', { class: 'set-ctl' }, ...ctl));
   const setNote = (text, fk) => el('p', { class: 'set-note', text, dataset: fk ? { fk } : null });
 
-  // tab: 'general' (default) or 'device'.
+  // tab: 'general' (default), 'device' or 'about'.
   async function openSettings(tab) {
     if (settingsOpen) return;
     if (document.querySelector('.modal-bg')) return;   // another dialog is up
@@ -3159,23 +3175,40 @@
         setRow('', drawerAtLaunch),
         setRow('Recordings', reveal, el('span', { class: 'set-unit', text: shellInfo ? shellInfo.recordingsDir : desktopOnly }))));
 
-    // Tabs: General (the sections above) and Device (the pedal's own settings, read when the tab opens).
+    // About: who made it, where it lives, and the quiet support link. Every link opens in the browser.
+    const version = (shellInfo && shellInfo.version) || LINKS.version || '';
+    const about = el('div', { class: 'about-page', dataset: { fk: 'about-page' } },
+      el('section', {},
+        el('div', { class: 'about-name' }, 'Nano Cortex Editor ', el('span', { class: 'about-ver', text: version, dataset: { fk: 'about-version' } })),
+        setNote('Made by AJs Creations. Unofficial, free and open source.')),
+      el('section', {}, el('h3', { text: 'Links' }),
+        el('ul', { class: 'about-links' },
+          el('li', {}, linkEl(LINKS.repo, 'GitHub repository', 'about-repo')),
+          el('li', {}, linkEl(LINKS.manual, 'Manual', 'about-manual')),
+          el('li', {}, linkEl(LINKS.mac, 'Native macOS edition', 'about-mac')),
+          el('li', {}, linkEl(LINKS.support, 'Buy me a coffee', 'about-support')))),
+      el('section', {},
+        setNote('Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or endorsed by Neural DSP.', 'about-trademark'),
+        setNote('MIT licence, \u00a9 2026 AJs Creations. The Bluetooth protocol layer comes from the community Nano Cortex Editor by DrD85 and nano-cortex-web-editor by choldy (both MIT).', 'about-license')));
+
+    // Tabs: General (the sections above), Device (the pedal's own settings, read when the tab opens) and About.
     let devPage = null;
-    const panes = el('div', { class: 'settings-panes' }, general);
+    const panes = el('div', { class: 'settings-panes' }, general, about);
     const tabs = el('div', { class: 'seg settings-tabs', role: 'tablist', 'aria-label': 'Settings' });
     const showTab = (id) => {
       for (const b of tabs.children) { const on = b.dataset.tab === id; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); }
       general.hidden = id !== 'general';
+      about.hidden = id !== 'about';
       if (id === 'device') { if (!devPage) panes.append(devPage = devicePage()); else readDevice(); }
       if (devPage) devPage.hidden = id !== 'device';
     };
-    tabs.append(...[['general', 'General'], ['device', 'Device']].map(([id, label]) =>
+    tabs.append(...[['general', 'General'], ['device', 'Device'], ['about', 'About']].map(([id, label]) =>
       el('button', { role: 'tab', 'aria-selected': 'false', dataset: { tab: id, fk: 'set-tab-' + id }, onclick: () => showTab(id) }, label)));
-    showTab(tab === 'device' ? 'device' : 'general');
+    showTab(tab === 'device' || tab === 'about' ? tab : 'general');
     const content = el('div', { class: 'settings-body' }, tabs, panes);
     await modal({
       title: 'Settings', wide: true, cls: 'settings-modal', content, enterSubmits: false,
-      focus: tab === 'device' ? tabs.lastChild : swatches.querySelector('.on'),
+      focus: tab === 'device' || tab === 'about' ? tabs.querySelector('[data-tab="' + tab + '"]') : swatches.querySelector('.on'),
       buttons: [{ id: 'ok', label: 'Done', primary: true }],
     });
     dev.redraw = null;
@@ -3260,7 +3293,8 @@
   $('saveAsBtn').addEventListener('click', () => doSaveAs());
   $('drawerBtn').addEventListener('click', toggleDrawer);
   $('keysBtn').addEventListener('click', showShortcuts);
-  $('settingsBtn').addEventListener('click', openSettings);
+  $('settingsBtn').addEventListener('click', () => openSettings());
+  $('supportBtn').addEventListener('click', () => openLink(LINKS.support));
   $('renameBtn').addEventListener('click', doRename);
   $('tunerBtn').addEventListener('click', toggleTuner);
   $('presetFilter').addEventListener('input', (e) => { ui.filter = e.target.value; renderSide(); });

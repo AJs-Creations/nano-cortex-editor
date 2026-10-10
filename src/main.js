@@ -13,6 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
 const { renderAccentIcon, normHex, DEFAULT_ACCENT } = require('./accent-icon');
+const LINKS = require('../pro/links');   // repo, manual, issues, support: the same constants the editor page uses
 
 // Capture pages live under /cloud/discover/… and under pack pages like /cloud/<pack>/…
 const CAPTURE_PAGE = /\/neural-capture\/view\/([0-9a-f-]{36})/i;
@@ -49,7 +50,8 @@ app.setAboutPanelOptions({
   applicationVersion: app.getVersion(),
   version: '',
   copyright: '© 2026 AJs Creations, MIT licence. Unofficial; not affiliated with or endorsed by Neural DSP.',
-  credits: 'Protocol layer from the community Nano Cortex Editor (DrD85, MIT) and nano-cortex-web-editor (choldy, MIT). IBM Plex Sans (OFL).',
+  credits: 'Protocol layer from the community Nano Cortex Editor (DrD85, MIT) and nano-cortex-web-editor (choldy, MIT). IBM Plex Sans (OFL).\n'
+    + 'If this editor saves you time, you can buy me a coffee: ' + LINKS.support,
   iconPath: path.join(__dirname, '..', 'pro', 'assets', 'icon-512.png'),
 });
 
@@ -329,8 +331,19 @@ ipcMain.on('editor-reload', () => editor.webContents.reload());
 const fromEditor = (e) => editor && e.sender === editor.webContents;
 ipcMain.handle('settings-get', (e) => (fromEditor(e) ? {
   platform: process.platform, accent: shellSettings.accent, dockFollowsAccent: shellSettings.dockFollowsAccent,
-  pedal: shellSettings.pedal, recordingsDir: recordingsDir(),
+  pedal: shellSettings.pedal, recordingsDir: recordingsDir(), version: app.getVersion(),
 } : null));
+// Outside links from the editor page (manual, repo, support): only our own known https links, always in the
+// default browser.
+const OUTSIDE_HOSTS = new Set(['github.com', 'buymeacoffee.com']);
+function openOutside(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:' && OUTSIDE_HOSTS.has(u.hostname)) { shell.openExternal(u.href); return true; }
+  } catch { /* not a URL */ }
+  return false;
+}
+ipcMain.handle('open-external', (e, url) => (fromEditor(e) ? openOutside(String(url)) : false));
 ipcMain.handle('set-accent', async (e, hex, follow) => {
   if (!fromEditor(e)) return null;
   const accent = normHex(hex);
@@ -464,7 +477,17 @@ function buildMenu() {
         { role: 'togglefullscreen' }
       ]
     },
-    { role: 'windowMenu' }
+    { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [
+        { label: 'Manual', click: () => shell.openExternal(LINKS.manual) },
+        { label: 'GitHub Repository', click: () => shell.openExternal(LINKS.repo) },
+        { label: 'Report an Issue', click: () => shell.openExternal(LINKS.issues) },
+        { type: 'separator' },
+        { label: 'Support the Project\u2026', click: () => shell.openExternal(LINKS.support) },
+      ],
+    },
   ]));
 }
 

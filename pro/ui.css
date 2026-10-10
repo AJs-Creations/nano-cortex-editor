@@ -499,7 +499,7 @@ button, input, select { font: inherit; color: inherit; }
 /* phone-width: keep the header to one row */
 @media (max-width: 600px) {
   .head { gap: 6px; padding: 0 10px; }
-  #refreshBtn, #renameBtn, #saveAsBtn, #tunerBtn, #metroBtn, .btn kbd, .dirty-mark, .preset-title .num, #keysBtn { display: none; }
+  #refreshBtn, #renameBtn, #saveAsBtn, #tunerBtn, #metroBtn, .btn kbd, .dirty-mark, .preset-title .num, #keysBtn, #supportBtn { display: none; }
   .btn { padding: 0 10px; }
   .status .grow, #pcText { display: none; }
   .status { justify-content: space-between; }
@@ -749,3 +749,20 @@ button, input, select { font: inherit; color: inherit; }
 .cap-hash { display: flex; align-items: center; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); font-size: 12px; }
 .cap-hash .k { color: var(--faint); }
 .cap-hash .v { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; user-select: text; }
+
+/* ---------- outside links (manual, repo, support): quiet text links, no accent; they open in the browser ---------- */
+.ext-link { color: var(--dim); text-decoration: underline; text-decoration-color: var(--faint); text-underline-offset: 2px; cursor: pointer; }
+.ext-link:hover { color: var(--text); text-decoration-color: var(--dim); }
+.ext-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+.veil-card .veil-help { margin: 18px 0 0; font-size: 12px; color: var(--faint); }
+.veil-card .err .ext-link { color: inherit; text-decoration-color: currentColor; }
+.keys-foot { margin: -6px 0 16px !important; font-size: 12px; }
+.about-page { overflow-y: auto; min-height: 0; margin: 4px -4px 16px; padding: 0 4px; }
+.about-page[hidden] { display: none; }
+.about-page section { padding: 12px 0 10px; border-top: 1px solid var(--line-soft); }
+.about-page section:first-child { border-top: 0; padding-top: 4px; }
+.about-page h3 { margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--label); }
+.about-page .set-note { display: block; margin: 0 0 6px; }
+.about-name { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
+.about-ver { color: var(--dim); font-weight: 400; }
+.about-links { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
