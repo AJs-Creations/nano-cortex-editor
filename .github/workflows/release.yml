@@ -106,7 +106,7 @@ jobs:
       - name: Install the 1Password CLI
         if: steps.mode.outputs.signed == 'true'
         uses: 1password/install-cli-action@v1
-      - name: Fetch the Developer ID certificate and the App Store Connect API key
+      - name: Fetch the Developer ID certificate and the App Store Connect API key; set up a signing keychain
         if: steps.mode.outputs.signed == 'true'
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
@@ -120,9 +120,27 @@ jobs:
           team=$(op read "op://Apple Signing/Apple Developer ID/team id")
           kid=$(op read "op://Apple Signing/App Store Connect API Key/key id");      echo "::add-mask::$kid"
           issuer=$(op read "op://Apple Signing/App Store Connect API Key/issuer id"); echo "::add-mask::$issuer"
+          # Our own temporary keychain instead of CSC_LINK: electron-builder 26.15's keychain import passes the .p12
+          # password to `security set-key-partition-list` as the keychain password, which fails ("SecKeychainUnlock:
+          # The user name or passphrase you entered is not correct"). The keychain is added to the search list, so
+          # electron-builder finds the identity named on its command line there.
+          kc="$d/signing.keychain-db"
+          kcpass=$(openssl rand -base64 32); echo "::add-mask::$kcpass"
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          security import "$d/developer-id.p12" -k "$kc" -P "$pass" -T /usr/bin/codesign -T /usr/bin/productbuild
+          rm -f "$d/developer-id.p12"
+          # Apple's Developer ID intermediates, so codesign can build the chain (the .p12 may hold only the leaf).
+          for ca in DeveloperIDG2CA DeveloperIDCA; do
+            curl -fsSL "https://www.apple.com/certificateauthority/$ca.cer" -o "$d/$ca.cer"
+            security import "$d/$ca.cer" -k "$kc" || true
+          done
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$kc" | grep -F "Developer ID Application: Anup Sebastian ($team)"
           {
-            echo "CSC_LINK=$d/developer-id.p12"
-            echo "CSC_KEY_PASSWORD=$pass"
+            echo "SIGNING_KEYCHAIN=$kc"
             echo "APPLE_API_KEY=$d/AuthKey.p8"
             echo "APPLE_API_KEY_ID=$kid"
             echo "APPLE_API_ISSUER=$issuer"
@@ -188,7 +206,9 @@ jobs:
           done
       - name: Remove the signing files
         if: always() && runner.os == 'macOS'
-        run: rm -rf "$RUNNER_TEMP/apple-signing"
+        run: |
+          security delete-keychain "$RUNNER_TEMP/apple-signing/signing.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/apple-signing"
       - name: List the files
         shell: bash
         run: ls -la dist
