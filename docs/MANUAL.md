@@ -122,14 +122,15 @@ stage's **On** switch.
 
 ![The capture inspector: amp knobs, capture volume and the 25 capture slots on the pedal](images/inspector-capture.png)
 
-**Status bar** (bottom): connection state, the last action sent, and the **Settings**, **Shortcuts**, **Record**,
-**Activity** and **♥ Support** buttons. **♥ Support** opens the project's Buy Me a Coffee page in your browser; it's
-entirely optional.
+**Status bar** (bottom): connection state, progress of longer actions (saving, scans, capture transfers), and the
+**Settings**, **Shortcuts** and **♥ Support** buttons. **♥ Support** opens the project's Buy Me a Coffee page in your
+browser; it's entirely optional. With [Developer tools](#developer-tools) on, the status bar also shows the last
+message sent and the **Record** and **Activity** buttons.
 
-![The status bar: demo-mode indicator, the last action, and the Settings, Shortcuts, Record, Activity and Support buttons](images/status-bar.png)
+![The status bar: demo-mode indicator and the Settings, Shortcuts and Support buttons](images/status-bar.png)
 
-**Help menu**: **Manual** (this page), **GitHub Repository**, **Report an Issue** and **Support the Project…**. Each
-opens in your default browser.
+**Help menu**: **Manual** (this page), **GitHub Repository**, **Report an Issue**, **Show Log File** (see
+[Troubleshooting](#15-troubleshooting)) and **Support the Project…**. The links open in your default browser.
 
 ## 4. Presets
 
@@ -221,10 +222,10 @@ Right-click a slot for **Load**, **Put a library capture in slot N…** and **In
 
 ![The capture slot menu: Put a library capture in slot 3… and Info…](images/slot-menu.png)
 
-**Info…** asks the pedal for the capture's details: author, kind and instrument, tags, description and its hash
-(**Copy** puts the full hash on the clipboard).
+**Info…** asks the pedal for the capture's details: author, kind and instrument, tags and description. With
+[Developer tools](#developer-tools) on it also shows the capture's hash (**Copy** puts the full hash on the clipboard).
 
-![Capture info: Capture 1C, JP2C Ch3 by Neural DSP, combo and guitar icons, tags, description and hash](images/capture-info.png)
+![Capture info: Capture 1C, JP2C Ch3 by Neural DSP, combo and guitar icons, tags and description](images/capture-info.png)
 
 When a preset plays a capture straight from the library rather than from a slot, the node and inspector say
 "From the library: *name*".
@@ -371,16 +372,32 @@ Open Settings with ⌘, (Ctrl+, on Windows), from the app menu, or with **Settin
   **Follow the preset tempo**, beats per bar, which mode the panel **Opens in**, and the Advanced defaults (pattern,
   subdivision, count-in and the three levels).
 - **Connection**: **Reconnect to the last pedal at launch** and **Forget pedal**.
-- **Advanced**: **Show the Activity drawer at launch** and **Show recordings folder**.
+- **Advanced**: **Developer tools** (below). With it on, also **Show the Activity drawer at launch** and **Show
+  recordings folder**.
+
+<a id="developer-tools"></a>
+**Developer tools** (Settings → General → Advanced, off by default): "Shows the Activity log, session recording and
+protocol details. For troubleshooting and development." Turning it on adds, straight away:
+
+- **Record** and **Activity** in the status bar, the Activity drawer and its shortcut ⌘L
+  ([section 13](#13-session-recording-and-the-activity-log)), and the last message sent ("Sent: …") in the status bar;
+- **Show the Activity drawer at launch** and **Show recordings folder** in Settings;
+- the device **Hash** and **Raw settings** on the Device tab, and the capture hash in **Info…**;
+- **View → Classic Editor**, **View → Reload Current** (⌘R) and **View → Developer Tools** in the menu.
+
+Turning it off hides them again, stops a recording in progress (it is saved to the recordings folder without asking) and
+closes the Activity drawer. The log file (**Help → Show Log File**) is written either way.
+
+![Settings, General tab scrolled to Advanced: the Developer tools switch, off, with its description](images/settings-advanced.png)
 
 **Device** reads the pedal's own settings each time you open it.
 
-![Settings, Device tab: name, firmware, serial and hash, LED brightness, USB playback volume and Raw settings](images/settings-device.png)
+![Settings, Device tab: name, firmware and serial, LED brightness and USB playback volume](images/settings-device.png)
 
-- **About**: the pedal's name, firmware, serial number and device hash.
+- **About**: the pedal's name, firmware and serial number (and, with Developer tools on, the device hash).
 - **LED brightness** (the manual's default is 60 %) and **USB playback volume** (audio from the computer over USB,
   default −6.0 dB). These are global settings: they apply on the pedal right away, not per preset.
-- **Raw settings** lists the other values the pedal reports, read-only.
+- **Raw settings** (Developer tools only) lists the other values the pedal reports, read-only.
 - **Read again** refreshes everything.
 
 **About** shows the app's version and who makes it, with links to the GitHub repository, this manual, the native
@@ -390,10 +407,13 @@ macOS edition and **Buy me a coffee** (all open in your browser), plus the trade
 
 ## 13. Session recording and the Activity log
 
+Both need [Developer tools](#developer-tools) (Settings → General → Advanced). The same log is always written to a
+file, with or without them: **Help → Show Log File**.
+
 **Activity** in the status bar (⌘L) opens the Activity log: every Bluetooth message sent (TX) and received (RX), with
 a plain-language line for each one the editor understands.
 
-![The Activity drawer with timestamped TX and RX lines above the status bar](images/activity.png)
+![The Activity drawer with timestamped TX and RX lines above the status bar (taken with Developer tools on)](images/activity.png)
 
 **Record** in the status bar captures every packet in both directions, with timestamps and the log. Click it again to
 stop; the app asks where to save the JSON file (your Downloads folder by default). Recordings help with bug reports,
@@ -421,13 +441,14 @@ manual. On Windows use Ctrl for ⌘.
 | E | Expression pedal assignments |
 | M | Change the effect in the selected slot |
 | ⌘F | Filter presets |
-| ⌘L | Show Bluetooth activity |
+| ⌘L | Show Bluetooth activity (Developer tools only) |
+| Record | In the status bar: record every packet, then save it as JSON (Developer tools only) |
 | T | Tuner (Esc closes it) |
 | N | Metronome (Space starts and stops it) |
 | Drag, scroll, arrows | Adjust a knob; hold Shift for fine control |
 | Double-click a knob | Reset it |
 | Click a value | Type an exact value |
-| ⌘R | Reload the current tab |
+| ⌘R | Reload the current tab (Developer tools only) |
 
 ## 15. Troubleshooting
 
@@ -453,7 +474,7 @@ Applications → **Open**, or use **System Settings → Privacy & Security → O
 **Windows: SmartScreen blocks the app.** Click **More info → Run anyway**.
 
 **Something on screen doesn't match the pedal.** Click **Refresh** in the header to re-read everything. If the problem
-stays, open the Activity log (⌘L) and include the relevant lines in a bug report.
+stays, choose **Help → Show Log File** and attach `activity.log` to a bug report.
 
 **Reconnect at launch doesn't find the pedal.** The pedal needs to be on and visible before the app starts; otherwise
 click **Connect** once it is.
@@ -462,7 +483,11 @@ click **Connect** once it is.
 trainer isn't in a muted bar.
 
 **Reporting a bug.** Open an [issue](https://github.com/AJs-Creations/nano-cortex-editor/issues) with your system,
-the app version (About), the pedal's firmware (Settings → Device) and an Activity log excerpt.
+the app version (About), the pedal's firmware (Settings → Device), and the log file: reproduce the problem, choose
+**Help → Show Log File** and attach `activity.log` (macOS: `~/Library/Logs/Nano Cortex Editor/`; Windows: the app's
+`logs` folder under `%APPDATA%`). It holds the last ~2 MB of activity (plus one older file, `activity.1.log`) and
+includes the pedal's serial number; remove anything you don't want to share. For developers: turn on
+[Developer tools](#developer-tools) for the live Activity drawer and session recording.
 
 ## 16. FAQ
 
@@ -491,7 +516,7 @@ resulting session to download a capture when you click **Send to Nano Cortex**.
 [Nano Cortex Editor for Mac](https://github.com/AJs-Creations/nano-cortex-editor-mac), with the same features.
 
 **What is View → Classic Editor?** The original community editor by DrD85 that this app's protocol layer comes from,
-kept as a fallback.
+kept as a fallback. It is in the View menu while [Developer tools](#developer-tools) are on.
 
 **Can I support the project?** It's free and always will be. If this editor saves you time, you can
 [buy me a coffee](https://buymeacoffee.com/ajscreations).

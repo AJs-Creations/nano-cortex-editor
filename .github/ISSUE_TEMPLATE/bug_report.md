@@ -22,13 +22,10 @@ A clear description of the problem.
 - Pedal firmware (Settings → Device → Firmware):
 - Connected to a pedal, or demo mode?
 
-**Activity log excerpt**
-Open the Activity log (⌘L / Ctrl+L), reproduce the problem, and paste the relevant lines here. Remove anything you
-don't want to share (the Device info line shows the pedal's serial number).
-
-```
-paste here
-```
+**Log file**
+Reproduce the problem, then choose **Help → Show Log File** and attach `activity.log` here (drag it into this box).
+Remove anything you don't want to share first (the Device info lines show the pedal's serial number). If you have
+Developer tools on (Settings → General → Advanced), pasting the relevant Activity lines (⌘L / Ctrl+L) works too.
 
 **Screenshots**
 If useful. Please don't post screenshots of other people's content from Cortex Cloud.

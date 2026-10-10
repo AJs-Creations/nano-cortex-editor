@@ -10,6 +10,13 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
   GitHub Repository, Report an Issue, Support the Project…), links to the manual on the connect screen, in the
   shortcuts sheet and in connection errors, and a quiet "♥ Support" link in the status bar. Every link opens in
   your browser.
+- Settings → General → Advanced → **Developer tools** (off by default). It shows the Activity log, session recording
+  and protocol details: Record and Activity in the status bar, ⌘L, the "Sent: …" status text, Activity at launch,
+  Raw settings and the device and capture hashes, and View → Classic Editor, Reload Current and Developer Tools.
+  Everything appears and disappears at once when you flip it; turning it off stops a recording in progress (saving
+  it to the recordings folder) and closes the Activity drawer.
+- **Help → Show Log File**, for everyone: the Activity log is also written to `activity.log` in the app's logs folder
+  (the last ~2 MB plus one older file). The bug report template asks for it.
 
 ## 1.0.0 — 2026-10-09
 

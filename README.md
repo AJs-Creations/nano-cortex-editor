@@ -39,7 +39,8 @@ whole editor on sample data.
   **Device** page with the pedal's details, LED brightness and USB playback volume, and **About**.
 - **Cortex Cloud tab**: the Cortex Cloud website with your own login; on a capture's page, **Send to Nano Cortex**
   puts it in the pedal's library over Bluetooth.
-- **Activity log and session recording** of the Bluetooth traffic, for troubleshooting.
+- **A log file for bug reports** (Help → Show Log File), and for developers an Activity log and session recording of
+  the Bluetooth traffic (Settings → Developer tools).
 - **Keyboard shortcuts** for everything common (press `?` in the app).
 - **Demo mode**: try every feature without a pedal.
 
@@ -102,7 +103,7 @@ help out and [CHANGELOG.md](CHANGELOG.md) for what changed.
 The Bluetooth protocol layer comes from the community
 [Nano Cortex Editor by DrD85](https://github.com/DrD85/nano-cortex-editor) (MIT), which builds on
 [nano-cortex-web-editor by choldy](https://github.com/choldy/nano-cortex-web-editor) (MIT). DrD85's original
-interface is still in the app under **View → Classic Editor**. Thanks to both projects. Full notices:
+interface is still in the app under **View → Classic Editor** (with Developer tools on). Thanks to both projects. Full notices:
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Trademarks
