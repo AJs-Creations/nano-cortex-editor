@@ -1717,6 +1717,76 @@ async function run() {
   check('keyLabel off-Mac: \u2325\u2318I → Ctrl+Alt+I, \u2318\u2191 → Ctrl+\u2191', (await js('__keyLabel("\u2325\u2318I / \u2318\u2191")')) === 'Ctrl+Alt+I / Ctrl+\u2191');
   await labelsFor('');
 
+  // ---------------------------------------------------------------- newer firmware, unknown effects
+  // Version comparison: numeric per component, suffixes ignored, anything else is "not newer".
+  const fwCases = { '2.2.1': false, '2.2.2': true, '2.3.0': true, '3.0': true, '2.2.1+abc': false, '2.10.0': true, '2.2': false, '2.1.9': false, garbage: false, '': false };
+  for (const [v, want] of Object.entries(fwCases)) check('firmware ' + JSON.stringify(v) + (want ? ' is' : ' is not') + ' newer than 2.2.1', (await js(`__firmware.isNewer(${JSON.stringify(v)})`)) === want);
+  check('firmware compare: 2.10.0 > 2.9.9, 3.0 = 3.0.0, garbage → null', (await js('[__firmware.compare("2.10.0", "2.9.9"), __firmware.compare("3.0", "3.0.0"), __firmware.compare("x", "2.2.1")].join()')) === '1,0,');
+  check('the tested firmware is 2.2.1', (await js('__firmware.tested')) === '2.2.1');
+  check('firmware 2.2.1 (plain demo): no newer-firmware notice', await js('document.getElementById("fwNotice").hidden'));
+  await js('localStorage.removeItem("settings.firmwareWarned")');
+  const loadDemo = async (query) => {
+    const loaded = new Promise(r => wc.once('did-finish-load', r));
+    await win.loadURL('file://' + PAGE + '?demo' + query);
+    await loaded; await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle(); await frame();
+  };
+  await loadDemo('&demoFirmware=2.2.1');
+  check('firmware 2.2.1 reported: no notice, nothing remembered', await js('document.getElementById("fwNotice").hidden && localStorage.getItem("settings.firmwareWarned") === null'));
+  await loadDemo('&demoFirmware=2.3.0&demoUnknown=post2:7E');
+  const NOTICE = 'This firmware is newer than the editor has been tested with. Some new effects may not be editable until this app is updated.';
+  await checkSoon('firmware 2.3.0: the notice shows under the header', 'document.getElementById("fwNotice").hidden === false');
+  check('the notice has the agreed text and no modal', (await js('document.querySelector("#fwNotice .txt").textContent')) === NOTICE && !(await js('!!document.querySelector(".modal")')));
+  check('the notice remembers firmware 2.3.0', (await js('localStorage.getItem("settings.firmwareWarned")')) === '"2.3.0"');
+  const unknownLog = () => js('__ui.logs.filter(l => l.text === "Unknown effect id 0x7E in Post FX 2 (firmware 2.3.0)").length');
+  check('one log line for the unknown id', (await unknownLog()) === 1, String(await unknownLog()));
+  check('unknown effect: node title and subtitle', (await js('document.querySelector("[data-stage=post2] .model").textContent + " | " + document.querySelector("[data-stage=post2] .sub").textContent')) === 'Unknown effect | Newer firmware?');
+  check('unknown effect: the subtitle is not clipped', await js('(() => { const e = document.querySelector("[data-stage=post2] .sub"); return e.scrollWidth <= e.clientWidth + 1; })()'), await js('(() => { const e = document.querySelector("[data-stage=post2] .sub"); return e.scrollWidth + " > " + e.clientWidth; })()'));
+  check('unknown effect: no parameter or refresh packet for Post FX 2 since connecting', (await js('__ui.logs.filter(l => l.cls === "tx" && /^TX Post FX 2/.test(l.text)).length')) === 0);
+  await shot('newer-firmware');
+  await click('[data-fk="fw-notice-close"]');
+  check('Dismiss hides the notice', await js('document.getElementById("fwNotice").hidden'));
+  let m0 = await mark();
+  await click('[data-stage=post2]');
+  check('unknown effect: inspector note', (await js('document.querySelector("[data-fk=unknown-note-post2]")?.textContent')) === "This effect isn't in the editor's list yet, so its settings can't be edited here. It still plays as saved on the pedal. Update the editor to edit it.");
+  check('unknown effect: no knobs, picker says Unknown effect', await js('!document.querySelector(".inspector .knob") && document.querySelector("[data-fk=picker-post2]").textContent.startsWith("Unknown effect")'));
+  await shot('unknown-effect');
+  await settle();
+  check('selecting the unknown block sends nothing', (await txSince(m0)).length === 0, (await txSince(m0)).join(' | '));
+  m0 = await mark();
+  await click('[data-fk="switch-post2"]');
+  await txWait(m0);
+  const off = await txSince(m0);
+  check('unknown effect: the switch sends the enable write (off)', off.length === 1 && off[0] === 'TX Post FX 2 OFF: 0A C0 08 01 18 07 20 01 1F 00 00 00', off.join(' | '));
+  m0 = await mark();
+  await click('[data-fk="switch-post2"]');
+  await txWait(m0); await settle({ quiet: 600 });
+  const on = await txSince(m0);
+  check('unknown effect: on sends the enable write and no parameter refresh', on.length === 1 && on[0] === 'TX Post FX 2 ON: 0A C0 08 01 18 07 20 00 1F 00 00 00', on.join(' | '));
+  m0 = await mark();
+  await js('setFXParam("post2", { index: 0, value: 1, meta: { kind: "range", min: 0, max: 10, step: 0.1 } }); state.paramRefreshQueue = ["post2"]; requestNextFXParamRefresh();');
+  await settle();
+  check('unknown effect: parameter writes and refresh requests are refused', (await txSince(m0)).length === 0, (await txSince(m0)).join(' | '));
+  await click('[data-fk="exp-pill"]');
+  await waitFor('!!document.querySelector(\'[data-fk="exp-add"]:not([disabled])\')');
+  await click('[data-fk="exp-add"]');
+  await waitFor('!!document.querySelector(".pop")');
+  check('expression targets: Post FX 2 shows as Unknown effect', await js('[...document.querySelectorAll(".pop-item")].some(x => x.textContent.startsWith("Post FX 2") && x.title === "Unknown effect")'));
+  await key('Escape'); await waitFor('!document.querySelector(".pop")');
+  await click('[data-stage=post2]');
+  m0 = await mark();
+  await click('[data-fk="picker-post2"]');
+  await waitFor('!!document.querySelector(".pop")');
+  check('picker: nothing is marked current for the unknown effect', await js('!document.querySelector(".pop-item.cur")'));
+  await type('Tape Delay'); await key('Return');
+  await txWait(m0, (tx) => tx.some(t => /model select/.test(t)));
+  check('picking a known effect replaces the unknown one', (await js('document.querySelector("[data-stage=post2] .model").textContent')) === 'Tape Delay' && (await txSince(m0)).some(t => t.startsWith('TX Post FX 2 model select Tape Delay')), (await txSince(m0)).join(' | '));
+  check('a known effect shows its knobs again', await js('!!document.querySelector(".inspector .knob") && !document.querySelector("[data-fk=unknown-note-post2]")'));
+  await loadDemo('&demoFirmware=2.3.0&demoUnknown=post2:7E');
+  check('reconnecting on 2.3.0: the notice does not come back', await js('document.getElementById("fwNotice").hidden'));
+  check('reconnecting: the unknown effect is reported again', (await js('document.querySelector("[data-stage=post2] .model").textContent')) === 'Unknown effect');
+  await js('localStorage.removeItem("settings.firmwareWarned")');
+  await loadDemo('');
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }
 
