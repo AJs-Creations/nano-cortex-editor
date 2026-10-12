@@ -51,6 +51,10 @@
   const typingTarget = (t) => t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
   const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
+  // The firmware the effect tables (upstream's, in core.js) were verified against on hardware. A pedal reporting a
+  // newer one gets a one-time notice; see "After a firmware update" in CLAUDE.md before raising it.
+  const COMPAT = Object.freeze({ testedFirmware: '2.2.1' });
+
   // ------------------------------------------------------------------ capture kinds
   // A library capture's `type` (protobuf field 6; Cloud metadata `deviceType`) and `instrument` (field 10;
   // `instrumentType`) shown as small icons in the library picker. Our own line drawings (16×16, 1.5 px stroke,
@@ -280,6 +284,7 @@
       };
     }
     const b = state.blocks[key];
+    if (b.unknownId) return { on: b.on, none: false, unknown: true, model: 'Unknown effect', sub: 'Newer firmware?', canToggle: true };
     const def = b.models.find(m => m.name === b.model);
     const none = b.model === 'None';
     return {
@@ -308,7 +313,7 @@
       else selectCabIRSlot(state.cabIR.lastActiveSlot || 1);
     } else {
       const b = state.blocks[key];
-      if (!b.on && b.model === 'None') { toast('Choose an effect for ' + b.title + ' first'); return; }
+      if (!b.on && b.model === 'None' && !b.unknownId) { toast('Choose an effect for ' + b.title + ' first'); return; }
       b.on = !b.on;
       setFXBlockEnabled(key, b.on);
     }
@@ -318,8 +323,9 @@
 
   function chooseModel(key, name) {
     const b = state.blocks[key];
-    if (!b || name === b.model) return;
+    if (!b || (name === b.model && !b.unknownId)) return;
     if (name === 'None') {
+      delete b.unknownId;   // like any effect: bypassed, and the slot shows empty until the pedal reports it again
       b.model = 'None';
       b.params = [];
       if (b.on) { b.on = false; setFXBlockEnabled(key, false); }
@@ -1766,6 +1772,86 @@
     if (state.cabIR.fromLibrary) { log('Cab/IR param refresh skipped: the cab comes straight from the library.'); return Promise.resolve(); }
     return coreCabParamRefresh.apply(this, arguments);
   };
+  // ---------------- effects the editor doesn't know (newer firmware)
+  // The pedal reports only a model id per FX slot (state-dump fields 48–52); names and parameters come from
+  // upstream's tables. Upstream turns an id it can't map into an empty slot ("None"). We keep the block at
+  // 'None' inside the core, so nothing in core.js writes or reads its parameters, and remember the id in
+  // `block.unknownId` so the UI can say what it is. Allowed on such a block: on/off and choosing a known effect.
+  const FX_MODEL_FIELDS = { pre1: 48, pre2: 49, post1: 50, post2: 51, post3: 52 };
+  const unknownFx = (key) => !!(state.blocks[key] && state.blocks[key].unknownId);
+  const loggedUnknown = new Set();
+  const coreApplyModels = window.applyFXModelsFromCurrentState;
+  window.applyFXModelsFromCurrentState = function (fields) {
+    const skipped = state.protocol.skipFXModelApply && !state.protocol.presetLoad;   // the core leaves the models alone
+    const r = coreApplyModels.apply(this, arguments);
+    if (skipped) return r;
+    let fw = '';
+    try { fw = fields[24] && fields[24][0] && fields[24][0].wire === 2 ? new TextDecoder().decode(Uint8Array.from(fields[24][0].raw)).trim() : ''; } catch { /* below */ }
+    fw = fw || state.firmware || 'unknown';
+    for (const [key, n] of Object.entries(FX_MODEL_FIELDS)) {
+      const b = state.blocks[key];
+      const entry = fields[n] && fields[n][0];
+      const raw = entry && entry.raw ? Array.from(entry.raw) : [];
+      const id = raw.map(x => x.toString(16).padStart(2, '0').toUpperCase()).join('');
+      // An absent field or an all-zero id is an empty slot; a mapped id is a known effect.
+      const unknown = raw.some(x => x) && !findModelByCurrentStateID(b, id) && b.model === 'None';
+      if (!unknown) { delete b.unknownId; continue; }
+      b.unknownId = id;
+      b.params = [];
+      if (!loggedUnknown.has(key + ':' + id)) { loggedUnknown.add(key + ':' + id); log('Unknown effect id 0x' + id + ' in ' + b.title + ' (firmware ' + fw + ')'); }
+    }
+    return r;
+  };
+  // Belt and braces: no parameter write or parameter read for an unknown block, whoever asks.
+  const coreSetFXParam = window.setFXParam;
+  window.setFXParam = function (blockKey) {
+    if (unknownFx(blockKey)) { log('Not writing a parameter of ' + state.blocks[blockKey].title + ': unknown effect'); return Promise.resolve(); }
+    return coreSetFXParam.apply(this, arguments);
+  };
+  const coreNextParamRefresh = window.requestNextFXParamRefresh;
+  window.requestNextFXParamRefresh = function () {
+    state.paramRefreshQueue = state.paramRefreshQueue.filter(k => !unknownFx(k));
+    return coreNextParamRefresh.apply(this, arguments);
+  };
+  const coreSetFXModel = window.setFXModel;
+  window.setFXModel = function (blockKey, modelName) {
+    const b = state.blocks[blockKey];
+    if (b && b.models.some(m => m.name === modelName && m.id)) delete b.unknownId;   // a known effect replaces it
+    return coreSetFXModel.apply(this, arguments);
+  };
+
+  // ---------------- firmware newer than the one the editor was tested with
+  // Numeric per component, suffixes ignored ("2.2.1+06d34443" is 2.2.1). null when it isn't a version.
+  function parseFirmware(s) {
+    const m = /^\s*v?(\d+(?:\.\d+)*)/.exec(String(s || ''));
+    return m ? m[1].split('.').map(Number) : null;
+  }
+  // -1, 0 or 1; null when either side isn't a version.
+  function compareFirmware(a, b) {
+    const x = parseFirmware(a), y = parseFirmware(b);
+    if (!x || !y) return null;
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      const d = (x[i] || 0) - (y[i] || 0);
+      if (d) return d < 0 ? -1 : 1;
+    }
+    return 0;
+  }
+  const firmwareIsNewer = (fw) => compareFirmware(fw, COMPAT.testedFirmware) === 1;
+  window.__firmware = { parse: parseFirmware, compare: compareFirmware, isNewer: firmwareIsNewer, tested: COMPAT.testedFirmware };
+  // Once per firmware version (settings.firmwareWarned), after connecting; a quiet banner, never a modal.
+  function checkFirmware() {
+    const fw = state.firmware;
+    if (!state.connected || !fw || ui.firmwareChecked === fw) return;
+    ui.firmwareChecked = fw;
+    if (!firmwareIsNewer(fw)) return;
+    const version = parseFirmware(fw).join('.');
+    if (pref.get('firmwareWarned', '') === version) return;
+    pref.set('firmwareWarned', version);
+    log('Firmware ' + fw + ' is newer than ' + COMPAT.testedFirmware + ', the version this editor was tested with');
+    $('fwNotice').hidden = false;
+  }
+  $('fwNoticeClose').addEventListener('click', () => { $('fwNotice').hidden = true; });
+
   // Picking a slot (or bypassing) moves the preset off a library reference.
   for (const [fn, part] of [['setCapture', 'capture'], ['selectCaptureSlot', 'capture'], ['selectCabIRSlot', 'cabIR']]) {
     const core = window[fn];
@@ -1814,6 +1900,7 @@
     renderTempo();
     renderVeil();
     renderStatus();
+    checkFirmware();
     if (fk) {
       const again = document.querySelector('[data-fk="' + CSS.escape(fk) + '"]');
       if (again && again !== document.activeElement) again.focus({ preventScroll: true });
@@ -1961,7 +2048,7 @@
         dataset: { fk: 'stomp-' + s.key },
       }, el('i'));
       return el('div', {
-        class: 'node' + (ui.selected === s.key ? ' selected' : '') + (info.on ? '' : ' off') + (info.none ? ' none' : ''),
+        class: 'node' + (ui.selected === s.key ? ' selected' : '') + (info.on ? '' : ' off') + (info.none ? ' none' : '') + (info.unknown ? ' unknown' : ''),
         style: '--c:' + s.color,
         role: 'button', tabindex: '0',
         'aria-pressed': String(ui.selected === s.key),
@@ -2036,11 +2123,18 @@
       dataset: { fk: 'picker-' + key },
       onclick: (e) => openModelPicker(key, e.currentTarget),
     },
-      el('span', { text: b.model === 'None' ? 'Choose an effect' : b.model }),
-      el('span', { class: 'cat', text: b.model === 'None' ? '' : (def ? def.category : '') }),
+      el('span', { text: b.unknownId ? 'Unknown effect' : b.model === 'None' ? 'Choose an effect' : b.model }),
+      el('span', { class: 'cat', text: b.unknownId ? 'Newer firmware?' : b.model === 'None' ? '' : (def ? def.category : '') }),
       el('span', { class: 'chev', text: '▾' }));
 
-    const out = [head(s, [picker], bypassSwitch(key, b.on, !(b.model === 'None' && !b.on)))];
+    const out = [head(s, [picker], bypassSwitch(key, b.on, !!b.unknownId || !(b.model === 'None' && !b.on)))];
+
+    // An effect the editor's tables don't have (a newer firmware): no knobs, nothing written but on/off.
+    if (b.unknownId) {
+      out.push(el('p', { class: 'empty-block unknown-block', dataset: { fk: 'unknown-note-' + key } },
+        "This effect isn't in the editor's list yet, so its settings can't be edited here. It still plays as saved on the pedal. Update the editor to edit it."));
+      return out;
+    }
 
     if (b.model === 'None') {
       out.push(el('p', { class: 'empty-block' },
@@ -2309,7 +2403,7 @@
   // What the target currently holds: the effect in an FX slot, the capture, the cab, the gate.
   function expSub(x) {
     const b = x.t.block && state.blocks[x.t.block];
-    if (b) return b.model === 'None' ? 'Empty slot' : b.model;
+    if (b) return b.unknownId ? 'Unknown effect' : b.model === 'None' ? 'Empty slot' : b.model;
     if (x.t.key === 'gate') return 'Noise gate';
     if (x.t.key === 'cab') return state.currentIR.shortName || 'Cab / IR';
     return state.currentCapture.name || 'Capture';
@@ -2696,7 +2790,7 @@
     pickerPopover({
       anchor, color: stage(key).color, label: 'Choose an effect for ' + b.title, placeholder: 'Search effects',
       items: b.models.map(m => ({ name: m.name, cat: m.name === 'None' ? 'Empty slot' : (m.category || 'Other') })),
-      isCurrent: (m) => m.name === b.model,
+      isCurrent: (m) => !b.unknownId && m.name === b.model,
       emptyText: (q) => 'No effects match “' + q + '”.',
       onPick: (m) => {
         chooseModel(key, m.name);
@@ -3422,6 +3516,34 @@
     let running = false;
     let origWait = null;
 
+    // Test hooks for a newer pedal: ?demoFirmware=2.3.0 reports that firmware; ?demoUnknown=post2:7E makes that
+    // slot report an effect id the tables don't have (on every preset), through the same model parse as a pedal's dump.
+    const qs = new URLSearchParams(location.search);
+    const DEMO_FW = /^[\w.+-]{1,32}$/.test(qs.get('demoFirmware') || '') ? qs.get('demoFirmware') : '2.2.1';
+    const DEMO_UNKNOWN = (() => {
+      const m = /^(pre[12]|post[123]):([0-9a-f]{2}(?:[0-9a-f]{2}){0,3})$/i.exec(qs.get('demoUnknown') || '');
+      return m ? { key: m[1], id: m[2].match(/../g).map(h => parseInt(h, 16)) } : null;
+    })();
+    // The FX model part of a state dump (fields 48–52, plus 24 firmware), applied by the real model parse.
+    // Only with ?demoUnknown: the plain demo sets its models directly.
+    function reportFxModels() {
+      if (!DEMO_UNKNOWN) return;
+      const fields = { 24: [{ wire: 2, raw: Array.from(new TextEncoder().encode(DEMO_FW)) }] };
+      const on = {};
+      Object.entries({ pre1: 48, pre2: 49, post1: 50, post2: 51, post3: 52 }).forEach(([k, n]) => {
+        const b = state.blocks[k];
+        const m = b.models.find(x => x.name === b.model);
+        const unknown = DEMO_UNKNOWN && DEMO_UNKNOWN.key === k;
+        const raw = unknown ? DEMO_UNKNOWN.id : (m && m.id ? m.id : null);
+        on[k] = unknown ? true : b.on;
+        if (raw) fields[n] = [{ wire: 2, raw }];
+      });
+      const was = state.protocol.presetLoad;
+      state.protocol.presetLoad = true;
+      try { window.applyFXModelsFromCurrentState(fields); } finally { state.protocol.presetLoad = was; }
+      for (const k of FX_BLOCK_KEYS) state.blocks[k].on = on[k];   // field 31, which the dump would carry
+    }
+
     // Library stored on the (demo) pedal.
     const cap = (name, index, author, type = 'amp_head', instrument = 'guitar') => ({ index, name, type, tags: [], instrument, author, description: '', corrupted: false });
     // Types vary so the library picker shows its icon set (CAPTURE_KINDS).
@@ -3520,10 +3642,10 @@
     function deviceReply(type, f) {
       const int = (n) => (f[n] && f[n][0] && f[n][0].wire === 0 ? f[n][0].value : 0);
       if (type === DEV_MSG.INFO_REQ) {
-        return longFrame([0x08, 0x01, 0x18, 0x01, ...pbStr(4, ''), ...pbStr(5, '2.2.1'), ...pbStr(6, 'NP00XXXXXX'), ...pbStr(7, fakeHash(int(3) % 97, 40))], DEV_MSG.INFO);
+        return longFrame([0x08, 0x01, 0x18, 0x01, ...pbStr(4, ''), ...pbStr(5, DEMO_FW), ...pbStr(6, 'NP00XXXXXX'), ...pbStr(7, fakeHash(int(3) % 97, 40))], DEV_MSG.INFO);
       }
       if (type === DEV_MSG.ALIVE_REQ) {
-        return longFrame([0x08, 0x03, 0x18, 0x01, ...pbStr(5, '2.2.1+demo'), ...pbStr(6, 'NP00XXXXXX'), ...pbStr(7, 'Neural DSP Nano Cortex')], DEV_MSG.ALIVE);
+        return longFrame([0x08, 0x03, 0x18, 0x01, ...pbStr(5, DEMO_FW + '+demo'), ...pbStr(6, 'NP00XXXXXX'), ...pbStr(7, 'Neural DSP Nano Cortex')], DEV_MSG.ALIVE);
       }
       if (type === DEV_MSG.SET) {
         if (f[4]) devStore.brightness = int(4);
@@ -3636,6 +3758,7 @@
     function load(n) {
       if (!running) return;
       if (saved.has(n)) applySnapshot(saved.get(n)); else if (n <= 24) fromPreset(n); else blank();
+      reportFxModels();
       applyStateDump();
       emitTempo();
       expLive.delete(n);   // a (re)load drops unsaved expression edits, like every other edit
@@ -3657,12 +3780,13 @@
       CAPTURES.forEach((c, i) => state.captureNames.set(i + 1, c));
       IRS.forEach((_, i) => state.irNames.set(i + 1, IR_NAME(i + 1)));
       state.c304 = { writeValueWithResponse: async (bytes) => onWrite(bytes) };
-      state.firmware = '2.2.1';
+      state.firmware = DEMO_FW;
       origWait = window.waitForPresetState;
       window.waitForPresetState = async () => true; // no state read-back without a pedal
       state.connected = true;
       state.selectedPreset = 2;
       fromPreset(2);
+      reportFxModels();
       applyStateDump();
       window.setStatus('Connected', true);
       emitTempo();
