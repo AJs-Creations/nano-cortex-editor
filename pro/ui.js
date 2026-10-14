@@ -1925,7 +1925,15 @@
   window.setStatus = function (text, connected = false) {
     ui.connText = text;
     if (connected) tapC304();
-    if (!connected && /disconnect/i.test(text)) { state.presetDirty = false; beginExpressionBoundary(); ui.lastAction = ''; state.presetTempo = null; }
+    if (!connected && /disconnect/i.test(text)) {
+      state.presetDirty = false; beginExpressionBoundary(); ui.lastAction = ''; state.presetTempo = null;
+      const d = window.__dev;
+      if (d) {
+        d.info = null; d.alive = null; d.settings = null; d.reading = false;
+        d.monitorPending = {}; d.monitorAcks.length = 0;
+        clearTimeout(d.monitorReadTimer); d.monitorReadTimer = null;
+      }
+    }
     if (!connected) { state.exp.loaded = false; state.exp.preset = null; }
     render();
   };
@@ -3513,14 +3521,20 @@
   // ------------------------------------------------------------------ device page + capture info
   // Decoded from the phone app (trace 2026-10-09, docs/INVESTIGATION.md §11). Not in the upstream editor.
   //   46 {1:3 3:unixTime} → 47 {1:1 3:1 4:"" 5:firmware 6:serial 7:hash}            device info
-  //   65 {1:3}            → 66 {1:1 3:1 5:name 6:brightness … 17:usbDb(f32) …}       global settings
+  //   65 {1:3}            → 66 {1:1 3:1 5:name 6:brightness … 15:muteIn 16:muteOut 17:usbDb(f32) …} global settings
   //   67 {1:1 4:brightness 14:usbDb(f32)} → 68 {1:1 3:1}                           write (the app sends both)
+  //   67 {1:1 12:muteIn} → 68 {1:1 3:1}; 67 {1:1 13:muteOut} → 68 {1:1 3:1}    monitoring writes (one field, explicit 0/1)
   //   17 {3:captureSlot−1 5:1} → 18 {1:6 3:1 7:{1,2 author} 8:"" 9:hash 10:name 11:record}   capture details
   //   91 {1:3}            → 92 {1:3 3:1 5:"2.2.1+06d34443" 6:serial 7:name}        keep-alive; full firmware + name
   // Settings writes are global: no Save, and the pedal reports nothing dirty (no 115 after them in the trace).
   const DEV_MSG = { ALIVE_REQ: 91, ALIVE: 92, INFO_REQ: 46, INFO: 47, SETTINGS_REQ: 65, SETTINGS: 66, SET: 67, SET_ACK: 68, CAPTURE_REQ: 17, CAPTURE: 18 };
+  const DEV_MONITOR = Object.freeze({
+    muteInput: { writeField: 12, readField: 15, tag: 0x60, label: 'Mute Input', note: 'Mutes the Guitar Input. USB input remains available.' },
+    muteOutput: { writeField: 13, readField: 16, tag: 0x68, label: 'Mute Outputs 1L/2R', note: 'Mutes processed audio to Outputs 1L/2R. USB playback remains available.' },
+  });
   const USB_DB = { min: -20, max: 0, step: 0.5 };
-  const dev = { info: null, alive: null, settings: null, reading: false, redraw: null, capWait: null };
+  const dev = { info: null, alive: null, settings: null, reading: false, redraw: null, capWait: null,
+    monitorPending: {}, monitorAcks: [], monitorReadTimer: null };
   window.__dev = dev;
   // Varint that stays exact past 2^31 (the Unix time is close to it).
   const varint = (n) => { const out = []; n = Math.max(0, Math.floor(n)); while (n > 127) { out.push((n % 128) | 128); n = Math.floor(n / 128); } out.push(n); return out; };
@@ -3539,10 +3553,21 @@
   function readDevice() {
     if (!state.connected) return;
     dev.reading = true;
-    writeC304('Read device settings', buildFrame([0x08, 0x03], DEV_MSG.SETTINGS_REQ));
+    requestDeviceSettings();
     writeC304('Read device info', buildFrame([0x08, 0x03, 0x18, ...varint(Date.now() / 1000)], DEV_MSG.INFO_REQ));
     writeC304('Keep-alive', buildFrame([0x08, 0x03], DEV_MSG.ALIVE_REQ));
     if (dev.redraw) dev.redraw();
+  }
+  function requestDeviceSettings() {
+    if (!state.connected) return;
+    writeC304('Read device settings', buildFrame([0x08, 0x03], DEV_MSG.SETTINGS_REQ));
+  }
+  function requestMonitorRead() {
+    clearTimeout(dev.monitorReadTimer);
+    dev.monitorReadTimer = setTimeout(() => {
+      dev.monitorReadTimer = null;
+      requestDeviceSettings();
+    }, 20);
   }
   // One write carries both values, like the app: the one not being changed is resent as it is.
   // Coalesced while a slider is dragged (only the latest queued write goes out).
@@ -3555,6 +3580,33 @@
     Object.assign(s, { brightness: b, usbDb: db });
     writeC304('Device settings: LED brightness ' + b + ', USB playback ' + db.toFixed(1) + ' dB',
       buildFrame([0x08, 0x01, 0x20, ...varint(b), 0x75, ...float32LE(db)], DEV_MSG.SET), 'device-settings');
+  }
+
+  // Monitoring writes are deliberately independent of the brightness/USB write coalescer:
+  // each click is a complete, ordered command and never waits for a pedal reply.
+  function writeMonitorSetting(key, value) {
+    const spec = DEV_MONITOR[key], s = dev.settings;
+    if (!state.connected || !s || !spec) return;
+    const previous = Boolean(s[key]);
+    const prior = dev.monitorPending[key];
+    const seq = (prior ? prior.seq : 0) + 1;
+    const pending = { key, value: Boolean(value), previous, seq };
+    dev.monitorPending[key] = pending;
+    s[key] = pending.value;
+    const frame = buildFrame([0x08, 0x01, spec.tag, pending.value ? 1 : 0], DEV_MSG.SET);
+    const ack = { ...pending, sent: false };
+    dev.monitorAcks.push(ack);
+    writeC304('Device monitoring: ' + spec.label + ' ' + (pending.value ? 'ON' : 'OFF'), frame).then((ok) => {
+      ack.sent = ok;
+      if (!ok) {
+        const i = dev.monitorAcks.indexOf(ack);
+        if (i >= 0) dev.monitorAcks.splice(i, 1);
+      }
+      if (ok || dev.monitorPending[key] !== pending) return;
+      delete dev.monitorPending[key];
+      s[key] = previous;
+      if (dev.redraw) dev.redraw();
+    });
   }
 
   function onDeviceInfo(d) {
@@ -3573,9 +3625,20 @@
       const v = x.wire === 0 ? String(x.value) : x.wire === 5 ? String(Math.round(pf.f32(f, n) * 100) / 100) : x.wire === 2 ? JSON.stringify(pf.str(f, n)) : hex(x.raw);
       return n + '=' + v;
     });
-    // Protobuf leaves out zeros, so an absent field reads 0.
-    dev.settings = { name: pf.str(f, 5), brightness: pf.int(f, 6) || 0, usbDb: pf.f32(f, 17) || 0, raw };
-    log('Device settings: "' + dev.settings.name + '", LED brightness ' + dev.settings.brightness + ', USB playback ' + dev.settings.usbDb.toFixed(1) + ' dB');
+    // Protobuf leaves out zeros, so an absent field reads 0. A pending local
+    // write wins over an older unsolicited/readback report until its value is seen.
+    const next = { name: pf.str(f, 5), brightness: pf.int(f, 6) || 0, usbDb: pf.f32(f, 17) || 0, raw };
+    for (const [key, spec] of Object.entries(DEV_MONITOR)) {
+      const reported = Boolean(pf.int(f, spec.readField) || 0);
+      const pending = dev.monitorPending[key];
+      if (pending && reported !== pending.value) next[key] = pending.value;
+      else {
+        next[key] = reported;
+        if (pending) delete dev.monitorPending[key];
+      }
+    }
+    dev.settings = next;
+    log('Device settings: "' + dev.settings.name + '", LED brightness ' + dev.settings.brightness + ', USB playback ' + dev.settings.usbDb.toFixed(1) + ' dB, input mute ' + (dev.settings.muteInput ? 'on' : 'off') + ', output mute ' + (dev.settings.muteOutput ? 'on' : 'off'));
     dev.reading = !dev.info;
     if (dev.redraw) dev.redraw();
   }
@@ -3587,6 +3650,22 @@
   function onSettingsAck(d) {
     const ok = pf.int(bodyOf(d), 3) === 1;
     log('Device settings ' + (ok ? 'confirmed' : 'REFUSED: ' + hex(d)));
+    const ack = dev.monitorAcks[0];
+    // A type-68 has no setting discriminator. Do not consume a monitoring
+    // record until its own queued write has completed; this keeps an earlier
+    // brightness/USB ACK from being mistaken for a mute ACK.
+    if (!ack || !ack.sent) return;
+    dev.monitorAcks.shift();
+    const pending = dev.monitorPending[ack.key];
+    if (!ok) {
+      if (pending && pending.seq === ack.seq) {
+        delete dev.monitorPending[ack.key];
+        if (dev.settings) dev.settings[ack.key] = ack.previous;
+        if (dev.redraw) dev.redraw();
+      }
+      return;
+    }
+    requestMonitorRead();
   }
   function onCaptureDetails(d) {
     const f = bodyOf(d);
@@ -3672,10 +3751,12 @@
       usbNum.addEventListener('change', typed);
       usbNum.addEventListener('focus', () => usbNum.select());
       usbNum.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); typed(); usbNum.select(); } });
+      const muteInput = toggleSwitch('dev-mute-input', 'Mute Input', !!(s && s.muteInput), (v) => writeMonitorSetting('muteInput', v), !can);
+      const muteOutput = toggleSwitch('dev-mute-output', 'Mute Outputs 1L/2R', !!(s && s.muteOutput), (v) => writeMonitorSetting('muteOutput', v), !can);
       const again = el('button', { class: 'btn small', dataset: { fk: 'dev-read' }, disabled: on ? null : 'true', onclick: () => readDevice() }, 'Read again');
       const raw = el('details', { class: 'dev-raw', dataset: { fk: 'dev-raw' } }, el('summary', { text: 'Raw settings' }),
         el('p', { class: 'set-note', text: s ? '66: ' + s.raw.join('  ') : 'Not read yet.' }),
-        el('p', { class: 'set-note', text: 'Read only. These fields are not mapped to settings yet.' }));
+        el('p', { class: 'set-note', text: 'Read only. Other fields are not mapped to settings yet.' }));
       const setting = (title, note, ...ctl) => el('div', { class: 'dev-setting' },
         el('div', { class: 'dev-text' }, el('div', { class: 'dev-title', text: title }), el('div', { class: 'dev-note', text: note })),
         el('div', { class: 'dev-ctl' }, ...ctl));
@@ -3690,6 +3771,10 @@
         el('section', {},
           setting('LED brightness', 'The pedal’s LEDs. The manual’s default is 60%.', bri, briVal),
           setting('USB playback volume', 'Audio from the computer over USB. Default −6.0 dB.', usb, usbNum, el('span', { class: 'set-unit', text: 'dB' }))),
+        el('section', {},
+          el('h3', { text: 'Monitoring' }),
+          setting('Mute Guitar Input', DEV_MONITOR.muteInput.note, muteInput),
+          setting('Mute Guitar Output', DEV_MONITOR.muteOutput.note, muteOutput)),
         el('section', { class: 'dev-only' }, raw),
         el('div', { class: 'dev-foot' }, setNote('Global settings: they apply on the pedal right away, not per preset.'), again)].filter(Boolean));
     };
@@ -4197,7 +4282,7 @@
     }
 
     // Device page and capture info, answered the way the pedal did in the 2026-10-09 trace.
-    const devStore = { brightness: 153, usbDb: -6 };
+    const devStore = { brightness: 153, usbDb: -6, muteInput: false, muteOutput: false };
     const pbStr = (field, text) => { const b = Array.from(new TextEncoder().encode(text)); return [(field << 3) | 2, ...varint(b.length), ...b]; };
     const pbSub = (field, b) => [(field << 3) | 2, ...varint(b.length), ...b];
     const fakeHash = (seed, n) => Array.from({ length: n }, (_, k) => ((seed * 31 + k * 7 + 3) % 16).toString(16)).join('');
@@ -4213,11 +4298,15 @@
       if (type === DEV_MSG.SET) {
         if (f[4]) devStore.brightness = int(4);
         if (f[14] && f[14][0].wire === 5) devStore.usbDb = new DataView(Uint8Array.from(f[14][0].raw).buffer).getFloat32(0, true);
+        if (f[12]) devStore.muteInput = int(12) !== 0;
+        if (f[13]) devStore.muteOutput = int(13) !== 0;
         return longFrame([0x08, 0x01, 0x18, 0x01], DEV_MSG.SET_ACK);
       }
       if (type === DEV_MSG.SETTINGS_REQ) {
         return longFrame([0x08, 0x01, 0x18, 0x01, ...pbStr(5, 'Neural DSP Nano Cortex'), 0x30, ...varint(devStore.brightness), 0x38, 0x01, 0x40, 0x01,
-          0x58, 0x00, 0x60, 0x01, 0x68, 0x81, 0x01, 0x70, 0x01, 0x8D, 0x01, ...float32LE(devStore.usbDb)], DEV_MSG.SETTINGS);
+          0x58, 0x00, 0x60, 0x01, 0x68, 0x81, 0x01, 0x70, 0x01,
+          ...(devStore.muteInput ? [0x78, 0x01] : []), ...(devStore.muteOutput ? [0x80, 0x01] : []),
+          0x8D, 0x01, ...float32LE(devStore.usbDb)], DEV_MSG.SETTINGS);
       }
       // 17 → 18: the slot's capture, with the library's author and kind when the library has it by name.
       const slot = int(3) + 1;
@@ -4235,6 +4324,10 @@
       return longFrame([0x08, 0x06, 0x18, 0x01, ...pbSub(7, by), ...pbStr(8, 'Demo capture in slot ' + slot + '.'), ...pbStr(9, hash), ...pbStr(10, name),
         ...pbSub(11, record)], DEV_MSG.CAPTURE);
     }
+    window.__devDemo = {
+      store: devStore,
+      emitSettings: () => window.handleTypedMessage(deviceReply(DEV_MSG.SETTINGS_REQ, {})),
+    };
     let tunerTimer = null;
     function tunerDemo(on) {
       clearInterval(tunerTimer); tunerTimer = null;
