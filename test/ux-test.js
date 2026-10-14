@@ -734,8 +734,13 @@ async function run() {
   check('preset change packet sent (SetPresetSlotsRequest, type 29)', tx.some(t => /^TX Preset change 5: .*1D 00 00 00$/.test(t)), JSON.stringify(tx));
   check('status bar names the pedal and firmware, nothing redundant', (await js('document.getElementById("bleText").textContent')) === 'Demo data, nothing is sent' && await js('document.getElementById("pcText").parentElement.hidden'));
   check('one connection indicator: none in the header, the status bar LED is on', await js('!document.querySelector(".head .led, #conn, #status, #dot") && document.getElementById("bleLed").className === "led on"'));
-  await js('state.presetDirty = true; render()'); await frame();
+  await js('__ui.dirty = false; state.presetDirty = true; render()'); await frame();
   check('pedal-reported unsaved changes show in the status bar', await js('!document.getElementById("pcText").parentElement.hidden && /unsaved/.test(document.getElementById("pcText").textContent)'));
+  await click('.preset-row[data-n="6"]');
+  await waitFor('!!document.querySelector(".modal")');
+  check('pedal-reported dirty state also asks before switching', await js('state.selectedPreset === 5 && !!document.querySelector(".modal")'));
+  await key('Escape');
+  await checkSoon('cancelling the pedal-dirty switch keeps the current preset', 'state.selectedPreset === 5 && !document.querySelector(".modal")');
   await js('state.presetDirty = false; render()'); await frame();
   await checkSoon('(demo) pedal confirms the preset change', '__ui.logs.some(l => /Preset change confirmed/.test(l.text))');
 
@@ -1436,6 +1441,13 @@ async function run() {
   check('Clear all sends the bare preset index (62 {3:61})', JSON.stringify(await expTx(n0)) === JSON.stringify(['06 C0 18 3D 3E 00 00 00']), JSON.stringify(await expTx(n0)));
   await checkSoon('after Clear all the empty state is back', '!!document.querySelector(\'[data-fk="exp-empty"]\')');
   await checkSoon('a cleared set reports the preset clean again (115)', 'state.presetDirty === false');
+  await checkSoon('reverting the expression edits clears the UI dirty state', '!!document.getElementById("dirtyMark").hidden && !!document.getElementById("discardBtn").hidden && !__ui.dirty && !state.presetDirty');
+  const revertedPreset = await js('state.selectedPreset');
+  await click(`.preset-row[data-n="${revertedPreset + 1}"]`);
+  await checkSoon('switching after reverting does not ask for confirmation', async () => (await js('state.selectedPreset')) === revertedPreset + 1 && await js('!document.querySelector(".modal")'));
+  await click(`.preset-row[data-n="${revertedPreset}"]`);
+  await checkSoon('returning after the clean switch restores the preset', async () => (await js('state.selectedPreset')) === revertedPreset);
+  await settle();
 
   n0 = await mark();
   await addTarget('Capture on/off');
@@ -1457,7 +1469,7 @@ async function run() {
   check('B on the Expression panel does nothing (no stage to bypass)', (await js('document.querySelector(".insp-head h1").textContent')) === 'Expression pedal');
 
   // the demo pedal keeps the set per preset until a reload drops unsaved edits
-  await js('__ui.dirty = false; render()'); await frame(); await settle();
+  await js('__ui.dirty = false; state.presetDirty = false; render()'); await frame(); await settle();
   await click('.preset-row[data-n="2"]');
   await checkSoon('preset 2 still has its own Gain sweep', async () => JSON.stringify(await js('__exp.assigned()')) === JSON.stringify(['range-gain']), async () => JSON.stringify(await js('__exp.assigned()')));
   await settle();

@@ -1438,7 +1438,7 @@
     ui.pendingPreset = null;
     ui.sideSig = ''; // repaint the list either way (undoes a keyboard highlight if cancelled)
     if (n === state.selectedPreset && state.connected) { render(); return; }
-    if (ui.dirty && state.connected) {
+    if (isDirtyNow() && state.connected) {
       const choice = await modal({
         title: 'Save changes to ' + presetName(state.selectedPreset) + '?',
         body: 'Switching presets discards edits that haven’t been saved to the pedal.',
@@ -3087,7 +3087,15 @@
     if (t === DEV_MSG.ALIVE) { onAlive(data); return true; }
     if (t === DEV_MSG.CAPTURE) { onCaptureDetails(data); return true; }
     if (t === DEV_MSG.SETTINGS) { try { onDeviceSettings(data); } catch (err) { log('ERROR: settings parse: ' + err.message); } }
-    return coreTypedForDevice.apply(this, arguments);
+    const handled = coreTypedForDevice.apply(this, arguments);
+    // The pedal reports clean when live edits are returned to their saved values.
+    // Core owns the authoritative bit; clear the optimistic UI latch after it has
+    // parsed the notification so the header and preset-switch guard agree.
+    if (t === MSG.PresetDirtyStateChanged && !state.presetDirty && ui.dirty) {
+      ui.dirty = false;
+      render();
+    }
+    return handled;
   };
 
   // Settings → Device. Built when the tab opens; the reads go out then.
