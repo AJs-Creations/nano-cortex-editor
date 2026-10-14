@@ -76,6 +76,31 @@ async function click(sel, opts = {}) {
   wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: opts.count || 1 });
   await sleep(40); await frame();
 }
+async function clickWhileReceiving(sel, receive) {
+  const b = await box(sel);
+  const x = Math.round(b.x), y = Math.round(b.y);
+  wc.sendInputEvent({ type: 'mouseMove', x, y });
+  wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  // Deliver the report before the demo write can finish and release the
+  // optimistic target; the redraw itself is allowed to happen while pressed.
+  await receive();
+  await sleep(35); await frame();
+  wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+  await sleep(40); await frame();
+}
+async function rightClickWhileReceiving(sel, receive) {
+  const b = await box(sel);
+  const x = Math.round(b.x), y = Math.round(b.y);
+  wc.sendInputEvent({ type: 'mouseMove', x, y });
+  wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'right', clickCount: 1 });
+  await receive();
+  await sleep(35); await frame();
+  wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'right', clickCount: 1 });
+  const afterRelease = await js('!!document.querySelector(".ctx")');
+  await sleep(40); await frame();
+  const afterWait = await js('!!document.querySelector(".ctx")');
+  return { afterRelease, afterWait };
+}
 async function rightClick(sel) {
   const b = await box(sel);
   const x = Math.round(b.x), y = Math.round(b.y);
@@ -208,7 +233,7 @@ async function run() {
   await dblclick('[data-fk="amp-gain"] svg');
   await txWait(dn);
   check('dev tools off: the log is still kept, the status bar shows no "Sent: …"', /^Sent: /.test(await js('__ui.lastAction')) && (await js('document.getElementById("lastAction").textContent')) === '' && (await txSince(dn)).length >= 1, await js('document.getElementById("lastAction").textContent'));
-  await js('__ui.dirty = false; render(); document.activeElement.blur()'); await frame();
+  await js('state.presetDirty = false; render(); document.activeElement.blur()'); await frame();
   await key('?'); await waitFor('!!document.querySelector(".modal .keys")');
   check('dev tools off: the shortcuts sheet has no ⌘L or Record row', await js('!!document.querySelector(".modal .keys") && ![...document.querySelectorAll(".modal .keys kbd")].some(k => /^(⌘|Ctrl\\+)L$/.test(k.textContent) || k.textContent === "Record")'));
   await key('Escape');
@@ -275,7 +300,7 @@ async function run() {
   await dblclick('[data-fk="amp-gain"] svg');
   check('double-click resets Gain to 50%', (await js('state.amp.gain')) === 128, String(await js('state.amp.gain')));
   check('reset is sent', (await txWait(n0, tx => tx.some(t => /Amp gain = 128/.test(t)))).some(t => /Amp gain = 128/.test(t)));
-  await js('__ui.dirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
 
   n0 = await mark();
   const gain0 = await js('state.amp.gain');
@@ -372,8 +397,8 @@ async function run() {
     const d = buildFrame(payload, 115);
     window.onC305({ target: { value: { buffer: d.buffer } } });
   })()`);
-  const pre2BeforePedal = await js('JSON.stringify({ model: state.blocks.pre2.model, on: state.blocks.pre2.on, params: state.blocks.pre2.params })');
-  const fxOnBeforePedal = await js('JSON.stringify(Object.fromEntries(FX_BLOCK_KEYS.map(key => [key, state.blocks[key].on])))');
+  const fxReportKeys = ['pre1', 'pre2', 'post1', 'post2', 'post3'];
+  const fxBeforePedal = await js(`JSON.stringify(Object.fromEntries(${JSON.stringify(fxReportKeys)}.map(key => [key, { model: state.blocks[key].model, on: state.blocks[key].on, params: state.blocks[key].params }])))`);
   await js(`(() => {
     const b = state.blocks.pre2;
     const m = b.models.find(x => x.name === 'Green 808');
@@ -384,6 +409,16 @@ async function run() {
     render();
   })()`);
   await frame();
+  await js(`(() => { for (const key of ${JSON.stringify(fxReportKeys)}) { const b = state.blocks[key]; const m = b.models.find(x => x.name !== 'None' && x.params && x.params.length); if (m && (!b.params || !b.params.length)) { b.model = m.name; b.params = structuredClone(m.params); } } render(); })()`);
+  await frame();
+  const fxReportRaw = [17, 51, 102, 153, 204];
+  for (let slot = 0; slot < fxReportKeys.length; slot++) {
+    const key = fxReportKeys[slot];
+    const raw = fxReportRaw[slot];
+    await rxFXParameter(slot, 0, raw); await frame();
+    const expected = await js(`normalizedToParamValue(state.blocks.${key}.params[0], ${raw} / 255)`);
+    check('pedal FX report updates ' + key + ' from slot ' + slot, await js(`state.blocks.${key}.params[0].value === ${expected}`), String(await js(`state.blocks.${key}.params[0].value`)));
+  }
   await rxFXParameter(1, 0, 68); await frame();
   check('pedal FX report updates a non-selected effect parameter', await js('state.blocks.pre2.params[0].value === 2.7 && __ui.selected === "capture"'), String(await js('state.blocks.pre2.params[0].value')));
   await rxFXParameter(1, 1, 184); await frame();
@@ -403,14 +438,71 @@ async function run() {
   tx = await txSince(n0);
   check('FX bypass dirty companion preserves the effective pedal state', await js('state.blocks.pre2.on === false && !document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
   check('contextual FX bypass and dirty companion do not trigger a full preset refresh', !tx.some(t => /^TX Current preset state request/.test(t)), JSON.stringify(tx));
-  // A manual Refresh applies field 31 from the saved preset. It may still say
-  // enabled even though expression control has the effect bypassed live.
-  await js('window.applyFXEnabledStatesFromCurrentState({ 31: [{ wire: 2, raw: [0, 0, 0, 1, 1] }] })');
+  // A manual refresh is authoritative once no local bypass target is pending.
+  await js('window.applyFXEnabledStatesFromCurrentState({ 31: [{ wire: 2, raw: [0, 0, 0, 1, 1] }] }); render()');
   await frame();
-  check('saved preset refresh preserves the effective pedal bypass state', await js('state.blocks.pre2.on === false && !document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
+  check('saved preset refresh restores the saved pedal bypass state', await js('state.blocks.pre2.on === true && document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
   await rxFXEnable(5, true, false); await frame();
   check('omitted bypass state defaults to enabled', await js('state.blocks.pre2.on === true && document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
-  await js(`Object.assign(state.blocks.pre2, ${pre2BeforePedal}); Object.entries(${fxOnBeforePedal}).forEach(([key, on]) => { state.blocks[key].on = on; }); __ui.selected = "capture"; render()`);
+
+  n0 = await mark();
+  await js(`(() => {
+    const report = stateValue => {
+      const payload = [0x08, 0x01, 0x18, 0x05, 0x20, stateValue];
+      const d = buildFrame(payload, 31);
+      window.onC305({ target: { value: { buffer: d.buffer } } });
+    };
+    const toggle = () => document.querySelector('[data-stage=pre2] .stomp').click();
+    toggle();
+    report(0);
+    // A stale state report from the previous write can briefly put the
+    // canonical block back on. The next click must still invert the latest
+    // local target, not that stale value.
+    state.blocks.pre2.on = true;
+    toggle();
+    report(1);
+    toggle();
+  })()`);
+  await frame(); await settle();
+  const rapidBypassTx = (await txSince(n0)).filter(t => /^TX Pre FX 2 (OFF|ON)/.test(t)).map(t => t.match(/^TX Pre FX 2 (OFF|ON)/)[1]);
+  check('rapid off/on/off bypass clicks keep the visible state and writes', rapidBypassTx.join('|') === 'OFF|ON|OFF' && await js('state.blocks.pre2.on === false && document.querySelector("[data-stage=pre2] .stomp").getAttribute("aria-pressed") === "false" && __ui.pendingBypassTargets.size === 0'), JSON.stringify(rapidBypassTx));
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); render()'); await frame(); await settle();
+  n0 = await mark();
+  await clickWhileReceiving('[data-stage=pre2] .stomp', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  await settle();
+  const pressBypassTx = (await txSince(n0)).filter(t => /^TX Pre FX 2 (OFF|ON)/.test(t)).map(t => t.match(/^TX Pre FX 2 (OFF|ON)/)[1]);
+  const pressBypassState = await js('JSON.stringify({ on: state.blocks.pre2.on, aria: document.querySelector("[data-stage=pre2] .stomp").getAttribute("aria-pressed"), pending: __ui.pendingBypassTargets.size })');
+  check('a bypass click survives a redraw during mouse press', pressBypassTx.join('|') === 'OFF' && await js('state.blocks.pre2.on === false && document.querySelector("[data-stage=pre2] .stomp").getAttribute("aria-pressed") === "false"'), JSON.stringify({ tx: pressBypassTx, state: JSON.parse(pressBypassState) }));
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); __ui.selected = "capture"; render()'); await frame(); await settle();
+  await click('[data-stage=pre2] .stomp');
+  await clickWhileReceiving('[data-stage=post3]', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  check('selecting another chain node survives incoming bypass redraws', await js('__ui.selected === "post3"'), await js('__ui.selected'));
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); __ui.selected = "pre2"; render()'); await frame(); await settle();
+  const contextMenuTiming = await rightClickWhileReceiving('[data-fk=node-pre2]', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  check('chain context menu survives an incoming redraw during right-click', contextMenuTiming.afterRelease && contextMenuTiming.afterWait && await js('!!document.querySelector(".ctx")'), JSON.stringify(contextMenuTiming));
+  await key('Escape');
+  await rightClick('[data-stage=pre2] .stomp');
+  check('right-clicking a chain bypass opens the node menu', await js('!!document.querySelector(".ctx") && !!document.querySelector(".ctx-item")'));
+  await key('Escape');
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); __ui.selected = "pre2"; render()'); await frame(); await settle();
+  n0 = await mark();
+  await clickWhileReceiving('.inspector .switch', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  await settle();
+  const inspectorBypassTx = (await txSince(n0)).filter(t => /^TX Pre FX 2 (OFF|ON)/.test(t)).map(t => t.match(/^TX Pre FX 2 (OFF|ON)/)[1]);
+  check('inspector bypass click survives an incoming redraw', inspectorBypassTx.join('|') === 'OFF' && await js('state.blocks.pre2.on === false && document.querySelector("[data-fk=switch-pre2]").getAttribute("aria-checked") === "false"'), JSON.stringify(inspectorBypassTx));
+  await js(`const before = ${fxBeforePedal}; Object.entries(before).forEach(([key, value]) => Object.assign(state.blocks[key], value)); __ui.selected = "capture"; render()`);
   await frame();
 
   await js('__ui.selected = "capture"; render()'); await frame();
@@ -793,7 +885,7 @@ async function run() {
   await checkSoon('the picked capture lands in slot 7 without the slot chooser', async () => libPick !== '' && (await js('state.captureNames.get(7)')) === libPick && await js('!document.querySelector(".modal")'), async () => 'picked=' + JSON.stringify(libPick) + ' slot7=' + await js('state.captureNames.get(7)') + ' modal=' + await js('!!document.querySelector(".modal")'));
   await settle();
   await js('__closePopover(); __ui.slotPreselect = 0'); await key('Escape');
-  await key('s', [MOD]); await waitFor('!__ui.dirty'); await settle();   // the slot load marked the preset dirty; save so the list tests start clean
+  await key('s', [MOD]); await waitFor('!state.presetDirty'); await settle();   // the slot load marked the preset dirty; save so the list tests start clean
   // delete a preset (type 50 → 51), from the row menu, confirmed in a dialog
   await rightClick('.preset-row[data-n="24"]');
   await js(ctxItem('Delete') + '?.click()');
@@ -814,7 +906,7 @@ async function run() {
   const NEG1 = 'FF FF FF FF FF FF FF FF FF 01';
   const fsHex = (slotField, idx) => ['36 C0 18 00 20', NEG1, ...[5, 6, 7, 8].map(f => (f * 8).toString(16).toUpperCase() + ' ' + (f === slotField ? idx.toString(16).toUpperCase().padStart(2, '0') : NEG1)), '48 00 1D 00 00 00'].join(' ');
   check('assignment frame for IA = preset index 14 equals the phone app\'s bytes', (await js('hex(__footswitchFrame("a1", 14))')) === '36 C0 18 00 20 ' + NEG1 + ' 28 0E 30 ' + NEG1 + ' 38 ' + NEG1 + ' 40 ' + NEG1 + ' 48 00 1D 00 00 00' && (await js('hex(__footswitchFrame("b1", 0))')) === fsHex(6, 0), await js('hex(__footswitchFrame("a1", 14))'));
-  await js('__ui.dirty = false; state.presetDirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
   const fsCells = () => js('[...document.querySelectorAll(".fs-cell")].map(c => [...c.children].map(x => x.textContent).join(" ")).join("|")');
   const pn = async (n) => js('state.presetNames.get(' + n + ')');
   check('footswitch strip shows IA, IB, IIA, IIB with the demo presets', (await fsCells()) === ['IA 1 ' + await pn(1), 'IB 3 ' + await pn(3), 'IIA 7 ' + await pn(7), 'IIB 15 ' + await pn(15)].join('|'), await fsCells());
@@ -854,20 +946,20 @@ async function run() {
   check('a preset switch re-reads the slots from the (demo) state dump', (await js('state.selectedPreset')) === 15 && tx.length === 1 && / 48 00 1D 00 00 00$/.test(tx[0]) && (await js('state.presetSlots.b2')) === 6 && (await js('[...document.querySelectorAll(".fs-cell.active")].map(c => c.dataset.fk).join()')) === 'fs-a1', JSON.stringify(tx) + ' ' + JSON.stringify(await js('state.presetSlots')));
 
   // an assignment drops unsaved edits on the pedal, so it asks first like a preset switch
-  await js('__ui.dirty = true; render()'); await frame();
+  await js('state.presetDirty = true; render()'); await frame();
   await rightClick('[data-fk="fs-b1"]');
   await js(ctxItem('Assign current preset') + '.click()'); await waitFor('!!document.querySelector(".modal h2")');
   check('assigning with unsaved edits asks first (Save changes to …?)', (await js('document.querySelector(".modal h2")?.textContent') || '').startsWith('Save changes to ') && (await js('[...document.querySelectorAll(".modal button")].map(b => b.textContent).join("|")')) === 'Cancel|Don’t save|Save and assign', await js('[...document.querySelectorAll(".modal button")].map(b => b.textContent).join("|")'));
   n0 = await mark();
   await key('Escape'); await settle();
-  check('Escape cancels: nothing sent, edits kept', (await txSince(n0)).length === 0 && await js('!document.querySelector(".modal") && __ui.dirty === true') && (await js('state.presetSlots.b1')) === 2, JSON.stringify(await txSince(n0)));
+  check('Escape cancels: nothing sent, edits kept', (await txSince(n0)).length === 0 && await js('!document.querySelector(".modal") && state.presetDirty === true') && (await js('state.presetSlots.b1')) === 2, JSON.stringify(await txSince(n0)));
   await rightClick('[data-fk="fs-b1"]');
   await js(ctxItem('Assign current preset') + '.click()'); await waitFor('!!document.querySelector(".modal button")');
   n0 = await mark();
   await js('[...document.querySelectorAll(".modal button")].find(b => b.textContent === "Don’t save").click()');
   tx = (await txWait(n0, tx => tx.some(t => /^TX Assign/.test(t)))).filter(t => /^TX /.test(t) && !/state request|Expression assignments request/.test(t));
-  await waitFor(async () => (await js('__ui.dirty')) === false && (await js('state.presetSlots.b1')) === 14);
-  check('"Don’t save" sends just the assignment and clears the edits', tx.length === 1 && tx[0] === 'TX Assign preset 15 to footswitch IB: ' + fsHex(6, 14) && (await js('__ui.dirty')) === false && (await js('state.presetSlots.b1')) === 14, JSON.stringify(tx));
+  await waitFor(async () => (await js('state.presetDirty')) === false && (await js('state.presetSlots.b1')) === 14);
+  check('"Don’t save" sends just the assignment and clears the edits', tx.length === 1 && tx[0] === 'TX Assign preset 15 to footswitch IB: ' + fsHex(6, 14) && (await js('state.presetDirty')) === false && (await js('state.presetSlots.b1')) === 14, JSON.stringify(tx));
 
   // ---------------------------------------------------------------- preset list
   await click('.preset-row[data-n="7"]');
@@ -897,7 +989,7 @@ async function run() {
   check('preset change packet sent (SetPresetSlotsRequest, type 29)', tx.some(t => /^TX Preset change 5: .*1D 00 00 00$/.test(t)), JSON.stringify(tx));
   check('status bar names the pedal and firmware, nothing redundant', (await js('document.getElementById("bleText").textContent')) === 'Demo data, nothing is sent' && await js('document.getElementById("pcText").parentElement.hidden'));
   check('one connection indicator: none in the header, the status bar LED is on', await js('!document.querySelector(".head .led, #conn, #status, #dot") && document.getElementById("bleLed").className === "led on"'));
-  await js('__ui.dirty = false; state.presetDirty = true; render()'); await frame();
+  await js('state.presetDirty = true; render()'); await frame();
   check('pedal-reported unsaved changes show in the status bar', await js('!document.getElementById("pcText").parentElement.hidden && /unsaved/.test(document.getElementById("pcText").textContent)'));
   await click('.preset-row[data-n="6"]');
   await waitFor('!!document.querySelector(".modal")');
@@ -1113,7 +1205,7 @@ async function run() {
     && (await js('Array.from(__tempo.frame(1, 120)).map(b => b.toString(16).toUpperCase().padStart(2, "0")).join(" ")')) === tempoHex(1, 120));
   const tempoTx = (list) => list.filter(t => /^TX (Live|Preset) tempo /.test(t)).map(t => t.split(': ')[1]);
   const tempoVal = () => js('document.querySelector(\'[data-fk="tempo-bpm"]\').value');
-  const cleanSlate = () => js('__ui.dirty = false; state.presetDirty = false; render()');
+  const cleanSlate = () => js('state.presetDirty = false; render()');
   const tempoOrigin = await js('state.selectedPreset');
   await cleanSlate(); await frame();
   await click('.preset-row[data-n="1"]');
@@ -1124,11 +1216,11 @@ async function run() {
   await click('[data-fk="tempo-down"]'); await click('[data-fk="tempo-up"]');
   let tt = tempoTx(await waitFor(async () => { const t = await txSince(n0); return tempoTx(t).includes(tempoHex(1, 120)) && t; }) || []);
   check('− / + send live tempo writes (3:1), the last one exactly the live 120 body', tt.length >= 1 && tt[tt.length - 1] === tempoHex(1, 120) && tt.every(h => h.startsWith('0F C0 18 01')), JSON.stringify(tt));
-  check('live writes do not mark the preset dirty', !(await js('__ui.dirty || state.presetDirty')));
+  check('live writes do not mark the preset dirty', !(await js('state.presetDirty')));
   await txWait(n0, tx => tempoTx(tx).includes(tempoHex(0, 120)));
-  await waitFor('__ui.dirty');
+  await waitFor('state.presetDirty');
   tt = tempoTx(await txSince(n0));
-  check('the steps are committed (one 3:0 with 120) about 0.8 s after they settle', tt[tt.length - 1] === tempoHex(0, 120) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('__ui.dirty'), JSON.stringify(tt));
+  check('the steps are committed (one 3:0 with 120) about 0.8 s after they settle', tt[tt.length - 1] === tempoHex(0, 120) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('state.presetDirty'), JSON.stringify(tt));
   await cleanSlate(); await frame();
   // Scrub: drag sideways on the TEMPO label, 1 BPM per 4 px.
   n0 = await mark();
@@ -1150,7 +1242,7 @@ async function run() {
   await type('93'); await key('Return');
   tt = tempoTx(await txWait(n0, tx => tempoTx(tx).length >= 2));
   check('Enter sends exactly the preset 93 body (3:0) at once (cancelling the pending scrub commit), after a live 93', tt.length === 2 && tt[0] === tempoHex(1, 93) && tt[1] === tempoHex(0, 93), JSON.stringify(tt));
-  await checkSoon('the commit marks the preset dirty (UI and the pedal\'s 115)', async () => await js('__ui.dirty && state.presetDirty && !document.getElementById("dirtyMark").hidden') && (await tempoVal()) === '93');
+  await checkSoon('the commit marks the preset dirty (the pedal\'s 115)', async () => await js('state.presetDirty && !document.getElementById("dirtyMark").hidden') && (await tempoVal()) === '93');
   await click('[data-fk="tempo-up"]'); await click('[data-fk="tempo-up"]'); await waitFor(async () => (await tempoVal()) === '95');
   await shot('xx-tempo');
   n0 = await txCount();
@@ -1158,7 +1250,7 @@ async function run() {
   tx = await txWait(n0, tx => tx.some(t => /^TX save preset 1/.test(t)));
   tt = tempoTx(tx);
   check('Save right after a step commits the tempo first (one 3:0 with 95), then saves', tt.length === 1 && tt[0] === tempoHex(0, 95) && tx.some(t => /^TX save preset 1/.test(t)), JSON.stringify(tx));
-  await checkSoon('after Save the preset is clean and the demo pedal stored 95', '!__ui.dirty && !state.presetDirty && __demo.tempo.buf === 95');
+  await checkSoon('after Save the preset is clean and the demo pedal stored 95', '!state.presetDirty && __demo.tempo.buf === 95');
   await click('.preset-row[data-n="4"]');
   await checkSoon('switching presets updates the field (preset 4: 140)', async () => (await tempoVal()) === '140', tempoVal);
   await settle();
@@ -1198,11 +1290,11 @@ async function run() {
   await js('{ const r = document.getElementById("metroTempo"); r.value = "100"; r.dispatchEvent(new Event("input")); r.dispatchEvent(new Event("change")); }');
   await waitFor(async () => tempoTx(await txSince(n0)).length >= 1);
   tt = tempoTx(await txSince(n0));
-  check('the metronome slider goes live at once (100), nothing into the preset yet', tt.length >= 1 && tt.every(h => h === tempoHex(1, 100)) && !(await js('__ui.dirty')), JSON.stringify(tt));
+  check('the metronome slider goes live at once (100), nothing into the preset yet', tt.length >= 1 && tt.every(h => h === tempoHex(1, 100)) && !(await js('state.presetDirty')), JSON.stringify(tt));
   await txWait(n0, tx => tempoTx(tx).includes(tempoHex(0, 100)));
-  await waitFor('__ui.dirty');
+  await waitFor('state.presetDirty');
   tt = tempoTx(await txSince(n0));
-  check('… and commits 100 into the preset about 1.5 s later', tt[tt.length - 1] === tempoHex(0, 100) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('__ui.dirty'), JSON.stringify(tt));
+  check('… and commits 100 into the preset about 1.5 s later', tt[tt.length - 1] === tempoHex(0, 100) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('state.presetDirty'), JSON.stringify(tt));
   n0 = await txCount();
   await js('__metro.setBpm(104, "trainer")');
   await sleep(1700);   // longer than COMMIT_METRO (1.5 s): proves no commit into the preset follows
@@ -1272,7 +1364,7 @@ async function run() {
   await shot('10a-usage-dirty');
   await key('Escape');
   check('Escape closes the usage menu', await js('!document.querySelector(".pop")'));
-  await key('s', [MOD]); await waitFor('!__ui.dirty'); await settle();   // save: the scan may run now
+  await key('s', [MOD]); await waitFor('!state.presetDirty'); await settle();   // save: the scan may run now
   const origin = await js('state.selectedPreset');
   const saved = await js('[...Array(64).keys()].map(i => i + 1).filter(i => !/^empty$/i.test(state.presetNames.get(i))).length');
   // partial: stop it after a few presets
@@ -1302,7 +1394,7 @@ async function run() {
   tx = (await txSince(n0)).filter(t => /^TX Preset change \d+:/.test(t));
   check('scan switches through the presets over Bluetooth and ends on the origin', tx.length === saved && /^TX Preset change (\d+):/.exec(tx[tx.length - 1])[1] === String(origin), tx.length + ' switches: ' + tx.map(t => /change (\d+)/.exec(t)[1]).join(','));
   check('scan returns to the origin preset', (await js('state.selectedPreset')) === origin && (await js('document.querySelector(".preset-title .name").textContent')) === 'Big Lead 5');
-  check('scan leaves no unsaved edits', await js('!__ui.dirty && document.getElementById("dirtyMark").hidden'));
+  check('scan leaves no unsaved edits', await js('!state.presetDirty && document.getElementById("dirtyMark").hidden'));
   check('result says when the scan ran', new RegExp('^Scanned: \\d{1,2}:\\d{2}.*, ' + saved + ' presets$').test(await js('document.querySelector(\'[data-fk="usage-date"]\')?.textContent || ""')), await js('document.querySelector(\'[data-fk="usage-date"]\')?.textContent'));
   check('result lists the presets that use the current capture slot', (await js('document.querySelector(\'[data-fk="usage-feeds"]\')?.textContent')) === 'Slot 9 feeds: 5 Big Lead 5, 12 JP2C Lead 2, 20 Octave Down Riff 2', await js('document.querySelector(\'[data-fk="usage-feeds"]\')?.textContent'));
   // computed from the scan itself: the delete check earlier in the run empties preset 24, which frees its slot
@@ -1324,7 +1416,7 @@ async function run() {
   check('the slot chooser shows the usage counts', (await js('document.querySelector(\'.modal [data-fk="pickslot-9"] .uses\')?.textContent')) === '3' && await js('document.querySelector(\'.modal [data-fk="pickslot-20"] .uses\')?.textContent === "free"'));
   await shot('10c-usage-chooser');
   await key('Escape');
-  await checkSoon('cancelling the chooser loads nothing', '!document.querySelector(".modal") && !__ui.dirty');
+  await checkSoon('cancelling the chooser loads nothing', '!document.querySelector(".modal") && !state.presetDirty');
   // a preset that plays a capture straight from the library
   await click('.preset-row[data-n="9"]');
   await checkSoon('library capture: the node says "From the library", not a slot', async () => (await js('document.querySelector("[data-stage=capture] .sub").textContent')) === 'From the library: Fuzz Face Si', () => js('document.querySelector("[data-stage=capture] .sub").textContent'));
@@ -1452,11 +1544,11 @@ async function run() {
   check('the choice is stored (settings.accent)', (await js('JSON.parse(localStorage.getItem("settings.accent"))')) === '#ff7000');
   check('Orange shows as selected', await js('document.querySelector(".swatch.on").getAttribute("aria-label") === "Orange"'));
   await key('Escape'); await waitFor(async () => !(await settingsOpen()));
-  await js('__ui.dirty = true; render()'); await frame();
+  await js('state.presetDirty = true; render()'); await frame();
   check('the Save button\'s background follows the accent', (await js('getComputedStyle(document.getElementById("saveBtn")).backgroundColor')) === 'rgb(255, 112, 0)', await js('getComputedStyle(document.getElementById("saveBtn")).backgroundColor'));
   check('text on the light accent turns dark for contrast', (await js('getComputedStyle(document.getElementById("saveBtn")).color')) === 'rgb(18, 18, 18)', await js('getComputedStyle(document.getElementById("saveBtn")).color'));
   await shot('18-orange-accent');
-  await js('__ui.dirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
   const orangeRow = rgbOf(await js('getComputedStyle(document.querySelector(".preset-row.active")).backgroundColor'));
   check('the active preset row colour follows the accent', !!orangeRow && orangeRow[0] > orangeRow[1] && orangeRow[1] > orangeRow[2] && orangeRow[0] > 50, JSON.stringify(orangeRow));
   const orangeNum = rgbOf(await js('getComputedStyle(document.querySelector(".preset-row.active .n")).color'));
@@ -1528,7 +1620,7 @@ async function run() {
   // Bodies are the phone app's, byte for byte (trace 2026-10-09, docs/INVESTIGATION.md §10): preset 62 = index 0x3D.
   const expTx = async (n) => (await txSince(n)).filter(t => /^TX Save expression assignments/.test(t)).map(t => t.split(': ').pop());
   const expReads = async (n) => (await txSince(n)).filter(t => /^TX Expression assignments request/.test(t)).map(t => t.split(': ').pop());
-  await js('__ui.dirty = false; state.presetDirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
   await click('.preset-row[data-n="2"]'); await waitFor('state.selectedPreset === 2'); await settle();
   check('the chain has an EXP pill ahead of In', await js('(() => { const p = document.getElementById("expBtn").getBoundingClientRect(), o = document.querySelector(".chain-row .io").getBoundingClientRect(); return p.right < o.left && Math.abs((p.top + p.bottom) / 2 - (o.top + o.bottom) / 2) < 4; })()'));
   await checkSoon('the EXP pill counts preset 2\'s demo assignment', async () => (await js('document.getElementById("expCount").textContent')) === '1');
@@ -1604,7 +1696,7 @@ async function run() {
   check('Clear all sends the bare preset index (62 {3:61})', JSON.stringify(await expTx(n0)) === JSON.stringify(['06 C0 18 3D 3E 00 00 00']), JSON.stringify(await expTx(n0)));
   await checkSoon('after Clear all the empty state is back', '!!document.querySelector(\'[data-fk="exp-empty"]\')');
   await checkSoon('a cleared set reports the preset clean again (115)', 'state.presetDirty === false');
-  await checkSoon('reverting the expression edits clears the UI dirty state', '!!document.getElementById("dirtyMark").hidden && !!document.getElementById("discardBtn").hidden && !__ui.dirty && !state.presetDirty');
+  await checkSoon('reverting the expression edits clears the UI dirty state', '!!document.getElementById("dirtyMark").hidden && !!document.getElementById("discardBtn").hidden && !state.presetDirty');
   const revertedPreset = await js('state.selectedPreset');
   await click(`.preset-row[data-n="${revertedPreset + 1}"]`);
   await checkSoon('switching after reverting does not ask for confirmation', async () => (await js('state.selectedPreset')) === revertedPreset + 1 && await js('!document.querySelector(".modal")'));
@@ -1632,7 +1724,7 @@ async function run() {
   check('B on the Expression panel does nothing (no stage to bypass)', (await js('document.querySelector(".insp-head h1").textContent')) === 'Expression pedal');
 
   // the demo pedal keeps the set per preset until a reload drops unsaved edits
-  await js('__ui.dirty = false; state.presetDirty = false; render()'); await frame(); await settle();
+  await js('state.presetDirty = false; render()'); await frame(); await settle();
   await click('.preset-row[data-n="2"]');
   await checkSoon('preset 2 still has its own Gain sweep', async () => JSON.stringify(await js('__exp.assigned()')) === JSON.stringify(['range-gain']), async () => JSON.stringify(await js('__exp.assigned()')));
   await settle();
