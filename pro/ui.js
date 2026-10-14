@@ -1580,7 +1580,8 @@
   // RX: wrap the core's notification handler (connectNano looks it up by name on connect).
   const coreOnC305 = window.onC305;
   window.onC305 = function (event) {
-    if (rec.on) recordEvent('rx', new Uint8Array(event.target.value.buffer.slice(0)));
+    const v = event && event.target && event.target.value;
+    if (rec.on && v && v.buffer) recordEvent('rx', new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength || v.buffer.byteLength));
     return coreOnC305.call(this, event);
   };
   // toFolder: save straight into the recordings folder without asking (Developer tools turned off mid-recording).
@@ -3059,7 +3060,7 @@
   window.onC305 = function (event, ...rest) {
     try {
       const v = event && event.target && event.target.value;
-      const d = v && v.buffer ? new Uint8Array(v.buffer.slice(0)) : null;
+      const d = v && v.buffer ? new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength || v.buffer.byteLength) : null;
       if (d && d.length >= 6) {
         const flags = d[1];
         if ((flags & 0xC0) === 0xC0) {

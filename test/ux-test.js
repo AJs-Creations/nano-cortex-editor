@@ -365,6 +365,86 @@ async function run() {
   check('→ wraps to Gate', (await js('__ui.selected')) === 'gate');
   await key('4');
 
+  // ---------------------------------------------------------------- unsolicited device state changes
+  // Type 64 carries the unsolicited expression-pedal position. It has no
+  // effect state itself, so coalesce it into one current-state read, then let
+  // the normal state/FX parameter pipeline update the chain and controls.
+  await js(`(() => {
+    const b = state.blocks.pre1;
+    const model = b.models.find(m => m.name === 'Transpose');
+    b.model = model.name;
+    b.params = structuredClone(model.params);
+    b.params[1].value = -12;
+    b.on = false;
+    Object.values(state.blocks).forEach(x => { if (x !== b) x.on = false; });
+    state.stateMode = 'idle';
+    state.protocol.presetLoad = false;
+    state.protocol.stateRefreshPending = false;
+    state.presetLoadTimer = null;
+    state.exp.loaded = true;
+    state.exp.preset = state.selectedPreset;
+    state.exp.ranges = { pre1: { on: true, inverted: true, min: 29, max: 50 } };
+    if (state.stateRefreshTimer) clearTimeout(state.stateRefreshTimer);
+    state.stateRefreshTimer = null;
+    __ui.selected = 'pre1';
+    render();
+  })()`);
+  await frame();
+  n0 = await mark();
+  await js(`(() => {
+    const f = buildFrame([0x08, 0x01, 0x18, 0x02, 0x20, 0x2B], MSG.ExpressionPedalPositionChanged);
+    const raw = new Uint8Array(f.length + 2);
+    raw.set(f, 1);
+    const value = new DataView(raw.buffer, 1, f.length);
+    for (let i = 0; i < 3; i++) window.onC305({ target: { value } });
+  })()`);
+  tx = await txWait(n0, list => list.filter(t => /^TX Current preset state request/.test(t)).length > 0);
+  const stateReads = tx.filter(t => /^TX Current preset state request/.test(t));
+  check('expression notifications coalesce into one current-state read', stateReads.length === 1, JSON.stringify(stateReads));
+  n0 = await mark();
+  await js(`(() => {
+    const field31 = [0xFA, 0x01, 0x05, 0x00, 0x01, 0x01, 0x01, 0x01];
+    state.stateBytes = [0x68, state.selectedPreset - 1, ...field31];
+    parseBufferedCurrentState();
+  })()`);
+  await checkSoon('expression-triggered state read updates the signal-chain bypass state', () => js('state.blocks.pre1.on === true && document.querySelector(\'[data-stage="pre1"] .stomp\')?.getAttribute("aria-pressed") === "true"'));
+  tx = await waitFor(async () => {
+    const list = await txSince(n0);
+    return list.some(t => /^TX Pre FX 1 param refresh/.test(t)) ? list : false;
+  });
+  await js(`(() => {
+    const floats = Uint8Array.from([0.5, 0.75, 0.5, 0.5, 0.5].flatMap(float32LE));
+    const d = new Uint8Array(6 + floats.length + 4);
+    d.set([0, 0xC0, 0x08, 0x06, 0x22, floats.length]);
+    d.set(floats, 6);
+    d.set([0x8A, 0, 0, 0], 6 + floats.length);
+    d[0] = d.length - 2;
+    window.onC305({ target: { value: new DataView(d.buffer) } });
+  })()`);
+  await checkSoon('expression readback updates the Transpose Semitones knob', () => js('state.blocks.pre1.params[1].value === 6 && document.querySelector(\'[data-fk="p-pre1-1"]\')?.getAttribute("aria-valuenow") === "6"'), () => js('String(state.blocks.pre1.params[1].value)'));
+  await js(`(() => {
+    // Heel omits field 4. It must still update the assigned parameter before
+    // the bypassed block is excluded from the unsafe parameter readback.
+    const f = buildFrame([0x08, 0x01, 0x18, 0x02, 0x40, 0x00], MSG.ExpressionPedalPositionChanged);
+    window.onC305({ target: { value: new DataView(f.buffer) } });
+    if (state.stateRefreshTimer) clearTimeout(state.stateRefreshTimer);
+    state.stateRefreshTimer = null;
+    state.protocol.stateRefreshPending = false;
+    cancelExpressionParamRefresh();
+  })()`);
+  await checkSoon('heel expression position updates Transpose to its configured zero', () => js('state.blocks.pre1.params[1].value === 0 && document.querySelector(\'[data-fk="p-pre1-1"]\')?.getAttribute("aria-valuenow") === "0"'), () => js('String(state.blocks.pre1.params[1].value)'));
+  await js(`(() => {
+    // Keep this synthetic endpoint case from leaking expression state into
+    // the later save/preset tests in the shared demo session.
+    state.exp.loaded = false;
+    state.exp.preset = null;
+    state.exp.ranges = {};
+    state.exp.bypass = {};
+    state.expressionPedalRaw = null;
+  })()`);
+  await settle();
+  await js('__demo.load(state.selectedPreset); __ui.selected = "capture"; render()'); await frame(); await settle();
+
   // ---------------------------------------------------------------- FX param drag on post3
   await key('8');
   const firstKnob = await js('document.querySelector(".inspector .knob")?.dataset.fk');
