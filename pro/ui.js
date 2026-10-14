@@ -119,6 +119,11 @@
     selected: 'capture',
     demo: false,
     dirty: false,
+    dirtyGeneration: 0,
+    dirtyReadbackPending: false,
+    dirtyReadbackInFlight: false,
+    dirtyReadbackGeneration: 0,
+    dirtyReadbackTimer: null,
     connText: 'Not connected',
     connecting: false,
     connectError: '',
@@ -296,7 +301,48 @@
   }
 
   // ------------------------------------------------------------------ actions
+  function clearDirtyReadbackState() {
+    if (ui.dirtyReadbackTimer !== null) {
+      clearTimeout(ui.dirtyReadbackTimer);
+      ui.dirtyReadbackTimer = null;
+    }
+    ui.dirtyReadbackPending = false;
+    ui.dirtyReadbackInFlight = false;
+    ui.dirtyReadbackGeneration = 0;
+  }
+
+  function clearLocalDirty() {
+    ui.dirty = false;
+    ui.dirtyGeneration++;
+    clearDirtyReadbackState();
+  }
+
+  // Dirty notifications are asynchronous and can arrive after a later local write. A clean notification
+  // therefore needs a current-state read before it can clear the optimistic UI latch. Keep this debounced so
+  // a knob drag or a quick sequence of pedal writes causes at most one extra state read after things settle.
+  function scheduleDirtyStateReadback() {
+    if (ui.demo || !state.connected || !ui.dirtyReadbackPending) return;
+    if (ui.dirtyReadbackTimer !== null) clearTimeout(ui.dirtyReadbackTimer);
+    ui.dirtyReadbackTimer = setTimeout(() => {
+      ui.dirtyReadbackTimer = null;
+      if (ui.demo || !state.connected || !ui.dirtyReadbackPending || ui.dirtyReadbackInFlight) return;
+      if (state.stateMode !== 'idle' || state.protocol.presetLoad || gattWriteQueue.length || gattWritePumpRunning) {
+        scheduleDirtyStateReadback();
+        return;
+      }
+
+      ui.dirtyReadbackInFlight = true;
+      ui.dirtyReadbackGeneration = ui.dirtyGeneration;
+      Promise.resolve(requestCurrentPresetState()).catch(() => {
+        // Keep the UI conservative if the read fails; a later clean notification can retry it.
+        if (ui.dirtyReadbackGeneration === ui.dirtyGeneration) ui.dirtyReadbackInFlight = false;
+      });
+    }, 300);
+  }
+
   function markDirty() {
+    ui.dirtyGeneration++;
+    ui.dirtyReadbackPending = !ui.demo;
     if (!ui.dirty) { ui.dirty = true; render(); }
   }
 
@@ -354,7 +400,7 @@
     });
     if (choice !== 'ok') { render(); return; }
     ui.lastAction = 'Discarding edits\u2026'; renderStatus();
-    ui.dirty = false;
+    clearLocalDirty();
     state.exp.loaded = false;   // the pedal reloads the saved set too; read it again
     await selectPreset(n);
     if (ui.demo) demo.load(n);
@@ -406,7 +452,7 @@
     if (!await writeC304('save preset ' + n, packet)) { toast('Save failed: the Bluetooth write did not go through.'); ui.lastAction = ''; render(); return false; }
     state.presetNames.set(n, name);
     if (ui.demo) demo.store(n);
-    ui.dirty = false;
+    clearLocalDirty();
     ui.sideSig = '';
     await selectPreset(n);
     if (ui.demo) demo.load(n);
@@ -487,7 +533,7 @@
       return false;
     }
     state.presetSlots = { ...state.presetSlots, [slotKey]: presetIndex };
-    if (dirty) { ui.dirty = false; if (ui.demo) demo.load(state.selectedPreset); }   // the pedal is back on the stored preset
+    if (dirty) { clearLocalDirty(); if (ui.demo) demo.load(state.selectedPreset); }   // the pedal is back on the stored preset
     window.log('Assigned preset ' + n + ' to footswitch ' + fs.label);
     toast('Preset ' + n + ' on footswitch ' + fs.label);
     render();
@@ -1451,7 +1497,7 @@
       if (choice === 'cancel' || !choice) { render(); return; }
       if (choice === 'save') await doSave();
     }
-    ui.dirty = false;
+    clearLocalDirty();
     await selectPreset(n);
     if (ui.demo) demo.load(n);
     render();
@@ -1631,7 +1677,7 @@
   window.setStatus = function (text, connected = false) {
     ui.connText = text;
     if (connected) tapC304();
-    if (!connected && /disconnect/i.test(text)) { ui.dirty = false; ui.lastAction = ''; state.presetTempo = null; }
+    if (!connected && /disconnect/i.test(text)) { clearLocalDirty(); ui.lastAction = ''; state.presetTempo = null; }
     if (!connected) { state.exp.loaded = false; state.exp.preset = null; }
     render();
   };
@@ -1658,7 +1704,7 @@
   window.showNotice = async (title, text) => { await modal({ title, body: text, buttons: [{ id: 'ok', label: 'OK', primary: true }] }); return true; };
   window.showSaveResult = function (text, kind, detail) {
     if (kind === 'ok') {
-      ui.dirty = false;
+      clearLocalDirty();
       if (ui.demo) demo.store(state.selectedPreset);
       toast('Saved to preset ' + state.selectedPreset + ', ' + presetName(state.selectedPreset));
     } else if (kind === 'error') {
@@ -1721,6 +1767,8 @@
   const coreParseState = window.parseBufferedCurrentState;
   window.parseBufferedCurrentState = function () {
     const bytes = state.stateBytes.slice();
+    const readbackInFlight = ui.dirtyReadbackInFlight;
+    const readbackGeneration = ui.dirtyReadbackGeneration;
     let src = null;
     try {
       if (bytes.length) {
@@ -1734,6 +1782,15 @@
     let r;
     try { r = coreParseState.apply(this, arguments); }
     catch (err) { log('ERROR: state parse failed: ' + err.message); }
+    if (readbackInFlight) {
+      ui.dirtyReadbackInFlight = false;
+      if (readbackGeneration === ui.dirtyGeneration) {
+        if (!state.presetDirty) clearLocalDirty();
+      } else if (ui.dirtyReadbackPending) {
+        scheduleDirtyStateReadback();
+      }
+      render();
+    }
     if (src && src.pos > 5) {
       Object.assign(state.capture, { selectedSlot: null, lastActiveSlot: null, activeSlot: null });
       log('Capture comes straight from the library: ' + (state.currentCapture.name || 'unknown') + ' (position ' + src.pos + ')');
@@ -3088,11 +3145,11 @@
     if (t === DEV_MSG.CAPTURE) { onCaptureDetails(data); return true; }
     if (t === DEV_MSG.SETTINGS) { try { onDeviceSettings(data); } catch (err) { log('ERROR: settings parse: ' + err.message); } }
     const handled = coreTypedForDevice.apply(this, arguments);
-    // The pedal reports clean when live edits are returned to their saved values.
-    // Core owns the authoritative bit; clear the optimistic UI latch after it has
-    // parsed the notification so the header and preset-switch guard agree.
+    // A clean notification normally means the edit was reverted. It can also be a delayed
+    // notification for an earlier write, so local edits require a current-state confirmation.
     if (t === MSG.PresetDirtyStateChanged && !state.presetDirty && ui.dirty) {
-      ui.dirty = false;
+      if (ui.dirtyReadbackPending) scheduleDirtyStateReadback();
+      else clearLocalDirty();
       render();
     }
     return handled;
@@ -3800,7 +3857,7 @@
       emitTempo();
       followExp(true);
       window.log('Demo mode: writes are logged here but not sent anywhere.');
-      ui.dirty = false;
+      clearLocalDirty();
       toast('Demo data loaded. Nothing is sent to a pedal.');
       render();
       scrollPresetIntoView();
@@ -3815,7 +3872,7 @@
       state.library = { factory: [], user: [], irFactory: [], irUser: [], loaded: false, requested: false };
       state.presetNames.clear(); state.captureNames.clear(); state.irNames.clear();
       blank();
-      ui.dirty = false;
+      clearLocalDirty();
       window.setStatus('Disconnected');
       render();
     }
