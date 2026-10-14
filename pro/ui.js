@@ -119,6 +119,15 @@
     selected: 'capture',
     demo: false,
     dirty: false,
+    dirtyGeneration: 0,
+    dirtyEditKind: null,
+    localBypassStatus: null,
+    savedBypassPreset: null,
+    savedBypassState: null,
+    dirtyReadbackPending: false,
+    dirtyReadbackInFlight: false,
+    dirtyReadbackGeneration: 0,
+    dirtyReadbackTimer: null,
     connText: 'Not connected',
     connecting: false,
     connectError: '',
@@ -127,6 +136,8 @@
     drawerOpen: false,
     editing: false,       // an inline value editor is open
     renderQueued: false,
+    knobDragging: false,  // defer full renders while a pointer drag owns a knob
+    renderAfterKnob: false,
     sideSig: '',
     lastAction: '',
     logs: [],
@@ -296,7 +307,117 @@
   }
 
   // ------------------------------------------------------------------ actions
-  function markDirty() {
+  const BYPASS_KEYS = ['gate', 'capture', 'cab', ...FX_BLOCK_KEYS];
+
+  function currentBypassState() {
+    return {
+      gate: Boolean(state.gate.on),
+      capture: Boolean(state.capture.on),
+      cab: Boolean(state.cabIR.on),
+      ...Object.fromEntries(FX_BLOCK_KEYS.map(key => [key, Boolean(state.blocks[key].on)])),
+    };
+  }
+
+  function sameBypassState(a, b) {
+    return Boolean(a && b) && BYPASS_KEYS.every(key => Boolean(a[key]) === Boolean(b[key]));
+  }
+
+  function savedBypassStateFromFields(fields) {
+    const fx = fields[31] && fields[31][0];
+    if (!fx || fx.wire !== 2 || !fx.raw || fx.raw.length < FX_BLOCK_KEYS.length) return null;
+    const capture = fields[11] && fields[11][0];
+    const cab = fields[12] && fields[12][0];
+    const gate = fields[54] && fields[54][0];
+    return {
+      gate: !gate,
+      capture: Boolean(capture && capture.value),
+      cab: Boolean(cab),
+      ...Object.fromEntries(FX_BLOCK_KEYS.map((key, index) => [key, fx.raw[index] === 0])),
+    };
+  }
+
+  function rememberSavedBypassState(snapshot) {
+    if (!snapshot) return;
+    ui.savedBypassPreset = Number(state.selectedPreset) || null;
+    ui.savedBypassState = snapshot;
+  }
+
+  function clearSavedBypassState() {
+    ui.savedBypassPreset = null;
+    ui.savedBypassState = null;
+    ui.localBypassStatus = null;
+  }
+
+  function bypassStateMatchesSaved() {
+    return ui.savedBypassPreset === (Number(state.selectedPreset) || null) &&
+      sameBypassState(currentBypassState(), ui.savedBypassState);
+  }
+
+  function pedalDirtyForUI() {
+    // A clean local bypass comparison is stronger than a delayed type-115
+    // notification. The pedal can report an older dirty state after the user
+    // has already returned the bypass values to the saved preset.
+    return Boolean(state.presetDirty && ui.localBypassStatus !== 'clean');
+  }
+
+  function clearDirtyReadbackState() {
+    if (ui.dirtyReadbackTimer !== null) {
+      clearTimeout(ui.dirtyReadbackTimer);
+      ui.dirtyReadbackTimer = null;
+    }
+    ui.dirtyReadbackPending = false;
+    ui.dirtyReadbackInFlight = false;
+    ui.dirtyReadbackGeneration = 0;
+  }
+
+  function clearLocalDirty(preserveBypassStatus = false) {
+    ui.dirty = false;
+    ui.dirtyGeneration++;
+    clearDirtyReadbackState();
+    ui.dirtyEditKind = null;
+    if (!preserveBypassStatus) ui.localBypassStatus = null;
+  }
+
+  // Dirty notifications are asynchronous and can arrive after a later local write. A clean notification
+  // therefore needs a current-state read before it can clear the optimistic UI latch. Keep this debounced so
+  // a knob drag or a quick sequence of pedal writes causes at most one extra state read after things settle.
+  function scheduleDirtyStateReadback() {
+    if (ui.demo || !state.connected || !ui.dirtyReadbackPending || ui.dirtyEditKind === 'bypass') return;
+    if (ui.dirtyReadbackTimer !== null) clearTimeout(ui.dirtyReadbackTimer);
+    ui.dirtyReadbackTimer = setTimeout(() => {
+      ui.dirtyReadbackTimer = null;
+      if (ui.demo || !state.connected || !ui.dirtyReadbackPending || ui.dirtyReadbackInFlight) return;
+      if (state.stateMode !== 'idle' || state.protocol.presetLoad || gattWriteQueue.length || gattWritePumpRunning) {
+        scheduleDirtyStateReadback();
+        return;
+      }
+
+      ui.dirtyReadbackInFlight = true;
+      ui.dirtyReadbackGeneration = ui.dirtyGeneration;
+      Promise.resolve(requestCurrentPresetState()).catch(() => {
+        // Keep the UI conservative if the read fails; a later clean notification can retry it.
+        if (ui.dirtyReadbackGeneration === ui.dirtyGeneration) ui.dirtyReadbackInFlight = false;
+      });
+    }, 300);
+  }
+
+  function markDirty(kind = 'other') {
+    ui.dirtyGeneration++;
+    if (!ui.dirty) ui.dirtyEditKind = kind;
+    else if (ui.dirtyEditKind !== kind) ui.dirtyEditKind = 'mixed';
+
+    if (ui.dirtyEditKind === 'bypass') {
+      ui.localBypassStatus = bypassStateMatchesSaved() ? 'clean' : 'dirty';
+      if (ui.localBypassStatus === 'clean') {
+        clearLocalDirty(true);
+        render();
+        return;
+      }
+    } else {
+      ui.localBypassStatus = null;
+    }
+
+    ui.dirtyReadbackPending = !ui.demo && ui.dirtyEditKind !== 'bypass';
     if (!ui.dirty) { ui.dirty = true; render(); }
   }
 
@@ -314,16 +435,18 @@
     } else {
       const b = state.blocks[key];
       if (!b.on && b.model === 'None' && !b.unknownId) { toast('Choose an effect for ' + b.title + ' first'); return; }
+      forgetLiveFXEnableState(key);
       b.on = !b.on;
       setFXBlockEnabled(key, b.on);
     }
-    markDirty();
+    markDirty('bypass');
     render();
   }
 
   function chooseModel(key, name) {
     const b = state.blocks[key];
     if (!b || (name === b.model && !b.unknownId)) return;
+    forgetLiveFXEnableState(key);
     if (name === 'None') {
       delete b.unknownId;   // like any effect: bypassed, and the slot shows empty until the pedal reports it again
       b.model = 'None';
@@ -354,7 +477,7 @@
     });
     if (choice !== 'ok') { render(); return; }
     ui.lastAction = 'Discarding edits\u2026'; renderStatus();
-    ui.dirty = false;
+    clearLocalDirty();
     state.exp.loaded = false;   // the pedal reloads the saved set too; read it again
     await selectPreset(n);
     if (ui.demo) demo.load(n);
@@ -406,7 +529,7 @@
     if (!await writeC304('save preset ' + n, packet)) { toast('Save failed: the Bluetooth write did not go through.'); ui.lastAction = ''; render(); return false; }
     state.presetNames.set(n, name);
     if (ui.demo) demo.store(n);
-    ui.dirty = false;
+    clearLocalDirty();
     ui.sideSig = '';
     await selectPreset(n);
     if (ui.demo) demo.load(n);
@@ -464,7 +587,7 @@
     if (!state.connected) { toast('Connect your Nano Cortex first'); return false; }
     // The pedal drops the current preset's unsaved edits on an assignment (seen in the trace, INVESTIGATION §8),
     // so ask first, like a preset switch does.
-    const dirty = ui.dirty || state.presetDirty;
+    const dirty = ui.dirty || pedalDirtyForUI();
     if (dirty) {
       const choice = await modal({
         title: 'Save changes to ' + presetName(state.selectedPreset) + '?',
@@ -487,7 +610,7 @@
       return false;
     }
     state.presetSlots = { ...state.presetSlots, [slotKey]: presetIndex };
-    if (dirty) { ui.dirty = false; if (ui.demo) demo.load(state.selectedPreset); }   // the pedal is back on the stored preset
+    if (dirty) { clearLocalDirty(); if (ui.demo) demo.load(state.selectedPreset); }   // the pedal is back on the stored preset
     window.log('Assigned preset ' + n + ' to footswitch ' + fs.label);
     toast('Preset ' + n + ' on footswitch ' + fs.label);
     render();
@@ -1196,9 +1319,314 @@
     } catch { /* fall through to the core */ }
     return coreOnC305ForTempo.apply(this, [event, ...rest]);
   };
+
+  // Device-originated parameter changes use more than one message shape. The
+  // legacy control report (type 26) carries the raw amp/capture/gate value;
+  // state-change and parameter messages tell us that the rest of the preset
+  // should be read again. Keep the high-frequency path local and use the
+  // existing state/FX/cab readers for everything that needs context.
+  const LIVE_PARAMETER_REPORT = 26;
+  const LIVE_FX_PARAMETER_REPORT = 99;
+  const DEVICE_STATE_CHANGED = 31;
+  const PRESET_DIRTY_REPORT = 115;
+  const CONTEXT_PARAMETER_REPORTS = new Set([94, 99]); // cab and FX parameter frames
+  const LIVE_CONTROL_IDS = {
+    0x00: ['amp', 'gain'],
+    0x01: ['amp', 'level'],
+    0x02: ['amp', 'bass'],
+    0x03: ['amp', 'mid'],
+    0x04: ['amp', 'treble'],
+    0x0A: ['capture', 'volume'],
+    0x0B: ['gate', 'reduction'],
+  };
+  let pedalStateRefreshTimer = null;
+  let pedalStateRefreshPending = false;
+  let lastLiveFXParameter = null;
+  let lastLiveFXEnable = null;
+  // A full preset dump contains the saved bypass state. When expression
+  // control is active, that can differ from the pedal's effective state, so
+  // retain the latest contextual bypass report until the preset changes.
+  const liveFXEnableStates = new Map();
+
+  function liveFXPreset() {
+    const n = Number(state.selectedPreset);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+
+  function forgetLiveFXEnableState(blockKey) {
+    liveFXEnableStates.delete(blockKey);
+    if (lastLiveFXEnable && (!blockKey || lastLiveFXEnable.blockKey === blockKey)) lastLiveFXEnable = null;
+  }
+
+  function clearLiveFXEnableStates() {
+    liveFXEnableStates.clear();
+    lastLiveFXEnable = null;
+  }
+
+  function restoreLiveFXEnableStates() {
+    const preset = liveFXPreset();
+    let changed = false;
+    for (const [blockKey, entry] of liveFXEnableStates) {
+      if (entry.preset === null) entry.preset = preset;
+      else if (preset !== null && entry.preset !== preset) {
+        liveFXEnableStates.delete(blockKey);
+        continue;
+      }
+      const block = state.blocks[blockKey];
+      if (block && block.on !== entry.enabled) {
+        block.on = entry.enabled;
+        changed = true;
+      }
+    }
+    // A type-64 expression position can change the effective bypass state
+    // without changing the saved preset bytes. Reapply it after a full dump
+    // for the same reason we retain contextual type-31 reports.
+    if (state.expressionPedalRaw !== null && typeof window.applyExpressionPositionToUI === 'function') {
+      window.applyExpressionPositionToUI(state.expressionPedalRaw);
+    }
+    if (changed) render();
+    return changed;
+  }
+
+  // Keep the protection close to the core operation as well as at the end of
+  // the full parser. The direct hook covers any state-dump path that invokes
+  // this function before the parser returns; the parser hook below is the
+  // final guard after all of its other state updates have completed.
+  const coreApplyFXEnabledStates = window.applyFXEnabledStatesFromCurrentState;
+  window.applyFXEnabledStatesFromCurrentState = function (fields) {
+    const result = coreApplyFXEnabledStates.apply(this, arguments);
+    restoreLiveFXEnableStates();
+    return result;
+  };
+
+  const captureDbFromRaw = (raw) => raw <= 128 ? ((raw / 128) * 24) - 24 : ((raw - 128) / 127) * 12;
+
+  function pedalStateReadBusy() {
+    return state.stateMode !== 'idle' || state.pendingParamBlock || state.paramRefreshQueue.length || state.fileBusy ||
+      gattWriteQueue.length || gattWritePumpRunning;
+  }
+
+  function runPedalStateRefresh() {
+    pedalStateRefreshTimer = null;
+    if (!pedalStateRefreshPending || !state.connected) {
+      pedalStateRefreshPending = false;
+      return;
+    }
+    if (state.protocol.presetLoad) {
+      pedalStateRefreshPending = false; // the preset load already includes an authoritative state read
+      return;
+    }
+    if (pedalStateReadBusy()) {
+      pedalStateRefreshTimer = setTimeout(runPedalStateRefresh, 100);
+      return;
+    }
+    pedalStateRefreshPending = false;
+    log('Pedal state changed; refreshing the current preset');
+    requestCurrentPresetState();
+  }
+
+  function schedulePedalStateRefresh() {
+    if (!state.connected || state.protocol.presetLoad) return;
+    pedalStateRefreshPending = true;
+    if (pedalStateRefreshTimer !== null) clearTimeout(pedalStateRefreshTimer);
+    pedalStateRefreshTimer = setTimeout(runPedalStateRefresh, 120);
+  }
+
+  function fixed32Float(entry) {
+    if (!entry || entry.wire !== 5 || !entry.raw || entry.raw.length !== 4) return null;
+    const value = new DataView(Uint8Array.from(entry.raw).buffer).getFloat32(0, true);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function applyLiveFXParameterReport(data) {
+    if (frameType(data) !== LIVE_FX_PARAMETER_REPORT) return false;
+
+    const fields = parseProtoFields(data.slice(2, data.length - 4));
+    const reportEntry = fields[1] && fields[1][0];
+    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1) return false;
+
+    const blockEntry = fields[3] && fields[3][0];
+    const paramEntry = fields[4] && fields[4][0];
+    const valueEntry = fields[5] && fields[5][0];
+    if ((blockEntry && blockEntry.wire !== 0) || (paramEntry && paramEntry.wire !== 0) ||
+      (valueEntry && valueEntry.wire !== 5)) return false;
+
+    // These are protobuf fields, so the pedal omits the zero-valued block,
+    // parameter index, and value. Slot 0 / parameter 0 / raw value 0 are the
+    // defaults represented by an absent field.
+    const blockSlot = blockEntry ? blockEntry.value : 0;
+    const paramIndex = paramEntry ? paramEntry.value : 0;
+    const raw = valueEntry ? fixed32Float(valueEntry) : 0;
+    if (!Number.isInteger(blockSlot) || blockSlot < 0 || blockSlot >= FX_BLOCK_KEYS.length ||
+      !Number.isInteger(paramIndex) || paramIndex < 0 || raw === null || raw < 0 || raw > 255) return false;
+
+    const blockKey = FX_BLOCK_KEYS[blockSlot];
+    const block = state.blocks[blockKey];
+    const param = block && block.params && block.params[paramIndex];
+    if (!param) return false;
+
+    lastLiveFXParameter = { blockKey, paramIndex, raw, at: Date.now() };
+    const next = normalizedToParamValue(param, raw / 255);
+    if (param.value !== next) {
+      param.value = next;
+      render();
+    }
+    return true;
+  }
+
+  function applyLiveFXEnableReport(data) {
+    if (frameType(data) !== DEVICE_STATE_CHANGED) return false;
+
+    const fields = parseProtoFields(data.slice(2, data.length - 4));
+    const reportEntry = fields[1] && fields[1][0];
+    const slotEntry = fields[3] && fields[3][0];
+    const stateEntry = fields[4] && fields[4][0];
+    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1 ||
+      !slotEntry || slotEntry.wire !== 0 ||
+      (stateEntry && stateEntry.wire !== 0)) return false;
+
+    // Enable slots 4..8 correspond to Pre FX 1..2 and Post FX 1..3. A
+    // missing field 4 is protobuf's default zero, which means enabled.
+    const stateValue = stateEntry ? stateEntry.value : 0;
+    if (stateValue !== 0 && stateValue !== 1) return false;
+    const blockKey = FX_BLOCK_KEYS.find(key => blockSlotConfig[key] && blockSlotConfig[key].enableSlot === slotEntry.value);
+    const block = blockKey && state.blocks[blockKey];
+    if (!block) return false;
+
+    const enabled = stateValue === 0;
+    liveFXEnableStates.set(blockKey, { preset: liveFXPreset(), enabled, at: Date.now() });
+    lastLiveFXEnable = { blockKey, enabled, at: Date.now() };
+    if (block.on !== enabled) {
+      block.on = enabled;
+      render();
+    }
+    return true;
+  }
+
+  function isRecentLiveFXEnableCompanion(data) {
+    if (frameType(data) !== PRESET_DIRTY_REPORT || !lastLiveFXEnable ||
+      Date.now() - lastLiveFXEnable.at > 250) return false;
+
+    const fields = parseProtoFields(data.slice(2, data.length - 4));
+    const reportEntry = fields[1] && fields[1][0];
+    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1) return false;
+
+    // The pedal follows an effective FX bypass report with a dirty-state
+    // notification. The full preset state that follows contains the saved
+    // bypass value, which can differ while expression bypass is active.
+    lastLiveFXEnable = null;
+    return true;
+  }
+
+  function isRecentLiveFXCompanion(data) {
+    if (frameType(data) !== LIVE_PARAMETER_REPORT || !lastLiveFXParameter ||
+      Date.now() - lastLiveFXParameter.at > 250) return false;
+
+    const fields = parseProtoFields(data.slice(2, data.length - 4));
+    const reportEntry = fields[1] && fields[1][0];
+    const markerEntry = fields[6] && fields[6][0];
+    const idEntry = fields[3] && fields[3][0];
+    const valueEntry = fields[4] && fields[4][0];
+    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1 ||
+      !markerEntry || markerEntry.wire !== 0 || markerEntry.value !== 1 ||
+      !idEntry || idEntry.wire !== 0 || idEntry.value !== 0x06 ||
+      (valueEntry && valueEntry.wire !== 0)) return false;
+
+    const raw = valueEntry ? valueEntry.value : 0;
+    const matches = raw === Math.round(lastLiveFXParameter.raw);
+    if (matches) lastLiveFXParameter = null;
+    return matches;
+  }
+
+  function applyLiveParameterReport(data) {
+    if (frameType(data) !== LIVE_PARAMETER_REPORT) return false;
+
+    const fields = parseProtoFields(data.slice(2, data.length - 4));
+    const reportEntry = fields[1] && fields[1][0];
+    const markerEntry = fields[6] && fields[6][0];
+    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1 ||
+      !markerEntry || markerEntry.wire !== 0 || markerEntry.value !== 1) return false;
+
+    const idEntry = fields[3] && fields[3][0];
+    if (idEntry && idEntry.wire !== 0) return false;
+    // Gain is control ID 0. Protobuf omits that field when its value is zero,
+    // so a normal gain report has no field 3 at all.
+    const controlId = idEntry ? idEntry.value : 0;
+    if (!LIVE_CONTROL_IDS[controlId]) return false;
+
+    // Protobuf omits a zero-valued field 4, so `... 18 03 30 01 ...`
+    // means Mid = 0 rather than a malformed packet.
+    const valueEntry = fields[4] && fields[4][0];
+    if (valueEntry && valueEntry.wire !== 0) return false;
+    const raw = clamp(valueEntry ? valueEntry.value : 0, 0, 255);
+    const [kind, key] = LIVE_CONTROL_IDS[controlId];
+    let changed = false;
+
+    if (kind === 'amp') {
+      if (state.amp[key] !== raw) { state.amp[key] = raw; changed = true; }
+    } else if (kind === 'capture') {
+      const db = captureDbFromRaw(raw);
+      if (state.captureVolumeDb !== db) { state.captureVolumeDb = db; changed = true; }
+    } else if (kind === 'gate') {
+      const reduction = clamp(raw - 108, 0, 100);
+      if (state.gate.params[0].value !== reduction) { state.gate.params[0].value = reduction; changed = true; }
+    }
+
+    if (changed) render();
+    return true;
+  }
+
+  const coreOnC305ForLiveParameters = window.onC305;
+  window.onC305 = function (event, ...rest) {
+    try {
+      const v = event && event.target && event.target.value;
+      const data = v && v.buffer ? new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength || v.buffer.byteLength) : null;
+      if (data) {
+        const type = frameType(data);
+        if (type === LIVE_FX_PARAMETER_REPORT) {
+          // Type 99 carries the effect slot, parameter index, and a fixed32
+          // raw value (0..255), so it can update the affected block directly.
+          // Unknown effects/parameters fall back to the authoritative refresh.
+          if (!applyLiveFXParameterReport(data)) schedulePedalStateRefresh();
+        } else if (type === LIVE_PARAMETER_REPORT) {
+          // Known raw controls update immediately; an unknown control ID still
+          // falls through to the core and remains visible in the protocol log.
+          if (isRecentLiveFXCompanion(data)) {
+            // The pedal sends a type-26 parameter notification alongside type
+            // 99 for FX controls. Type 99 already applied the contextual value;
+            // don't turn every movement into a full-preset read.
+          } else if (!applyLiveParameterReport(data)) schedulePedalStateRefresh();
+        } else if (type === DEVICE_STATE_CHANGED) {
+          // Contextual type-31 reports identify the exact FX enable slot and
+          // bypass state, so update that block without waiting for a full read.
+          // Generic type-31 notifications are coalesced by the core handler;
+          // avoid starting a second refresh from this UI wrapper.
+          applyLiveFXEnableReport(data);
+        } else if (type === PRESET_DIRTY_REPORT) {
+          // Type 115 is normally a reason to re-read the preset. When it is
+          // the pedal's immediate companion to a contextual FX bypass report,
+          // that read would replace the effective expression state with the
+          // saved preset state.
+          if (!isRecentLiveFXEnableCompanion(data)) schedulePedalStateRefresh();
+        } else if (CONTEXT_PARAMETER_REPORTS.has(type)) {
+          // These messages do not carry enough context to safely identify the
+          // affected FX/cab parameter. One coalesced state read supplies it.
+          schedulePedalStateRefresh();
+        }
+      }
+    } catch (err) { log('ERROR: live parameter report: ' + err.message); }
+    return coreOnC305ForLiveParameters.apply(this, [event, ...rest]);
+  };
+
   // A preset switch drops unsaved edits on the pedal, a pending tempo commit included.
   const coreSelectPreset = window.selectPreset;
-  window.selectPreset = function () { cancelTempoCommit(); tempo.lastLive = null; return coreSelectPreset.apply(this, arguments); };
+  window.selectPreset = function () {
+    cancelTempoCommit();
+    tempo.lastLive = null;
+    clearLiveFXEnableStates();
+    clearSavedBypassState();
+    return coreSelectPreset.apply(this, arguments);
+  };
 
   // The Tempo field in the inspector's top row: −/+ (Shift ×10), typeable, Tap. Built once and moved into each
   // inspector head, so it keeps focus and a half-typed value across renders.
@@ -1320,7 +1748,7 @@
   // Parity with the native app: step through every saved preset, note the capture and cab slot each one
   // plays (or that it plays one straight from the library), then go back to the preset we started on.
   // Switching presets discards unsaved edits, so the scan refuses to start while there are any.
-  const isDirtyNow = () => Boolean(ui.dirty || state.presetDirty);
+  const isDirtyNow = () => Boolean(ui.dirty || pedalDirtyForUI());
   const presetLabel = (n) => n + ' ' + presetName(n);
   const usersOf = (kind, slot) => (ui.usage && (kind === 'capture' ? ui.usage.captures : ui.usage.cabs)[slot]) || [];
   const scanTime = () => (ui.usage ? ui.usage.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
@@ -1438,7 +1866,7 @@
     ui.pendingPreset = null;
     ui.sideSig = ''; // repaint the list either way (undoes a keyboard highlight if cancelled)
     if (n === state.selectedPreset && state.connected) { render(); return; }
-    if (ui.dirty && state.connected) {
+    if (isDirtyNow() && state.connected) {
       const choice = await modal({
         title: 'Save changes to ' + presetName(state.selectedPreset) + '?',
         body: 'Switching presets discards edits that haven’t been saved to the pedal.',
@@ -1451,7 +1879,7 @@
       if (choice === 'cancel' || !choice) { render(); return; }
       if (choice === 'save') await doSave();
     }
-    ui.dirty = false;
+    clearLocalDirty();
     await selectPreset(n);
     if (ui.demo) demo.load(n);
     render();
@@ -1631,7 +2059,7 @@
   window.setStatus = function (text, connected = false) {
     ui.connText = text;
     if (connected) tapC304();
-    if (!connected && /disconnect/i.test(text)) { ui.dirty = false; ui.lastAction = ''; state.presetTempo = null; }
+    if (!connected && /disconnect/i.test(text)) { clearLocalDirty(); clearSavedBypassState(); ui.lastAction = ''; state.presetTempo = null; clearLiveFXEnableStates(); }
     if (!connected) { state.exp.loaded = false; state.exp.preset = null; }
     render();
   };
@@ -1658,7 +2086,7 @@
   window.showNotice = async (title, text) => { await modal({ title, body: text, buttons: [{ id: 'ok', label: 'OK', primary: true }] }); return true; };
   window.showSaveResult = function (text, kind, detail) {
     if (kind === 'ok') {
-      ui.dirty = false;
+      clearLocalDirty();
       if (ui.demo) demo.store(state.selectedPreset);
       toast('Saved to preset ' + state.selectedPreset + ', ' + presetName(state.selectedPreset));
     } else if (kind === 'error') {
@@ -1721,10 +2149,14 @@
   const coreParseState = window.parseBufferedCurrentState;
   window.parseBufferedCurrentState = function () {
     const bytes = state.stateBytes.slice();
+    const readbackInFlight = ui.dirtyReadbackInFlight;
+    const readbackGeneration = ui.dirtyReadbackGeneration;
     let src = null;
+    let savedBypass = null;
     try {
       if (bytes.length) {
         const f = parseProtoFields(bytes);
+        savedBypass = savedBypassStateFromFields(f);
         const v = (n) => (f[n] && f[n][0] && f[n][0].wire === 0 ? f[n][0].value : 0);
         src = { bank: Math.min(5, Math.max(1, v(9) || 1)), pos: v(11), cab: v(12) };
         state.capture.fromLibrary = src.pos > 5;
@@ -1734,6 +2166,15 @@
     let r;
     try { r = coreParseState.apply(this, arguments); }
     catch (err) { log('ERROR: state parse failed: ' + err.message); }
+    if (readbackInFlight) {
+      ui.dirtyReadbackInFlight = false;
+      if (readbackGeneration === ui.dirtyGeneration) {
+        if (!state.presetDirty && ui.dirtyEditKind !== 'bypass') clearLocalDirty();
+      } else if (ui.dirtyReadbackPending) {
+        scheduleDirtyStateReadback();
+      }
+      render();
+    }
     if (src && src.pos > 5) {
       Object.assign(state.capture, { selectedSlot: null, lastActiveSlot: null, activeSlot: null });
       log('Capture comes straight from the library: ' + (state.currentCapture.name || 'unknown') + ' (position ' + src.pos + ')');
@@ -1762,6 +2203,11 @@
     } catch { /* leave the gate knob as it was */ }
     try { tempoFromDump(parseProtoFields(bytes)); } catch { /* keep the tempo shown */ }
     followExp();   // a new preset (app, footswitch) or a fresh connection: read its expression assignments
+    rememberSavedBypassState(savedBypass);
+    // The core parser applies the preset's saved bypass bytes. Reapply a
+    // contextual pedal report afterward because expression bypass can make
+    // the effective state differ from that saved value.
+    restoreLiveFXEnableStates();
     return r;
   };
 
@@ -1879,10 +2325,18 @@
   };
 
   function render() {
+    if (ui.knobDragging) {
+      ui.renderAfterKnob = true;
+      return;
+    }
     if (ui.renderQueued) return;
     ui.renderQueued = true;
     requestAnimationFrame(() => {
       ui.renderQueued = false;
+      if (ui.knobDragging) {
+        ui.renderAfterKnob = true;
+        return;
+      }
       renderAll();
     });
   }
@@ -1913,7 +2367,7 @@
       el('span', { class: 'num', text: state.connected ? 'Preset ' + state.selectedPreset : '' }),
       el('span', { class: 'name', text: state.connected ? presetName(state.selectedPreset) : '' })
     );
-    const dirty = (ui.dirty || state.presetDirty) && state.connected;
+    const dirty = (ui.dirty || pedalDirtyForUI()) && state.connected;
     $('dirtyMark').hidden = !dirty;
 
     const busy = ui.connecting || /requesting|connecting/i.test(ui.connText);
@@ -1955,7 +2409,7 @@
       rows.push(el('div', {
         oncontextmenu: (e) => contextMenu(e, [
           { label: i === state.selectedPreset ? 'Current preset' : 'Load', disabled: !state.connected || i === state.selectedPreset, action: () => goToPreset(i) },
-          ...(i === state.selectedPreset ? [{ label: 'Discard edits', disabled: !state.connected || !(ui.dirty || state.presetDirty), action: () => doDiscard() }] : []),
+          ...(i === state.selectedPreset ? [{ label: 'Discard edits', disabled: !state.connected || !isDirtyNow(), action: () => doDiscard() }] : []),
           { label: 'Rename\u2026', disabled: !state.connected || (i !== state.selectedPreset && ui.dirty), action: async () => { if (i !== state.selectedPreset) await goToPreset(i); if (state.selectedPreset === i) doRename(); } },
           '-',
           { label: empty ? 'Save current sound here\u2026' : 'Save current sound over this preset\u2026', disabled: !state.connected || i === state.selectedPreset, action: () => doSaveAs(i) },
@@ -2019,7 +2473,7 @@
   }
 
   function nodeMenu(s, info) {
-    const items = [{ label: info.on ? 'Bypass' : 'Enable', disabled: !state.connected || info.none, action: () => { toggleStage(s.key); markDirty(); render(); } }];
+    const items = [{ label: info.on ? 'Bypass' : 'Enable', disabled: !state.connected || info.none, action: () => { toggleStage(s.key); render(); } }];
     if (/^(pre|post)\d$/.test(s.key)) {
       items.push({ label: info.none ? 'Add an effect\u2026' : 'Change effect\u2026', disabled: !state.connected, action: () => { select(s.key); render(); requestAnimationFrame(() => { const b = document.querySelector('[data-fk="picker-' + s.key + '"]'); if (b) openModelPicker(s.key, b); }); } });
       items.push({ label: 'Clear slot', disabled: !state.connected || info.none, action: () => { chooseModel(s.key, 'None'); render(); } });
@@ -2195,7 +2649,8 @@
       get: () => Number(p.value),
       fmt: (v) => paramDisplayValue({ ...p, value: v }),
       live: (v) => { p.value = v; },
-      commit: (v) => { p.value = v; setFXParam(key, p); markDirty(); render(); },
+      send: (v) => { p.value = v; setFXParam(key, p); },
+      commit: (v) => { p.value = v; markDirty(); render(); },
     });
   }
 
@@ -2212,7 +2667,8 @@
         fmt: (v) => Math.round((v / 255) * 100) + '%',
         parse: (str) => (parseFloat(str) / 100) * 255,
         live: (v) => { state.amp[k] = v; },
-        commit: (v) => { state.amp[k] = Math.round(v); setAmpKnob(k, state.amp[k]); markDirty(); render(); },
+        send: (v) => { state.amp[k] = Math.round(v); setAmpKnob(k, state.amp[k]); },
+        commit: (v) => { state.amp[k] = Math.round(v); markDirty(); render(); },
       }));
     });
     amp.append(knobControl({
@@ -2221,7 +2677,8 @@
       get: () => Number(state.captureVolumeDb || 0),
       fmt: (v) => (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' dB',
       live: (v) => { state.captureVolumeDb = v; },
-      commit: (v) => { state.captureVolumeDb = v; setCaptureVolumeDb(v); markDirty(); render(); },
+      send: (v) => { state.captureVolumeDb = v; setCaptureVolumeDb(v); },
+      commit: (v) => { state.captureVolumeDb = v; markDirty(); render(); },
     }));
     out.push(el('div', { class: 'section' }, el('h3', { text: 'Amp' }), amp));
 
@@ -2289,7 +2746,8 @@
         get: () => Number(state.cabIR.levelDb),
         fmt: (v) => (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' dB',
         live: (v) => { state.cabIR.levelDb = v; },
-        commit: (v) => { setCabIRLevelDb(v); markDirty(); render(); },
+        send: (v) => { setCabIRLevelDb(v); },
+        commit: (v) => { markDirty(); render(); },
       }),
       knobControl({
         fk: 'cab-hp', label: 'High pass', color: s.color, locked: !on, lockedTip: 'Cab / IR is bypassed',
@@ -2297,7 +2755,8 @@
         get: () => Number(state.cabIR.highPassHz),
         fmt: (v) => Math.round(v) + ' Hz',
         live: (v) => { state.cabIR.highPassHz = v; },
-        commit: (v) => { setCabIRHighPassHz(v); markDirty(); render(); },
+        send: (v) => { setCabIRHighPassHz(v); },
+        commit: (v) => { markDirty(); render(); },
       }),
       knobControl({
         fk: 'cab-lp', label: 'Low pass', color: s.color, locked: !on, lockedTip: 'Cab / IR is bypassed',
@@ -2306,7 +2765,8 @@
         fmt: (v) => (v >= 10000 ? (v / 1000).toFixed(1) + ' kHz' : Math.round(v) + ' Hz'),
         parse: (str) => /k/i.test(str) ? parseFloat(str) * 1000 : parseFloat(str),
         live: (v) => { state.cabIR.lowPassHz = v; },
-        commit: (v) => { setCabIRLowPassHz(v); markDirty(); render(); },
+        send: (v) => { setCabIRLowPassHz(v); },
+        commit: (v) => { markDirty(); render(); },
       }));
 
     out.push(el('div', { class: 'section' }, el('h3', { text: 'Tone' }), knobs));
@@ -2355,7 +2815,8 @@
           get: () => Number(p.value),
           fmt: (v) => Math.round(v) + '%',
           live: (v) => { p.value = v; },
-          commit: (v) => { p.value = Math.round(v); setGateReduction(p.value); markDirty(); render(); },
+          send: (v) => { p.value = Math.round(v); setGateReduction(p.value); },
+          commit: (v) => { p.value = Math.round(v); markDirty(); render(); },
         }))),
     ];
   }
@@ -2600,16 +3061,38 @@
     draw();
     if (o.locked) return root;
 
-    const setLive = (v) => { current = snap(v); o.live && o.live(current); draw(); };
+    // `send` is deliberately separate from `commit`: live controls can write every
+    // snapped value through the coalescing BLE queue without rebuilding the inspector
+    // during a drag. Expression-assignment knobs omit `send` because their type-62
+    // message replaces the whole assignment set and should still be committed once.
+    const setLive = (v, force = false) => {
+      const next = snap(v);
+      if (!force && next === current) return false;
+      current = next;
+      o.live && o.live(current);
+      draw();
+      o.send && o.send(current);
+      return true;
+    };
     let pendingCommit = null;
+    let changedSinceCommit = false;
+    const commitNow = () => {
+      clearTimeout(pendingCommit);
+      pendingCommit = null;
+      if (!changedSinceCommit) return;
+      changedSinceCommit = false;
+      o.commit(current);
+    };
     const commitSoon = () => {
       clearTimeout(pendingCommit);
-      pendingCommit = setTimeout(() => o.commit(current), 160);
+      pendingCommit = setTimeout(() => { pendingCommit = null; commitNow(); }, 160);
     };
 
     svg.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      ui.knobDragging = true;
+      ui.renderAfterKnob = false;
       root.focus({ preventScroll: true });
       const startY = e.clientY;
       const startN = toNorm(current);
@@ -2620,24 +3103,31 @@
         if (!moved && Math.abs(dy) < 2) return;
         moved = true;
         const scale = ev.shiftKey ? 0.1 : 1;
-        setLive(fromNorm(startN + (dy / 180) * scale));
+        if (setLive(fromNorm(startN + (dy / 180) * scale))) changedSinceCommit = true;
       };
       const up = () => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
         window.removeEventListener('pointercancel', up);
+        window.removeEventListener('blur', up);
         document.body.style.cursor = '';
-        if (moved) o.commit(current);
+        ui.knobDragging = false;
+        const renderAfter = ui.renderAfterKnob;
+        ui.renderAfterKnob = false;
+        if (moved) commitNow();
+        if (renderAfter) render();
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
       window.addEventListener('pointercancel', up);
+      window.addEventListener('blur', up, { once: true });
     });
 
     svg.addEventListener('dblclick', () => {
       if (o.defaultValue === undefined) return;
-      setLive(o.defaultValue);
-      o.commit(current);
+      setLive(o.defaultValue, true);
+      changedSinceCommit = true;
+      commitNow();
     });
 
     root.addEventListener('wheel', (e) => {
@@ -2646,7 +3136,7 @@
       const n = toNorm(current) + dir * (e.shiftKey ? 0.002 : 0.012);
       let next = fromNorm(n);
       if (snap(next) === current) next = current + dir * step; // always move at least one step
-      setLive(next);
+      if (setLive(next)) changedSinceCommit = true;
       commitSoon();
     }, { passive: false });
 
@@ -2656,11 +3146,11 @@
       const dn = big ? 0.1 : 0.01;
       let handled = true;
       if (e.key === 'ArrowUp' || e.key === 'ArrowRight' || e.key === 'PageUp') {
-        const next = fromNorm(toNorm(current) + dn); setLive(snap(next) === current ? current + step : next);
+        const next = fromNorm(toNorm(current) + dn); if (setLive(snap(next) === current ? current + step : next)) changedSinceCommit = true;
       } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'PageDown') {
-        const next = fromNorm(toNorm(current) - dn); setLive(snap(next) === current ? current - step : next);
-      } else if (e.key === 'Home') setLive(min);
-      else if (e.key === 'End') setLive(max);
+        const next = fromNorm(toNorm(current) - dn); if (setLive(snap(next) === current ? current - step : next)) changedSinceCommit = true;
+      } else if (e.key === 'Home') { if (setLive(min)) changedSinceCommit = true; }
+      else if (e.key === 'End') { if (setLive(max)) changedSinceCommit = true; }
       else if (e.key === 'Enter') { startEdit(); }
       else handled = false;
       if (handled) { e.preventDefault(); e.stopPropagation(); if (e.key !== 'Enter') commitSoon(); }
@@ -2681,7 +3171,7 @@
         ui.editing = false;
         if (apply) {
           const parsed = o.parse ? o.parse(input.value) : parseFloat(input.value);
-          if (Number.isFinite(parsed)) { setLive(parsed); o.commit(current); }
+          if (Number.isFinite(parsed)) { if (setLive(parsed)) changedSinceCommit = true; commitNow(); }
         }
         const back = el('div', { class: 'val' });
         input.replaceWith(back);
@@ -2834,7 +3324,7 @@
     $('bleLed').className = 'led' + (ble ? ' on' : busy ? ' busy' : '');
     $('bleText').textContent = ui.demo ? 'Demo data, nothing is sent' : ble ? 'Connected to Nano Cortex' + (state.firmware ? ' · firmware ' + state.firmware : '') : busy ? 'Connecting…' : 'No pedal';
     // Only speaks up when the pedal itself reports something worth knowing.
-    const note = ble && state.presetDirty ? 'Pedal reports unsaved changes' : '';
+    const note = ble && pedalDirtyForUI() ? 'Pedal reports unsaved changes' : '';
     $('pcText').textContent = note;
     $('pcText').parentElement.hidden = !note;
     // "Sent: <protocol label>" is a developer detail; progress like "Saving preset 3…" is for everyone.
@@ -3087,7 +3577,19 @@
     if (t === DEV_MSG.ALIVE) { onAlive(data); return true; }
     if (t === DEV_MSG.CAPTURE) { onCaptureDetails(data); return true; }
     if (t === DEV_MSG.SETTINGS) { try { onDeviceSettings(data); } catch (err) { log('ERROR: settings parse: ' + err.message); } }
-    return coreTypedForDevice.apply(this, arguments);
+    const handled = coreTypedForDevice.apply(this, arguments);
+    // A clean notification normally means the edit was reverted. It can also be a delayed
+    // notification for an earlier write, so local edits require a current-state confirmation.
+    if (t === MSG.PresetDirtyStateChanged && !state.presetDirty && ui.dirty) {
+      if (ui.dirtyEditKind === 'bypass') {
+        // Bypass reports can arrive one write late. A full preset dump here
+        // contains the saved bypass bytes and would overwrite an expression-
+        // controlled live state, so let the local comparison decide instead.
+      } else if (ui.dirtyReadbackPending) scheduleDirtyStateReadback();
+      else clearLocalDirty();
+      render();
+    }
+    return handled;
   };
 
   // Settings → Device. Built when the tab opens; the reads go out then.
@@ -3760,6 +4262,7 @@
       if (saved.has(n)) applySnapshot(saved.get(n)); else if (n <= 24) fromPreset(n); else blank();
       reportFxModels();
       applyStateDump();
+      rememberSavedBypassState(currentBypassState());
       emitTempo();
       expLive.delete(n);   // a (re)load drops unsaved expression edits, like every other edit
       state.presetDirty = false;   // and the pedal reports the freshly loaded preset clean
@@ -3788,11 +4291,12 @@
       fromPreset(2);
       reportFxModels();
       applyStateDump();
+      rememberSavedBypassState(currentBypassState());
       window.setStatus('Connected', true);
       emitTempo();
       followExp(true);
       window.log('Demo mode: writes are logged here but not sent anywhere.');
-      ui.dirty = false;
+      clearLocalDirty();
       toast('Demo data loaded. Nothing is sent to a pedal.');
       render();
       scrollPresetIntoView();
@@ -3807,7 +4311,7 @@
       state.library = { factory: [], user: [], irFactory: [], irUser: [], loaded: false, requested: false };
       state.presetNames.clear(); state.captureNames.clear(); state.irNames.clear();
       blank();
-      ui.dirty = false;
+      clearLocalDirty();
       window.setStatus('Disconnected');
       render();
     }
