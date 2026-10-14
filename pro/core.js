@@ -422,10 +422,15 @@ const state = {
       stateMode: 'idle',
       stateBytes: [],
       stateTimer: null,
+      stateRefreshTimer: null,
+      expressionParamRefreshTimer: null,
+      expressionParamRefreshAt: 0,
+      expressionRenderTimer: null,
+      expressionPedalRaw: null,
       paramRefreshQueue: [],
       pendingParamBlock: null,
       pendingParamTimer: null,
-      protocol: { feSyncComplete: false, lastStateSync: 0, metadataLoaded: false, skipFXModelApply: false, presetLoad: false },
+      protocol: { feSyncComplete: false, lastStateSync: 0, metadataLoaded: false, skipFXModelApply: false, presetLoad: false, stateRefreshPending: false },
       presetLoadTimer: null,
       blocks: {
         pre1: { title: 'Pre FX 1', key: 'pre1', color: 'var(--cyan)', model: 'None', on: false, models: [{ name: 'None', category: 'Bypass', params: [] }].concat(preFxModels), params: [] },
@@ -445,6 +450,8 @@ const blockSlotConfig = {
       post2: { label: 'Post FX 2', modelSlot: 0x03, refreshSlot: 0x03, enableSlot: 0x07 },
       post3: { label: 'Post FX 3', modelSlot: 0x04, refreshSlot: 0x04, enableSlot: 0x08 }
     };
+
+const EXPRESSION_PARAM_REFRESH_INTERVAL = 250;
 
 // patched by build-core.js: upstream UI code may touch ids the pro page doesn't have.
     // Unknown ids get a detached, hidden dummy element so nothing throws.
@@ -630,6 +637,8 @@ function beginPresetLoad() {
       resetMidiPickup();
       state.protocol.presetLoad = true;
       state.protocol.skipFXModelApply = false;
+      cancelExpressionParamRefresh();
+      state.expressionPedalRaw = null;
       cancelFXParamRefresh();
 
       if (state.presetLoadTimer) clearTimeout(state.presetLoadTimer);
@@ -641,11 +650,83 @@ function beginPresetLoad() {
     }
 
 async function requestCurrentPresetState() {
+      if (state.stateRefreshTimer) clearTimeout(state.stateRefreshTimer);
+      state.stateRefreshTimer = null;
+      state.protocol.stateRefreshPending = false;
       if (state.stateTimer) clearTimeout(state.stateTimer);
       state.stateTimer = null;
       state.stateMode = 'current';
       state.stateBytes = [];
       await writeC304('Current preset state request', bytesFromHex('0C C0 08 03 18 01 20 01 28 01 01 00 00 00'));
+    }
+
+function cancelExpressionParamRefresh() {
+      if (state.expressionParamRefreshTimer) clearTimeout(state.expressionParamRefreshTimer);
+      state.expressionParamRefreshTimer = null;
+      state.expressionParamRefreshAt = 0;
+    }
+
+function cancelExpressionRender() {
+      if (state.expressionRenderTimer) clearTimeout(state.expressionRenderTimer);
+      state.expressionRenderTimer = null;
+    }
+
+function expressionParamRefreshKeys() {
+      const assigned = state.exp.loaded && state.exp.preset === state.selectedPreset
+        ? EXP_RANGES.filter(target => target.block && state.exp.ranges[target.key] && state.exp.ranges[target.key].on).map(target => target.block)
+        : [];
+      const candidates = assigned.length ? assigned : FX_BLOCK_KEYS;
+      return candidates.filter((key, index) => {
+        if (candidates.indexOf(key) !== index) return false;
+        const block = state.blocks[key];
+        return block && block.on && block.model !== 'None' && block.params && block.params.length > 0;
+      });
+    }
+
+function scheduleExpressionParamRefresh() {
+      if (!state.connected || state.fileBusy || state.expressionParamRefreshTimer) return;
+
+      const wait = Math.max(0, EXPRESSION_PARAM_REFRESH_INTERVAL - (Date.now() - state.expressionParamRefreshAt));
+      state.expressionParamRefreshTimer = setTimeout(() => {
+        state.expressionParamRefreshTimer = null;
+        if (!state.connected || state.fileBusy) return;
+
+        if (state.stateMode !== 'idle' || state.protocol.presetLoad || state.presetLoadTimer) {
+          scheduleExpressionParamRefresh();
+          return;
+        }
+
+        // Let the normal state/parameter pipeline finish rather than interrupting a
+        // read that was already scheduled by a preset change or state notification.
+        if (state.pendingParamBlock || state.paramRefreshQueue.length) return;
+
+        const keys = expressionParamRefreshKeys();
+        if (!keys.length) return;
+        state.expressionParamRefreshAt = Date.now();
+        queueFXParamRefreshes(keys);
+      }, wait);
+    }
+
+function scheduleDeviceStateRefresh() {
+      if (!state.connected) return;
+
+      state.protocol.stateRefreshPending = true;
+      if (state.stateRefreshTimer) clearTimeout(state.stateRefreshTimer);
+      state.stateRefreshTimer = setTimeout(() => {
+        state.stateRefreshTimer = null;
+        if (!state.connected || !state.protocol.stateRefreshPending) return;
+
+        if (state.stateMode !== 'idle' || state.protocol.presetLoad) {
+          scheduleDeviceStateRefresh();
+          return;
+        }
+
+        state.protocol.stateRefreshPending = false;
+        cancelFXParamRefresh();
+        state.protocol.skipFXModelApply = true;
+        log('Device state changed; refreshing current preset.');
+        requestCurrentPresetState();
+      }, 180);
     }
 
 function onDisconnected() {
@@ -654,6 +735,12 @@ function onDisconnected() {
       state.c305 = null;
       state.protocol.metadataLoaded = false;
       state.protocol.feSyncComplete = false;
+      if (state.stateRefreshTimer) clearTimeout(state.stateRefreshTimer);
+      state.stateRefreshTimer = null;
+      state.protocol.stateRefreshPending = false;
+      cancelExpressionParamRefresh();
+      cancelExpressionRender();
+      state.expressionPedalRaw = null;
       gattWriteQueue.splice(0).forEach(job => job.waiters.forEach(resolve => resolve(false)));
       resetExpRequests();
       setStatus('Disconnected');
@@ -661,7 +748,10 @@ function onDisconnected() {
     }
 
 function onC305(event) {
-      const data = new Uint8Array(event.target.value.buffer.slice(0));
+      const value = event && event.target && event.target.value;
+      const data = value && value.buffer
+        ? new Uint8Array(value.buffer, value.byteOffset || 0, value.byteLength || value.buffer.byteLength)
+        : new Uint8Array();
       if (frameType(data) === MSG.TunerMetering) { handleTunerMetering(data); return; }
       log('RX C305: ' + hex(data.slice(0, 24)) + (data.length > 24 ? ' ...' : ''));
 
@@ -1283,10 +1373,10 @@ function cancelFXParamRefresh() {
       state.pendingParamTimer = null;
     }
 
-function queueFXParamRefreshes() {
+function queueFXParamRefreshes(keys = FX_BLOCK_KEYS) {
       if (state.fileBusy) return;   // a preset export / import reads and writes the effects itself
       cancelFXParamRefresh();
-      state.paramRefreshQueue = FX_BLOCK_KEYS.filter(key => {
+      state.paramRefreshQueue = keys.filter(key => {
         const block = state.blocks[key];
         return block && block.on && block.model !== 'None' && block.params && block.params.length > 0;
       });
@@ -1656,6 +1746,8 @@ const MSG = {
       RetrieveSettingsResponse: 66,
       RenamePresetRequest: 111,
       RenamePresetResponse: 112,
+      ExpressionPedalPositionChanged: 64,
+      DeviceStateChanged: 31,
       PresetDirtyStateChanged: 115
     };
 
@@ -1790,6 +1882,38 @@ function handleTypedMessage(data) {
         const ok = fields[4] && fields[4][0] && fields[4][0].value === 1;
         log('Rename ' + (ok ? 'confirmed' : 'FAILED: ' + (firstString(fields, 5) || hex(data))));
         if (!ok) syncPresetNames();
+        return true;
+      }
+
+      if (type === MSG.ExpressionPedalPositionChanged) {
+        // Type 64 is the unsolicited EXP/MIDI position event. Its field 3
+        // selector is 2; field 4 carries the current pedal position, except
+        // at heel where protobuf omits the zero-valued field.
+        const fields = framePayloadFields(data);
+        const isExpressionPosition = fields[3] && fields[3][0] && fields[3][0].value === 2;
+        const expressionAssignmentPending = state.exp && state.exp.pending;
+        if (isExpressionPosition && !expressionAssignmentPending) {
+          state.expressionPedalRaw = fields[4] && fields[4][0] ? fields[4][0].value : 0;
+          if (!state.protocol.presetLoad && !state.presetLoadTimer) {
+            applyExpressionPositionToUI(state.expressionPedalRaw);
+            scheduleExpressionParamRefresh();
+          }
+        }
+        return true;
+      }
+
+      if (type === MSG.DeviceStateChanged) {
+        const fields = framePayloadFields(data);
+        const slot = fields[3] && fields[3][0] && fields[3][0].wire === 0 ? fields[3][0].value : null;
+        const stateValue = fields[4] && fields[4][0] && fields[4][0].wire === 0 ? fields[4][0].value : 0;
+        const blockKey = FX_BLOCK_KEYS.find(key => blockSlotConfig[key] && blockSlotConfig[key].enableSlot === slot);
+        const block = blockKey && state.blocks[blockKey];
+        if (fields[1] && fields[1][0] && fields[1][0].value === 1 && block && (stateValue === 0 || stateValue === 1)) {
+          block.on = stateValue === 0;
+          render();
+          return true;
+        }
+        if (!state.protocol.presetLoad && !state.presetLoadTimer) scheduleDeviceStateRefresh();
         return true;
       }
 
@@ -1973,6 +2097,125 @@ const rawToPct = raw => Math.round(clamp(raw, 0, 255) * 100 / 255);
 
 const pctToRaw = pct => Math.round(clamp(pct, 0, 100) * 255 / 100);
 
+const EXPRESSION_AMOUNT_PARAMS = { Transpose: 'Semitones' };
+
+function expressionAmountParam(block) {
+      if (!block || !block.params || !block.params.length) return null;
+      const preferred = EXPRESSION_AMOUNT_PARAMS[block.model];
+      const names = preferred ? [preferred] : ['Mix', 'Amount', 'Drive', 'Overdrive', 'Gain', 'Volume', 'Level', 'Blend', 'Fuzz'];
+      for (const name of names) {
+        const exact = block.params.find(param =>
+          normaliseName(param.name) === normaliseName(name) && !(param.meta && param.meta.kind === 'enum'));
+        if (exact) return exact;
+      }
+      if (preferred !== 'Mix') {
+        const mix = block.params.find(param =>
+          normaliseName(param.name) === 'mix' && !(param.meta && param.meta.kind === 'enum'));
+        if (mix) return mix;
+      }
+      return block.params.find(param => !(param.meta && param.meta.kind === 'enum')) || null;
+    }
+
+function expressionPositionNormalized(range, rawPosition) {
+      const position = clamp(Number(rawPosition), 0, 255) / 255;
+      const travel = range && range.inverted ? 1 - position : position;
+      const min = clamp(Number(range && range.min), 0, 100) / 100;
+      const max = clamp(Number(range && range.max), 0, 100) / 100;
+      return clamp(min + travel * (max - min), 0, 1);
+    }
+
+function expressionTargetState(target) {
+      if (target.block) {
+        const block = state.blocks[target.block];
+        return block ? { get: () => block.on, set: value => { block.on = value; } } : null;
+      }
+      if (target.key === 'capture') return { get: () => state.capture.on, set: value => { state.capture.on = value; } };
+      if (target.key === 'cab') return { get: () => state.cabIR.on, set: value => { state.cabIR.on = value; } };
+      if (target.key === 'gate') return { get: () => state.gate.on, set: value => { state.gate.on = value; } };
+      return null;
+    }
+
+function expressionBypassEnabled(entry, rawPosition, current) {
+      if (!entry || !entry.on || entry.mode !== 'heelToe') return null;
+      // Heel-toe switches are endpoint actions. Keep the current UI state
+      // during travel so it does not flip halfway through the sweep.
+      if (rawPosition > 2 && rawPosition < 253) return null;
+      const atToe = rawPosition >= 253;
+      const enabled = entry.inverted ? !atToe : atToe;
+      return current === enabled ? current : enabled;
+    }
+
+function applyExpressionPositionToUI(rawPosition) {
+      if (!state.exp.loaded || state.exp.preset !== state.selectedPreset) return false;
+
+      let changed = false;
+      EXP_RANGES.forEach(target => {
+        const range = state.exp.ranges[target.key];
+        if (!range || !range.on) return;
+
+        const normalized = expressionPositionNormalized(range, rawPosition);
+        const raw = Math.round(normalized * 255);
+
+        if (target.block) {
+          const param = expressionAmountParam(state.blocks[target.block]);
+          if (!param) return;
+          const next = normalizedToParamValue(param, normalized);
+          if (param.value !== next) {
+            param.value = next;
+            changed = true;
+          }
+          return;
+        }
+
+        if (['gain', 'bass', 'mid', 'treble'].includes(target.key)) {
+          if (state.amp[target.key] !== raw) {
+            state.amp[target.key] = raw;
+            changed = true;
+          }
+          return;
+        }
+
+        if (target.key === 'level') {
+          const nextDb = captureRawToDb(raw);
+          if (state.captureVolumeDb !== nextDb) {
+            state.captureVolumeDb = nextDb;
+            setCaptureVolumeUI(nextDb);
+            changed = true;
+          }
+          return;
+        }
+
+        if (target.key === 'gate' && state.gate.params[0]) {
+          const next = Math.round(normalized * 100);
+          if (state.gate.params[0].value !== next) {
+            state.gate.params[0].value = next;
+            changed = true;
+          }
+        }
+      });
+
+      EXP_BYPASS.forEach(target => {
+        const entry = state.exp.bypass[target.key];
+        const targetState = expressionTargetState(target);
+        if (!targetState) return;
+        const next = expressionBypassEnabled(entry, Number(rawPosition), targetState.get());
+        if (next !== null && next !== targetState.get()) {
+          targetState.set(next);
+          changed = true;
+        }
+      });
+
+      if (changed) {
+        if (!state.expressionRenderTimer) {
+          state.expressionRenderTimer = setTimeout(() => {
+            state.expressionRenderTimer = null;
+            render();
+          }, 0);
+        }
+      }
+      return changed;
+    }
+
 const expAssignmentWaiters = [];
 
 function defaultExpRange() { return { on: false, inverted: false, min: 0, max: 100 }; }
@@ -2083,6 +2326,7 @@ function parseExpAssignments(data) {
         state.exp.bypass = decoded.bypass;
         state.exp.loaded = true;
         setExpStatus('Loaded from preset ' + state.exp.preset + '.');
+        if (state.expressionPedalRaw !== null) applyExpressionPositionToUI(state.expressionPedalRaw);
         expAssignmentWaiters.slice().forEach(waiter => waiter());
         if (state.mc6.mixSlot >= 0) render();
         log('Expression assignments loaded: ' + EXP_RANGES.filter(r => state.exp.ranges[r.key].on).map(r => r.key)
