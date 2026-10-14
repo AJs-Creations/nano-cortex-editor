@@ -311,12 +311,25 @@ length, which the core's `frameType()` rejects, so `pro/ui.js` reads it before t
 | 9 | 12 (?) | 0 / 1 | 4-Preset / 2-Preset mode? The pedal re-sends its preset after a write | **unverified**, not exposed |
 | 7 | ? | 1 / 0 | A boolean touching capture/cab routing (state dump follows) | **unverified** |
 | 8 | ? | 1 / 0 | A boolean | **unverified** |
-| 12 | ? | 1 / 0 | A boolean | **unverified** |
-| 13 | ? | 1 / 0 | A boolean | **unverified** |
+| 12 (varint, explicit 0/1) | 15 | 1 / 0 | Mute Guitar Input | **confirmed** |
+| 13 (varint, explicit 0/1) | 16 | 1 / 0 | Mute Guitar Output (Outputs 1L/2R) | **confirmed** |
 | 15 | ? | 0 / 1 / 2 | A 3-way choice (MIDI clock source?) | **unverified** |
 | 16 | ? | 0…3 | A 4-way choice (IR bypass on outputs?) | **unverified** |
 | 18 | ? | 1 / 0 | A boolean | **unverified** |
 | — | 7, 11, 13, 14 | 1, 0, 129, 1 | Read-only so far (13 read 172 during capture mode) | **unverified** |
+
+The two monitoring mappings are now confirmed by correlating the local trace's standalone 67.12/67.13 boolean writes
+with the type-66 readback layout and the normal type-68 acknowledgement. Type 67 field 12 reads back as type 66
+field 15, and type 67 field 13 reads back as type 66 field 16. Each setting is sent alone with an explicit varint 0
+or 1. The official manual confirms the user-facing behavior: input mute affects the Guitar Input monitor path, while
+output mute affects the processed signal at Outputs 1L/2R; USB audio is a separate path.
+
+Normalized frames used by the editor and demo are:
+
+- Mute Input on/off: `08 C0 08 01 60 01 43 00 00 00` / `08 C0 08 01 60 00 43 00 00 00`.
+- Mute Outputs 1L/2R on/off: `08 C0 08 01 68 01 43 00 00 00` / `08 C0 08 01 68 00 43 00 00 00`.
+- Successful type-68 ACK: `08 C0 08 01 18 01 44 00 00 00`.
+- Type-66 readback uses protobuf tags `0x78` (field 15) and `0x80` (field 16); an omitted boolean is off.
 
 The 66 ↔ 67 numbering is not a fixed offset (4 ↔ 6 but 14 ↔ 17), so the unexposed 66 fields cannot be matched to
 their 67 field yet. Guesses in our code: a brightness of 0 is sent as an explicit `20 00` (the app never sent 0); the

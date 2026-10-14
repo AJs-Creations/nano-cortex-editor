@@ -69,8 +69,9 @@ pedal by us) / observed (seen in a trace, layout not understood) / unknown.
 
 ### Device settings (app ⋯ menu → Settings) [M]
 
-All of these are global, not per preset. We read type 65 → 66 only for field 8 (MIDI channel, upstream); no setting
-write is known. Our Settings windows are app settings, not pedal settings.
+All of these are global, not per preset. Type 65 → 66 is the global read; the two monitoring writes are now confirmed
+as standalone type-67 field 12/13 commands with type-66 readback fields 15/16 and type-68 ACKs. Our Settings window
+separates these pedal settings from preset settings.
 
 | Setting (default) | Ours | Protocol | Trace? | During the capture |
 |---|---|---|---|---|
@@ -87,7 +88,7 @@ write is known. Our Settings windows are app settings, not pedal settings.
 | MIDI channel 1–16 | missing (read only, upstream) | upstream read (66 f8); write unknown | **yes** | 1 → 2 → 1 |
 | MIDI Thru (TRS → USB) | missing | unknown | **yes** | on → off |
 | MIDI clock source OFF / USB / TRS | missing | unknown | **yes** | OFF → USB → OFF |
-| Mute guitar input / mute guitar output | missing | unknown | **yes** | each on → off (output mute silences the rig) |
+| Mute guitar input / mute guitar output | done (Settings → Device: Mute Input / Mute Outputs 1L/2R) | 67.12 → 66.15; 67.13 → 66.16; type-68 ACK | **yes** | each on → off (output mute silences the rig) |
 | About: NanOS version, serial | partial (firmware shown from the state dump) | observed (46/47) | no (already in traces) | Open About |
 | Factory reset | n/a (**never trace**) | — | **no** | Don't |
 | Firmware update | n/a (app-only, over BLE; nothing to update past 2.2.1) | — | **no** | Don't |

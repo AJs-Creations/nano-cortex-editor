@@ -1471,6 +1471,8 @@ async function run() {
   // ---------------------------------------------------------------- Settings → Device, capture info
   // Bodies from the phone-app trace 2026-10-09 (docs/INVESTIGATION.md §11).
   const BRIGHT_153 = '0E C0 08 01 20 99 01 75 00 00 C0 C0 43 00 00 00';   // 67 {1:1 4:153 14:-6.0}
+  const MUTE_INPUT_ON = '08 C0 08 01 60 01 43 00 00 00';                    // 67 {1:1 12:1} → 66.15
+  const MUTE_OUTPUT_ON = '08 C0 08 01 68 01 43 00 00 00';                   // 67 {1:1 13:1} → 66.16
   const val = (fk) => js(`document.querySelector('[data-fk="${fk}"]')?.textContent || ''`);
   await js('document.activeElement.blur()');
   n0 = await mark();
@@ -1487,7 +1489,8 @@ async function run() {
   await checkSoon('Device: LED brightness reads 153 = 60 %, USB playback −6.0 dB', () => js('document.querySelector(\'[data-fk="dev-brightness"]\').value === "153" && document.querySelector(\'[data-fk="dev-brightness"]\').nextElementSibling.textContent === "60%" && document.querySelector(\'[data-fk="dev-usb-num"]\').value === "-6.0"'));
   check('Device: Raw settings is collapsed and lists the 66 fields', await js('(() => { const d = document.querySelector(\'[data-fk="dev-raw"]\'); return !d.open && /6=153/.test(d.textContent) && /17=-6(?![\\d.])/.test(d.textContent) && /13=129/.test(d.textContent); })()'), await js('document.querySelector(\'[data-fk="dev-raw"]\').textContent'));
   check('Device: no stray text above About', (await js('document.querySelector(".dev-page").firstChild.tagName')) === 'SECTION');
-  check('Device: only brightness and USB volume are editable', (await js('document.querySelectorAll(".dev-page input").length')) === 3);
+  check('Device: monitoring readback starts unmuted', await js('__dev.settings.muteInput === false && __dev.settings.muteOutput === false && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "false" && document.querySelector(\'[data-fk="dev-mute-output"]\').getAttribute("aria-checked") === "false"'));
+  check('Device: brightness, USB volume and monitoring switches are editable', (await js('document.querySelectorAll(".dev-page input").length')) === 3 && await js('document.querySelectorAll(".dev-page [role=switch]").length === 2 && document.querySelector(\'[data-fk="dev-mute-input"]\').textContent === "Mute Input" && document.querySelector(\'[data-fk="dev-mute-output"]\').textContent === "Mute Outputs 1L/2R"'));
   await shot('xx-device');
   // brightness by keyboard: one step up and back to 153
   await js('document.querySelector(\'[data-fk="dev-brightness"]\').focus()');
@@ -1522,6 +1525,35 @@ async function run() {
   sent = await txWait(n0, tx => tx.length >= 3);
   check('Read again re-sends 65, 46 and the keep-alive 91', sent.length === 3 && /Read device settings/.test(sent[0]) && /Read device info/.test(sent[1]) && /Keep-alive: 06 C0 08 03 5B 00 00 00$/.test(sent[2]), JSON.stringify(sent));
   await checkSoon('the read-back shows the stored values (153, −11.0 dB)', () => js('document.querySelector(\'[data-fk="dev-brightness"]\').value === "153" && document.querySelector(\'[data-fk="dev-usb-num"]\').value === "-11.0"'));
+
+  // Monitoring: one-field writes, ACK-triggered readback, external updates and rapid stale reports.
+  await js('state.presetDirty = false; render()'); await frame();
+  n0 = await mark();
+  await click('[data-fk="dev-mute-input"]');
+  sent = await txWait(n0, tx => tx.some(t => t.endsWith(': ' + MUTE_INPUT_ON)));
+  check('Mute Input writes only field 12 with an explicit 1', sent.some(t => t.endsWith(': ' + MUTE_INPUT_ON)) && sent.some(t => /^TX Device monitoring: Mute Input ON/.test(t)), JSON.stringify(sent));
+  check('Mute Input ACK is logged and does not dirty the preset', await js('__ui.logs.some(l => /Device settings confirmed/.test(l.text)) && state.presetDirty === false'), await js('JSON.stringify({ dirty: state.presetDirty, value: __dev.settings.muteInput })'));
+  await checkSoon('Mute Input readback updates the switch', () => js('__dev.settings.muteInput === true && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "true"'));
+  n0 = await mark();
+  await click('[data-fk="dev-mute-output"]');
+  sent = await txWait(n0, tx => tx.some(t => t.endsWith(': ' + MUTE_OUTPUT_ON)));
+  check('Mute Outputs 1L/2R writes only field 13 with an explicit 1', sent.some(t => t.endsWith(': ' + MUTE_OUTPUT_ON)) && sent.some(t => /^TX Device monitoring: Mute Outputs 1L\/2R ON/.test(t)), JSON.stringify(sent));
+  await checkSoon('Mute Outputs 1L/2R readback updates the switch without dirty state', () => js('__dev.settings.muteOutput === true && document.querySelector(\'[data-fk="dev-mute-output"]\').getAttribute("aria-checked") === "true" && state.presetDirty === false'));
+  n0 = await mark();
+  await click('[data-fk="dev-mute-output"]');
+  sent = await txWait(n0, tx => tx.some(t => t.endsWith(': 08 C0 08 01 68 00 43 00 00 00')));
+  check('Mute Outputs 1L/2R writes an explicit 0 when turned off', sent.some(t => t.endsWith(': 08 C0 08 01 68 00 43 00 00 00')), JSON.stringify(sent));
+
+  // An unsolicited type-66 report is authoritative when no local write is pending.
+  await js('__devDemo.store.muteInput = false; __devDemo.store.muteOutput = false; __devDemo.emitSettings(); 0');
+  await checkSoon('external monitoring updates apply to both switches', () => js('__dev.settings.muteInput === false && __dev.settings.muteOutput === false && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "false" && document.querySelector(\'[data-fk="dev-mute-output"]\').getAttribute("aria-checked") === "false"'));
+
+  // Two clicks and an older incoming report occur synchronously; the stale report must not block or undo the latest click.
+  n0 = await mark();
+  await js('(() => { const b = document.querySelector(\'[data-fk="dev-mute-input"]\'); b.click(); __devDemo.store.muteInput = false; __devDemo.emitSettings(); document.querySelector(\'[data-fk="dev-mute-input"]\').click(); })()');
+  sent = await txWait(n0, tx => tx.filter(t => /^TX Device monitoring: Mute Input /.test(t)).length >= 2);
+  check('rapid Mute Input toggles stay responsive and preserve the latest value', sent.filter(t => /^TX Device monitoring: Mute Input /.test(t)).length === 2 && sent.some(t => t.endsWith(': ' + MUTE_INPUT_ON)) && sent.some(t => t.endsWith(': 08 C0 08 01 60 00 43 00 00 00')) && await js('__dev.settings.muteInput === false && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "false"'), JSON.stringify(sent));
+
   await click('[data-fk="dev-usb-num"]');
   n0 = await txCount();
   await key('a', [MOD]); await type('-6'); await key('Return'); await txWait(n0);
