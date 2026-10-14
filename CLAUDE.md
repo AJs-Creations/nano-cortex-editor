@@ -11,7 +11,7 @@ User docs: `README.md`, `docs/MANUAL.md` (screenshots from `npm run docs:screens
 - The app runs as an Electron app with two tabs: the pro editor (`pro/`) and the Cortex Cloud website (their real login, persistent session).
 - This repo is the Electron product for good (and the shareable one). The native Mac edition is <https://github.com/AJs-Creations/nano-cortex-editor-mac> (local clone `../nano-cortex-editor-mac`); the two READMEs link each other.
 - **No recordings in git, ever** (not even in history): session recordings, `.pklg`/HCI traces and capture bundles stay local (`test/fixtures/sessions/` and those types are git-ignored). Tests inline the specific frames they need with identifying values replaced.
-- Hardware-verified on a Nano Cortex (firmware 2.2.1) on 2026-10-08, including Cortex Cloud → pedal capture transfer. `npm run test:ux` passes 522/522 on macOS with demo data (CI, `.github/workflows/ci.yml`, on PRs to `staging`/`main`: a required smoke job and the UX test, also required; the test waits on conditions, not fixed sleeps, so it holds on GitHub's slow macOS runners). Windows and Linux are untested with a pedal; `ux-test-linux` (not required) runs the same test on ubuntu-latest under Xvfb.
+- Hardware-verified on a Nano Cortex (firmware 2.2.1) on 2026-10-08, including Cortex Cloud → pedal capture transfer. `npm run test:ux` passes 557/557 on macOS with demo data (CI, `.github/workflows/ci.yml`, on PRs to `staging`/`main`: a required smoke job and the UX test, also required; the test waits on conditions, not fixed sleeps, so it holds on GitHub's slow macOS runners). Windows and Linux are untested with a pedal; `ux-test-linux` (not required) runs the same test on ubuntu-latest under Xvfb.
 - Inside VS Code's terminal `ELECTRON_RUN_AS_NODE=1` is set, which makes `electron` behave like `node`. The npm scripts clear it; if you run `electron` by hand, prefix `env -u ELECTRON_RUN_AS_NODE`.
 
 ## Commands
@@ -59,7 +59,9 @@ npm run docs:screenshots # regenerate docs/images/ in demo mode (needs Python + 
 - **Preset switching** is over GATT (`SetPresetSlotsRequest`, type 29, acked with type 30), verified on hardware. No MIDI port is needed.
 - **USB is one-way:** the pedal accepts MIDI PC 0–63 and CC 34–43 over USB but sends nothing back. There is no USB editing protocol; Cortex Control does not support the Nano.
 - The pedal accepts **one BLE connection**. The Cortex Cloud phone app has to be disconnected.
-- Upstream tested against firmware 2.2.1.
+- Upstream tested against firmware 2.2.1. The editor's tested firmware is `COMPAT.testedFirmware` at the top of `pro/ui.js` (the native edition has its own constant). A pedal reporting a newer version (numeric per component, suffixes like `+06d34443` ignored) gets a one-time banner under the header (`#fwNotice`, remembered per version in `settings.firmwareWarned`).
+- **Unknown effects**: a slot whose model id isn't in upstream's tables stays `'None'` inside the core (so core.js never writes or refreshes its parameters) and carries `block.unknownId`; the UI shows "Unknown effect" / "Newer firmware?" and only allows on/off and picking a known effect. `setFXParam` and `requestNextFXParamRefresh` are wrapped to refuse it as well. Demo hooks: `?demo&demoFirmware=2.3.0&demoUnknown=post2:7E`.
+- **After a firmware update**: (1) read Neural DSP's release notes for new or changed effects; (2) trace each new effect in the official app (Record / HCI trace: model id from the state dump fields 48–52, parameter order and ranges from the param writes); (3) add them to the model tables (upstream's, or an override layer in `pro/ui.js` if upstream hasn't caught up; never hand-edit `pro/core.js`), test on the pedal, then raise `COMPAT.testedFirmware` and the native edition's constant together.
 
 ## Working rules
 
