@@ -1561,6 +1561,43 @@
       : Uint8Array.from(bundle.cns || []);
   }
 
+  // The iOS app keeps an accepted live preview alive with type 91 requests
+  // about every 20 seconds. The Nano answers with type 92. This is separate
+  // from the full type 150 preview transfer and must stop with the preview.
+  const PREVIEW_KEEP_ALIVE_MS = 20000;
+  const PREVIEW_KEEP_ALIVE_TYPE = 91;
+  let previewKeepAliveTimer = null;
+  let previewKeepAliveInFlight = false;
+
+  function stopPreviewKeepAlive() {
+    if (previewKeepAliveTimer !== null) {
+      clearInterval(previewKeepAliveTimer);
+      previewKeepAliveTimer = null;
+      log('Live preview keep-alive stopped.');
+    }
+    previewKeepAliveInFlight = false;
+  }
+
+  async function sendPreviewKeepAlive() {
+    if (!ui.previewing || !state.connected || previewKeepAliveInFlight) return;
+    previewKeepAliveInFlight = true;
+    try {
+      const ok = await writeC304(
+        'Preview keep-alive',
+        buildFrame([0x08, 0x03], PREVIEW_KEEP_ALIVE_TYPE)
+      );
+      if (!ok && ui.previewing) log('ERROR: Preview keep-alive write failed.');
+    } finally {
+      previewKeepAliveInFlight = false;
+    }
+  }
+
+  function startPreviewKeepAlive() {
+    stopPreviewKeepAlive();
+    log('Live preview keep-alive started (every ' + (PREVIEW_KEEP_ALIVE_MS / 1000) + ' s).');
+    previewKeepAliveTimer = setInterval(() => { void sendPreviewKeepAlive(); }, PREVIEW_KEEP_ALIVE_MS);
+  }
+
   // The official Cloud app's Play button sends the capture to a temporary
   // audition cache. It is intentionally not the library upload path above:
   // no user-capture record or slot is created or changed.
@@ -1603,6 +1640,7 @@
     }
     ui.previewing = true;
     ui.previewName = name;
+    startPreviewKeepAlive();
     notifyPreviewState(true, name, '', 'active');
     toast('Previewing ' + name + '. Click Stop Preview to end it.');
     renderStatus();
@@ -1611,6 +1649,7 @@
 
   async function stopCapturePreview() {
     if (!ui.previewing && !ui.previewBusy) return true;
+    stopPreviewKeepAlive();
     if (!state.connected) {
       ui.previewing = false; ui.previewBusy = false; ui.previewName = '';
       notifyPreviewState(false, '', 'The Nano Cortex is not connected.');
@@ -1633,6 +1672,7 @@
     if (!reply.ok) {
       const error = 'The pedal did not confirm stopping live preview.';
       ui.previewing = true;
+      startPreviewKeepAlive();
       toast(error); notifyPreviewState(true, ui.previewName, error, 'active'); render();
       return false;
     }
@@ -1759,6 +1799,7 @@
     if (connected) tapC304();
     if (!connected && /disconnect/i.test(text)) {
       const previewWasActive = ui.previewing || ui.previewBusy;
+      stopPreviewKeepAlive();
       ui.previewing = false;
       ui.previewBusy = false;
       ui.previewName = '';
@@ -3163,6 +3204,7 @@
   function onAlive(d) {
     const f = bodyOf(d);
     dev.alive = { firmware: pf.str(f, 5), serial: pf.str(f, 6), name: pf.str(f, 7) };
+    if (ui.previewing) log('Live preview keep-alive acknowledged.');
     if (dev.redraw) dev.redraw();
   }
   function onSettingsAck(d) {
