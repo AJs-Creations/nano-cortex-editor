@@ -461,6 +461,52 @@ async function sendCaptureToNano(id) {
 }
 ipcMain.handle('send-capture', () => sendCaptureToNano());
 
+// Live audition uses the same Cloud bundle, but the editor sends it through
+// the separate type-150 preview path instead of the normal type-13 library
+// upload. Keep the editor hidden so the Cloud page remains visible while the
+// pedal is auditioning the capture.
+async function previewCaptureOnNano(id) {
+  id = id || captureIdOf(cloud.webContents.getURL());
+  if (!id) return { ok: false, error: 'Open a capture page in Cortex Cloud first.' };
+  try {
+    const bundle = await fetchCaptureBundle(id);
+    editor.webContents.send('preview-bundle', bundle);
+    return { ok: true, name: bundle.meta.name, bytes: Buffer.from(bundle.cns, 'base64').length };
+  } catch (err) {
+    dialog.showMessageBox(win, { type: 'warning', message: 'Could not fetch the capture for preview', detail: err.message });
+    return { ok: false, error: err.message };
+  }
+}
+ipcMain.handle('preview-capture', () => previewCaptureOnNano());
+ipcMain.handle('stop-preview', async () => {
+  if (!editor || editor.webContents.isDestroyed()) return false;
+  return editor.webContents.executeJavaScript('window.__stopCapturePreview ? window.__stopCapturePreview() : false', true).catch(() => false);
+});
+ipcMain.handle('get-cab-ir-state', async () => {
+  if (!editor || editor.webContents.isDestroyed()) return { connected: false, on: false };
+  return editor.webContents.executeJavaScript(
+    'window.__getCabIRState ? window.__getCabIRState() : { connected: false, on: false }',
+    true
+  ).catch(() => ({ connected: false, on: false }));
+});
+ipcMain.handle('toggle-cab-ir', async () => {
+  if (!editor || editor.webContents.isDestroyed()) return { ok: false, error: 'The editor is not ready.' };
+  return editor.webContents.executeJavaScript(
+    'window.__toggleCabIR ? window.__toggleCabIR() : { ok: false, error: \'The editor is not ready.\' }',
+    true
+  ).catch((err) => ({ ok: false, error: err.message }));
+});
+ipcMain.on('preview-state', (event, state) => {
+  if (editor && event.sender === editor.webContents && toolbar && !toolbar.webContents.isDestroyed()) {
+    toolbar.webContents.send('preview-state', state || { active: false });
+  }
+});
+ipcMain.on('cab-ir-state', (event, state) => {
+  if (editor && event.sender === editor.webContents && toolbar && !toolbar.webContents.isDestroyed()) {
+    toolbar.webContents.send('cab-ir-state', state || { connected: false, on: false });
+  }
+});
+
 ipcMain.handle('sign-out', async () => {
   const { response } = await dialog.showMessageBox(win, {
     type: 'question', buttons: ['Sign out', 'Cancel'], cancelId: 1,

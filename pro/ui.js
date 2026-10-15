@@ -134,6 +134,9 @@
     usage: null,          // last slot usage scan: { captures, cabs, library, cabLibrary, date, complete, scanned, total }
     scanning: false,
     scanStop: false,
+    previewing: false,
+    previewBusy: false,
+    previewName: '',
   };
   window.__ui = ui; // handy for poking at from DevTools
 
@@ -1533,6 +1536,129 @@
   window.__uploadCapture = receiveCapture;
   if (window.nanoCloud && window.nanoCloud.onCapture) window.nanoCloud.onCapture(receiveCapture);
 
+  function notifyPreviewState(active, name = '', error = '', phase = null) {
+    if (shellBridge && shellBridge.previewState) shellBridge.previewState({
+      active: !!active,
+      name: name || '',
+      error: error || '',
+      phase: phase || (active ? 'active' : 'idle'),
+    });
+  }
+
+  let lastCabIRStateSignature = '';
+  function notifyCabIRState(force = false) {
+    if (!shellBridge || !shellBridge.cabIRState) return;
+    const cabState = { connected: !!state.connected, on: !!(state.connected && state.cabIR.on) };
+    const signature = cabState.connected + ':' + cabState.on;
+    if (!force && signature === lastCabIRStateSignature) return;
+    lastCabIRStateSignature = signature;
+    shellBridge.cabIRState(cabState);
+  }
+
+  function captureBytes(bundle) {
+    return typeof bundle.cns === 'string'
+      ? Uint8Array.from(atob(bundle.cns), c => c.charCodeAt(0))
+      : Uint8Array.from(bundle.cns || []);
+  }
+
+  // The official Cloud app's Play button sends the capture to a temporary
+  // audition cache. It is intentionally not the library upload path above:
+  // no user-capture record or slot is created or changed.
+  async function receivePreview(bundle) {
+    const meta = bundle.meta || {};
+    const name = meta.name || 'capture';
+    if (!state.connected) {
+      const error = 'Connect your Nano Cortex first, then preview ' + name + '.';
+      toast(error); notifyPreviewState(false, '', error); return false;
+    }
+    if (ui.uploading) { const error = 'A capture is already being sent to the library.'; toast(error); notifyPreviewState(false, '', error); return false; }
+    if (ui.previewBusy) return false;
+    if (ui.previewing && !(await stopCapturePreview())) return false;
+
+    const cns = captureBytes(bundle);
+    ui.previewBusy = true;
+    ui.previewName = name;
+    ui.lastAction = 'Preparing live preview: ' + name;
+    notifyPreviewState(false, name, '', 'starting');
+    renderStatus();
+    let reply;
+    try {
+      reply = await NanoTransfer.previewCapture({ cns, meta }, (i, n) => {
+        ui.lastAction = 'Previewing ' + name + ': sending ' + i + ' / ' + n;
+        renderStatus();
+      });
+    } catch (err) {
+      ui.previewBusy = false; ui.previewName = ''; ui.lastAction = '';
+      const error = 'Live preview failed: ' + err.message;
+      toast(error); notifyPreviewState(false, '', error); render();
+      return false;
+    }
+    ui.previewBusy = false;
+    ui.lastAction = '';
+    if (!reply.ok) {
+      ui.previewName = '';
+      const error = 'The pedal refused the live preview' + (reply.message ? ': ' + reply.message : '.');
+      toast(error); notifyPreviewState(false, '', error); render();
+      return false;
+    }
+    ui.previewing = true;
+    ui.previewName = name;
+    notifyPreviewState(true, name, '', 'active');
+    toast('Previewing ' + name + '. Click Stop Preview to end it.');
+    renderStatus();
+    return true;
+  }
+
+  async function stopCapturePreview() {
+    if (!ui.previewing && !ui.previewBusy) return true;
+    if (!state.connected) {
+      ui.previewing = false; ui.previewBusy = false; ui.previewName = '';
+      notifyPreviewState(false, '', 'The Nano Cortex is not connected.');
+      return false;
+    }
+    ui.previewBusy = true;
+    ui.lastAction = 'Stopping live preview';
+    notifyPreviewState(true, ui.previewName, '', 'stopping');
+    renderStatus();
+    let reply;
+    try {
+      reply = await NanoTransfer.stopPreview();
+    } catch (err) {
+      ui.previewBusy = false;
+      const error = 'Stopping live preview failed: ' + err.message;
+      toast(error); notifyPreviewState(true, ui.previewName, error); renderStatus();
+      return false;
+    }
+    ui.previewBusy = false; ui.lastAction = '';
+    if (!reply.ok) {
+      const error = 'The pedal did not confirm stopping live preview.';
+      ui.previewing = true;
+      toast(error); notifyPreviewState(true, ui.previewName, error, 'active'); render();
+      return false;
+    }
+    ui.previewing = false; ui.previewName = '';
+    notifyPreviewState(false, '', '', 'idle');
+    toast('Live preview stopped.');
+    renderStatus();
+    return true;
+  }
+
+  window.__previewCapture = receivePreview;
+  window.__stopCapturePreview = stopCapturePreview;
+  if (window.nanoCloud && window.nanoCloud.onPreview) window.nanoCloud.onPreview(receivePreview);
+
+  window.__getCabIRState = () => ({ connected: !!state.connected, on: !!(state.connected && state.cabIR.on) });
+  window.__toggleCabIR = async function () {
+    if (!state.connected) {
+      const error = 'Connect your Nano Cortex before toggling Cab / IR.';
+      toast(error); notifyCabIRState(true); return { ok: false, error };
+    }
+    const on = !Boolean(state.cabIR.on);
+    await selectCabIRSlot(on ? (state.cabIR.lastActiveSlot || 1) : 0);
+    render();
+    return { ok: true, on: Boolean(state.cabIR.on) };
+  };
+
   // Replies an action waits for (delete ack type 51, footswitch assignment ack type 30): writeAndAwait() sends a
   // frame and resolves with the reply's protobuf fields, or null if the write failed or nothing came within 10 s.
   // While a waiter is registered its reply type is consumed here instead of reaching the core's parsers.
@@ -1631,7 +1757,14 @@
   window.setStatus = function (text, connected = false) {
     ui.connText = text;
     if (connected) tapC304();
-    if (!connected && /disconnect/i.test(text)) { ui.dirty = false; ui.lastAction = ''; state.presetTempo = null; }
+    if (!connected && /disconnect/i.test(text)) {
+      const previewWasActive = ui.previewing || ui.previewBusy;
+      ui.previewing = false;
+      ui.previewBusy = false;
+      ui.previewName = '';
+      if (previewWasActive) notifyPreviewState(false, '', 'The Nano Cortex disconnected; live preview stopped.');
+      ui.dirty = false; ui.lastAction = ''; state.presetTempo = null;
+    }
     if (!connected) { state.exp.loaded = false; state.exp.preset = null; }
     render();
   };
@@ -1890,6 +2023,7 @@
   // ------------------------------------------------------------------ rendering
   function renderAll() {
     const fk = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fk : null;
+    notifyCabIRState();
     renderHead();
     renderSide();
     renderFootswitches();
