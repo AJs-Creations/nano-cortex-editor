@@ -1494,6 +1494,39 @@ async function run() {
   await checkSoon('upload flow finished cleanly', '!document.querySelector(".modal") && !__ui.uploading');
   await settle();
 
+  // ---------------------------------------------------------------- live capture preview and keep-alive
+  // Use the real preview transfer and timer, with the demo pedal answering the same type 151/149/92 messages.
+  const previewMeta = { hash: 'cd'.repeat(32), name: 'Test Preview', cloudUUID: '00000000-0000-4000-8000-000000000002', authorId: 'x', authorName: 'Tester', deviceType: 'pedal', gainType: 3, instrumentType: 'guitar', version: '1', tags: ['#test'] };
+  const previewSlot = await js('state.capture.selectedSlot');
+  await js(`(() => {
+    const originalSetInterval = window.setInterval;
+    const originalClearInterval = window.clearInterval;
+    window.__previewTimerTest = { originalSetInterval, originalClearInterval, callback: null, ms: null, id: null, cleared: false };
+    window.setInterval = (fn, ms) => { __previewTimerTest.callback = fn; __previewTimerTest.ms = ms; __previewTimerTest.id = 9171; return __previewTimerTest.id; };
+    window.clearInterval = id => { if (id === __previewTimerTest.id) __previewTimerTest.cleared = true; };
+  })()`);
+  n0 = await mark();
+  const previewResult = await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`);
+  await settle();
+  tx = await txSince(n0);
+  check('live preview sends the type-150 transfer', previewResult === true && tx.some(t => /^TX Capture preview "Test Preview" 1\/1: .* 96 00 00 00$/.test(t)), JSON.stringify(tx));
+  check('live preview becomes active without changing the loaded slot', await js('__ui.previewing && !__ui.previewBusy') && (await js('state.capture.selectedSlot')) === previewSlot);
+  check('live preview starts a 20-second keep-alive timer', await js('__previewTimerTest.ms === 20000 && typeof __previewTimerTest.callback === "function"'), await js('String(__previewTimerTest.ms)'));
+  n0 = await mark();
+  await js('__previewTimerTest.callback()');
+  tx = await txWait(n0, t => t.some(x => /^TX Preview keep-alive:/.test(x)));
+  check('keep-alive sends the confirmed type-91 frame', tx.length === 1 && tx[0] === 'TX Preview keep-alive: 06 C0 08 03 5B 00 00 00', JSON.stringify(tx));
+  await checkSoon('keep-alive type-92 response is acknowledged', '__ui.logs.some(l => l.text === "Live preview keep-alive acknowledged.")');
+  n0 = await mark();
+  const stopResult = await js('__stopCapturePreview()');
+  await settle();
+  tx = await txSince(n0);
+  check('stopping preview sends type 148 and receives confirmation', stopResult === true && tx.some(t => /^TX Stop capture preview: .* 94 00 00 00$/.test(t)) && await js('__ui.logs.some(l => /Capture preview stop confirmed/.test(l.text))'), JSON.stringify(tx));
+  check('stopping preview clears the keep-alive timer', await js('__previewTimerTest.cleared && !__ui.previewing && !__ui.previewBusy'));
+  await js('__previewTimerTest.callback()'); await settle();
+  check('a stopped preview does not send another keep-alive', !(await txSince(n0)).some(t => /^TX Preview keep-alive:/.test(t)));
+  await js('window.setInterval = __previewTimerTest.originalSetInterval; window.clearInterval = __previewTimerTest.originalClearInterval; delete window.__previewTimerTest');
+
   // ---------------------------------------------------------------- write coalescing
   // Deterministic: the first write leaves at once, the next five queue behind it under one key and merge.
   n0 = await mark();

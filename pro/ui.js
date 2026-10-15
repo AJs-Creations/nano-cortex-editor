@@ -4378,8 +4378,25 @@
     const reply = (frame) => setTimeout(() => handleTypedMessage(frame), 30);
     const notify = (frame) => setTimeout(() => window.onC305({ target: { value: { buffer: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) } } }), 30);
     const reassemble = NanoTransfer.makeReassembler();
+    const firstField = (fields, n) => fields[n] && fields[n][0];
+    const textField = (fields, n) => {
+      const x = firstField(fields, n);
+      return x && x.wire === 2 ? new TextDecoder().decode(Uint8Array.from(x.raw)) : '';
+    };
+    const previewReply = (body) => {
+      const f = parseProtoFields(body);
+      const object = firstField(f, 5);
+      const objectFields = object && object.wire === 2 ? parseProtoFields(object.raw) : {};
+      const record = firstField(objectFields, 2);
+      const recordFields = record && record.wire === 2 ? parseProtoFields(record.raw) : {};
+      const name = textField(recordFields, 2) || 'Demo preview';
+      const hash = textField(recordFields, 1);
+      const enc = (s) => Array.from(new TextEncoder().encode(s));
+      const replyRecord = [0x12, enc(name).length, ...enc(name), 0x1A, enc(hash).length, ...enc(hash)];
+      notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, replyRecord.length, ...replyRecord], NanoTransfer.MSG_PREVIEW_CAPTURE_REPLY));
+    };
     function onWrite(bytes) {
-      // Streamed (multi-write) messages: only capture uploads so far.
+      // Streamed (multi-write) messages: capture uploads and live previews.
       if (bytes.length >= 2 && (bytes[1] & 0xC0) !== 0xC0) {
         const whole = reassemble(bytes);
         if (!whole) return;
@@ -4394,7 +4411,7 @@
           const enc = (s) => Array.from(new TextEncoder().encode(s));
           const record = [0x08, index, 0x12, enc(name).length, ...enc(name), 0x1A, enc(hash).length, ...enc(hash)];
           notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, record.length, ...record], NanoTransfer.MSG_UPLOAD_CAPTURE_REPLY));
-        }
+        } else if (t === NanoTransfer.MSG_PREVIEW_CAPTURE) previewReply(whole.slice(0, whole.length - 4));
         return;
       }
       const type = frameType(bytes);
@@ -4451,6 +4468,10 @@
       } else if (type === MSG.TunerMode) {
         const f = framePayloadFields(bytes);
         tunerDemo(Boolean(f[4] && f[4][0] && f[4][0].value));
+      } else if (type === NanoTransfer.MSG_PREVIEW_CAPTURE) {
+        previewReply(Array.from(bytes.slice(2, bytes.length - 4)));
+      } else if (type === NanoTransfer.MSG_PREVIEW_STOP) {
+        notify(buildFrame([0x08, 0x01, 0x18, 0x01], NanoTransfer.MSG_PREVIEW_STOP_REPLY));
       } else if (type === DEV_MSG.ALIVE_REQ || type === DEV_MSG.INFO_REQ || type === DEV_MSG.SETTINGS_REQ || type === DEV_MSG.SET || type === DEV_MSG.CAPTURE_REQ) {
         notify(deviceReply(type, framePayloadFields(bytes)));
       }
