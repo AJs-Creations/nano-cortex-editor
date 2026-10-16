@@ -148,6 +148,11 @@
     previewing: false,
     previewBusy: false,
     previewName: '',
+    cabIRLoadActive: null,
+    cabIRLoadQueue: [],
+    cabIRLoadPaused: false,
+    cabIRLoadTimedOut: null,
+    pendingIRSlotTarget: null,
   };
   window.__ui = ui; // handy for poking at from DevTools
   let presetMoveProtocolPending = false;
@@ -262,6 +267,8 @@
     return state.capture.selectedSlot || null;
   }
   function activeIRSlot() {
+    const pending = ui.pendingIRSlotTarget;
+    if (pending && pending.preset === Number(state.selectedPreset)) return pending.slot;
     if (!state.cabIR.on) return 0;
     if (state.cabIR.fromLibrary) return null;
     const sel = state.cabIR.selectedSlot;
@@ -1286,6 +1293,18 @@
   // state for expression overlays and write ordering, never a dirty model.
   let expressionBoundaryPreset = null;
 
+  function clearPendingIRSlotTarget(target = ui.pendingIRSlotTarget) {
+    if (!target) return;
+    clearTimeout(target.timer);
+    if (ui.pendingIRSlotTarget === target) ui.pendingIRSlotTarget = null;
+  }
+
+  function settlePendingIRSlotTarget(target) {
+    if (ui.pendingIRSlotTarget !== target) return;
+    clearPendingIRSlotTarget(target);
+    render();
+  }
+
   function beginExpressionBoundary() {
     ui.expressionBaseline = null;
     ui.expressionBaselineBoundary = true;
@@ -1293,6 +1312,7 @@
     expressionBoundaryPreset = null;
     ui.pendingBypassTargets.clear();
     ui.bypassWriteGeneration++;
+    clearPendingIRSlotTarget();
   }
 
   const captureDbFromRaw = (raw) => raw <= 128 ? ((raw / 128) * 24) - 24 : ((raw - 128) / 127) * 12;
@@ -1676,9 +1696,83 @@
     return root;
   }
 
+  let cabIRLoadId = 0;
+  function queueCabIRLoad(item, preselectedSlot = 0) {
+    if (ui.cabIRLoadPaused) {
+      toast('The last IR load was not confirmed. Reconnect the pedal before loading another IR.');
+      return;
+    }
+    const job = {
+      id: ++cabIRLoadId,
+      kind: item.kind,
+      index: item.index,
+      name: item.name,
+      preselectedSlot: Number(preselectedSlot) || 0,
+      slot: null,
+      phase: 'queued',
+    };
+    const queued = Boolean(ui.cabIRLoadActive || ui.cabIRLoadQueue.length);
+    ui.cabIRLoadQueue.push(job);
+    if (queued) toast('Queued ' + item.name + '. It will load after the current IR change.');
+    render();
+    startNextCabIRLoad();
+  }
+
+  function startNextCabIRLoad() {
+    if (ui.cabIRLoadPaused || ui.cabIRLoadActive || !ui.cabIRLoadQueue.length) return;
+    const job = ui.cabIRLoadQueue.shift();
+    ui.cabIRLoadActive = job;
+    job.phase = 'choosing';
+    ui.slotPreselect = job.preselectedSlot;
+    render();
+
+    const current = (state.library[job.kind] || []).find(candidate => candidate.index === job.index);
+    if (!current || !sameName(current.name, job.name)) {
+      toast('The pedal IR library changed. Refresh it and try again.');
+      void finishCabIRLoad(job, false);
+      return;
+    }
+
+    Promise.resolve(loadLibraryCab(job.kind, job.index)).then(slot => {
+      if (ui.cabIRLoadActive !== job || job.finishing) return;
+      if (slot) {
+        if (ui.demo) demo.pickIR(slot);
+        void finishCabIRLoad(job, true);
+        return;
+      }
+      const pending = state.pendingCabAssignment;
+      const uncertain = job.slot && pending && pending.slot === job.slot && sameName(pending.name, job.name);
+      if (uncertain) {
+        state.pendingCabAssignment = null;
+        ui.cabIRLoadPaused = true;
+        ui.cabIRLoadTimedOut = job;
+        ui.cabIRLoadQueue.length = 0;
+        toast('The pedal did not confirm this IR change. Reconnect before trying another IR.');
+      }
+      void finishCabIRLoad(job, false, { acknowledged: job.responseReceived, timeout: uncertain });
+    }).catch(err => {
+      if (ui.cabIRLoadActive !== job || job.finishing) return;
+      log('ERROR: loading library IR: ' + err.message);
+      toast('Could not load ' + job.name + ' into a pedal slot.');
+      void finishCabIRLoad(job, false);
+    });
+  }
+
+  async function finishCabIRLoad(job, success, { acknowledged = false, timeout = false } = {}) {
+    if (ui.cabIRLoadActive !== job || job.finishing) return;
+    job.finishing = true;
+    job.phase = success ? 'activating' : timeout ? 'unconfirmed' : 'failed';
+    render();
+    if (success) toast('Cab ' + job.name + ' loaded into slot ' + job.slot);
+    else if (!acknowledged && !timeout && job.slot) toast('Could not confirm loading ' + job.name + ' into a slot.');
+    ui.slotPreselect = 0;
+    ui.cabIRLoadActive = null;
+    render();
+    startNextCabIRLoad();
+  }
+
   // `slot`: load the pick straight into that slot (from a slot button's menu) instead of asking.
   async function openLibraryPicker(kind, anchor, slot) {
-    ui.slotPreselect = slot || 0;
     if (pop) { closePopover(); return; }
     if (!state.library.loaded) {
       toast('Reading the library on the pedal…');
@@ -1700,14 +1794,18 @@
       placeholder: isCap ? 'Search captures' : 'Search cabs and IRs',
       items, isCurrent: (m) => sameName(m.name, curName),
       emptyText: (q) => (items.length ? 'Nothing matches “' + q + '”.' : 'The pedal’s library is empty.'),
-      onPick: (m) => loadFromLibrary(kind, m),
+      onPick: (m) => loadFromLibrary(kind, m, slot || 0),
     });
   }
-  async function loadFromLibrary(kind, item) {
-    const slot = kind === 'capture' ? await loadLibraryCapture(item.kind, item.index) : await loadLibraryCab(item.kind, item.index);
+  async function loadFromLibrary(kind, item, preselectedSlot = 0) {
+    if (kind === 'cab') {
+      queueCabIRLoad(item, preselectedSlot);
+      return;
+    }
+    const slot = await loadLibraryCapture(item.kind, item.index);
     if (!slot) { render(); return; }
-    if (ui.demo) (kind === 'capture' ? demo.pickCapture : demo.pickIR)(slot);
-    toast((kind === 'capture' ? 'Capture ' : 'Cab ') + item.name + ' loaded into slot ' + slot);
+    if (ui.demo) demo.pickCapture(slot);
+    toast('Capture ' + item.name + ' loaded into slot ' + slot);
     render();
   }
 
@@ -2466,8 +2564,18 @@
 
   window.setStatus = function (text, connected = false) {
     ui.connText = text;
-    if (connected) tapC304();
+    if (connected) {
+      tapC304();
+      ui.cabIRLoadPaused = false;
+      ui.cabIRLoadTimedOut = null;
+    }
     if (!connected && /disconnect/i.test(text)) {
+      ui.cabIRLoadPaused = false;
+      ui.cabIRLoadTimedOut = null;
+      ui.cabIRLoadQueue.length = 0;
+      ui.cabIRLoadActive = null;
+      ui.slotPreselect = 0;
+      state.pendingCabAssignment = null;
       state.presetDirty = false; beginExpressionBoundary();
       const d = window.__dev;
       if (d) {
@@ -2680,7 +2788,8 @@
     let src = null;
     let fields = null;
     const oldPreset = Number(state.selectedPreset);
-    const boundary = ui.expressionBaselineBoundary || !ui.expressionBaseline || expressionBoundaryPreset !== oldPreset || state.protocol.presetLoad;
+    const presetLoadBoundary = state.protocol.presetLoad;
+    const boundary = ui.expressionBaselineBoundary || !ui.expressionBaseline || expressionBoundaryPreset !== oldPreset || presetLoadBoundary;
     try {
       if (bytes.length) {
         fields = parseProtoFields(bytes);
@@ -2707,6 +2816,19 @@
     if (src && src.cab > 5) {
       state.cabIR.selectedSlot = null;
       log('Cab comes straight from the library: ' + (state.currentIR.shortName || 'unknown') + ' (slot ' + src.cab + ')');
+    }
+    const pendingIRTarget = ui.pendingIRSlotTarget;
+    if (pendingIRTarget) {
+      if (presetLoadBoundary || Number(state.selectedPreset) !== pendingIRTarget.preset) clearPendingIRSlotTarget(pendingIRTarget);
+      else {
+        // A read queued by an earlier click can report the previous slot. Keep
+        // the newest selection optimistic until the final read-back settles.
+        state.cabIR.fromLibrary = false;
+        state.cabIR.on = pendingIRTarget.slot > 0;
+        state.cabIR.selectedSlot = pendingIRTarget.slot;
+        state.cabIR.stateSlot = pendingIRTarget.slot;
+        if (pendingIRTarget.slot > 0) state.cabIR.lastActiveSlot = pendingIRTarget.slot;
+      }
     }
     try {
       const all = parseProtoFields(bytes);
@@ -2823,12 +2945,39 @@
   // Picking a slot (or bypassing) moves the preset off a library reference.
   for (const [fn, part] of [['setCapture', 'capture'], ['selectCaptureSlot', 'capture'], ['selectCabIRSlot', 'cabIR']]) {
     const core = window[fn];
-    window[fn] = function () { state[part].fromLibrary = false; return core.apply(this, arguments); };
+    window[fn] = function () {
+      state[part].fromLibrary = false;
+      if (fn !== 'selectCabIRSlot') return core.apply(this, arguments);
+      const slot = Number(arguments[0]);
+      if (!Number.isInteger(slot) || slot < 0 || slot > 5) return core.apply(this, arguments);
+      clearPendingIRSlotTarget();
+      const target = {
+        slot,
+        preset: Number(state.selectedPreset),
+      };
+      ui.pendingIRSlotTarget = target;
+      // Current-state replies are untagged; an older read can arrive after a newer click.
+      target.timer = setTimeout(() => settlePendingIRSlotTarget(target), 2500);
+      return core.apply(this, arguments);
+    };
   }
 
   // Core asks which slot a library item should go into; resolves with the slot or null.
+  function noteCabIRLoadSlot(slot) {
+    const job = ui.cabIRLoadActive;
+    if (!job || !slot) return;
+    job.slot = slot;
+    job.phase = 'sending';
+    render();
+  }
+
   window.chooseSlot = function (kind, itemName) {
-    if (ui.slotPreselect) { const s = ui.slotPreselect; ui.slotPreselect = 0; return Promise.resolve(s); }   // "Put a library … in slot N…"
+    if (ui.slotPreselect) {
+      const s = ui.slotPreselect;
+      ui.slotPreselect = 0;
+      if (kind === 'cab') noteCabIRLoadSlot(s);
+      return Promise.resolve(s);
+    }   // "Put a library … in slot N…"
     const isCap = kind === 'capture';
     const count = isCap ? captureSlotCount() : irSlotCount();
     const names = isCap ? state.captureNames : state.irNames;
@@ -2843,8 +2992,57 @@
       title: 'Which slot should hold ' + itemName + '?', wide: true, content: list,
       body: 'Whatever is in that slot on the pedal is replaced' + (ui.usage ? ', for every preset that uses it. Counts show how many presets use each slot (scanned ' + scanTime() + ').' : '.'),
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Load into slot', primary: true }],
-    }).then(choice => (choice === 'ok' ? selected : null));
+    }).then(choice => {
+      const slot = choice === 'ok' ? selected : null;
+      if (kind === 'cab' && slot) noteCabIRLoadSlot(slot);
+      return slot;
+    });
   };
+
+  // The core owns the protocol parsing and state updates. Observe its response to
+  // advance the serialized UI queue as soon as the pedal acknowledges the write.
+  const coreCabinetSlotContentResponse = window.handleCabinetSlotContentResponse;
+  if (coreCabinetSlotContentResponse) {
+    window.handleCabinetSlotContentResponse = function (data) {
+      const pending = state.pendingCabAssignment;
+      const active = ui.cabIRLoadActive;
+      const matchesActive = Boolean(pending && active && pending.slot === active.slot && sameName(pending.name, active.name));
+      const timedOut = !pending && ui.cabIRLoadPaused ? ui.cabIRLoadTimedOut : null;
+      let accepted = false;
+      try {
+        const fields = parseProtoFields(Array.from(data.slice(2, data.length - 4)));
+        accepted = Boolean(fields[3] && fields[3][0] && fields[3][0].value === 1);
+      } catch (err) {
+        log('Could not parse the library cab load response: ' + err.message);
+      }
+
+      const result = coreCabinetSlotContentResponse.apply(this, arguments);
+      if (matchesActive) {
+        active.responseReceived = true;
+        if (accepted) {
+          active.phase = 'activating';
+          render();
+        } else {
+          void finishCabIRLoad(active, false, { acknowledged: true });
+        }
+      } else if (timedOut) {
+        ui.cabIRLoadTimedOut = null;
+        ui.cabIRLoadPaused = false;
+        if (accepted) {
+          state.irNames.set(timedOut.slot, timedOut.name);
+          state.currentIR = { shortName: timedOut.name, fullName: timedOut.name, inBank: true, slot: timedOut.slot };
+          selectCabIRSlot(timedOut.slot);
+          if (ui.demo) demo.pickIR(timedOut.slot);
+          toast('Cab ' + timedOut.name + ' loaded into slot ' + timedOut.slot);
+        } else {
+          toast('The pedal rejected the earlier IR change. You can try again.');
+        }
+        render();
+        startNextCabIRLoad();
+      }
+      return result;
+    };
+  }
 
   function render() {
     if (ui.knobDragging) {
@@ -3514,6 +3712,8 @@
     const on = state.cabIR.on;
     const factory = isFactoryCabIR();
     const irPreviewing = irAuditioning();
+    const irLoad = ui.cabIRLoadActive;
+    const irLoadBusy = Boolean(irLoad);
     const micPositionEditable = factory && on && !irPreviewing;
     const micPositionLockTitle = irPreviewing
       ? 'Stop the IR preview to change the microphone or position.'
@@ -3579,12 +3779,18 @@
       micRow));
 
     const cur = activeIRSlot();
-    const slots = el('div', { class: 'slots' + (on ? '' : ' disabled'), role: 'listbox', 'aria-label': 'IR slots' });
+    const slots = el('div', {
+      class: 'slots' + (on ? '' : ' disabled') + (irLoadBusy ? ' loading' : ''),
+      role: 'listbox', 'aria-label': 'IR slots', 'aria-busy': String(irLoadBusy),
+    });
     for (let i = 1; i <= irSlotCount(); i++) {
       const name = state.irNames.get(i) || ('IR ' + i);
+      const loadingThisSlot = Boolean(irLoad && irLoad.slot === i && irLoad.phase !== 'choosing');
       slots.append(el('button', {
-        class: 'slot' + (i === cur ? ' on' : '') + (irAudition.active && i === cur ? ' preview-muted' : ''), role: 'option', 'aria-selected': String(i === cur),
-        dataset: { fk: 'irslot-' + i }, disabled: !state.connected,
+        class: 'slot' + (i === cur ? ' on' : '') + (irAudition.active && i === cur ? ' preview-muted' : '') + (loadingThisSlot ? ' ir-loading' : ''),
+        role: 'option', 'aria-selected': String(i === cur), 'aria-busy': String(loadingThisSlot),
+        title: loadingThisSlot ? 'Loading ' + irLoad.name + ' into this IR slot' : null,
+        dataset: { fk: 'irslot-' + i }, disabled: !state.connected || irLoadBusy,
         oncontextmenu: (e) => { const anchor = e.currentTarget; contextMenu(e, [
           { label: i === cur ? 'Loaded in this preset' : 'Load into this preset', disabled: !state.connected || i === cur, action: () => anchor.click() },
           { label: 'Put a library cab in slot ' + i + '\u2026', disabled: !state.connected, action: () => openLibraryPicker('cab', anchor, i) },
@@ -3596,11 +3802,21 @@
           if (ui.demo) demo.pickIR(i);
           render();
         },
-      }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name }), usageBadge('cab', i)));
+      }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name }),
+        loadingThisSlot ? el('span', { class: 'slot-load-pending', text: '…', 'aria-label': 'Loading' }) : usageBadge('cab', i)));
     }
     const cabFromLib = on && state.cabIR.fromLibrary;
+    const loadStatus = irLoad
+      ? (irLoad.phase === 'choosing'
+        ? 'Choose a slot for ' + irLoad.name + '…'
+        : irLoad.phase === 'sending'
+          ? 'Loading ' + irLoad.name + ' into IR slot ' + irLoad.slot + '…'
+          : 'Activating IR slot ' + irLoad.slot + '…')
+      : ui.cabIRLoadPaused ? 'The last IR change was not confirmed. Reconnect before loading another IR.' : '';
+    const irQueueCount = ui.cabIRLoadQueue.length;
     out.push(el('div', { class: 'section' }, el('div', { class: 'section-head' }, el('h3', { text: 'Cabs and IRs on the pedal' })),
       cabFromLib ? el('p', { class: 'note', dataset: { fk: 'cab-from-lib' }, text: 'From the library: ' + (state.currentIR.shortName || 'a cab') + '. This preset plays it straight from the pedal\u2019s library, not from a slot.' }) : null,
+      loadStatus ? el('p', { class: 'note ir-load-status', role: 'status', 'aria-live': 'polite', text: loadStatus + (irLoad && irQueueCount ? ' ' + irQueueCount + ' more queued.' : '') }) : null,
       !on ? el('p', { class: 'note', text: 'Turn the cab back on to pick a slot.' }) : null, slots));
     out.push(el('div', { class: 'section cab-library-section' },
       el('div', { class: 'section-divider' }, el('h3', { text: 'From the library' })),

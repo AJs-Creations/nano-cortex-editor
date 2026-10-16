@@ -396,6 +396,10 @@ button, input, select { font: inherit; color: inherit; }
 .slot.on { border-color: var(--c); color: var(--text); background: #2e2e2e; }
 .slot.on .n { color: var(--c); }
 .slots.disabled { opacity: .4; pointer-events: none; }
+.slots.loading { opacity: .78; }
+.slot.ir-loading { border-color: var(--focus); color: var(--text); }
+.slot-load-pending { color: var(--focus); font-size: 18px; line-height: 1; animation: pulse 1s infinite; }
+.ir-load-status { color: var(--text) !important; }
 .slot.preview-muted { opacity: .38; border-color: var(--line-soft); background: var(--raised); color: var(--dim); }
 .slot.preview-muted .n { color: var(--faint); }
 
