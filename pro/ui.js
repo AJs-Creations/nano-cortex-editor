@@ -2157,7 +2157,9 @@
   function irPreviewRequest(item) {
     const nameBytes = Array.from(new TextEncoder().encode(item.name));
     const record = [0x08, ...encodeVarint(item.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
-    return buildFrame([0x22, ...encodeVarint(record.length), ...record, 0x40, 0x01], 158);
+    // Type 158 uses field 3 for the IR record. Factory slot assignment uses
+    // field 4, but audition is a separate request with a different schema.
+    return buildFrame([0x1A, ...encodeVarint(record.length), ...record, 0x40, 0x01], 158);
   }
 
   async function startIRPreview(item) {

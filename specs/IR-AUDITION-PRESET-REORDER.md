@@ -29,10 +29,10 @@ The approved reference is [the IR library mockup](ir-library-layout-mockup.html)
 
 ### Protocol
 
-Use the exact 0-based `item.index` and `item.name` from the picker. Encode the small, single-frame request as message type **158**:
+Use the exact 0-based `item.index` and `item.name` from the picker. Encode the small, single-frame request as message type **158**. The IR record is protobuf field 3 (wire key `0x1A`); do not reuse field 4 from the factory slot-load request:
 
 ```text
-{ 4: { 1: item.index, 2: item.name }, 8: 1 }
+{ 3: { 1: item.index, 2: item.name }, 8: 1 }
 ```
 
 The observed pedal reply is message type **159**:
@@ -107,7 +107,7 @@ The pedal emitted type 115 dirty then clean notifications around one move. Treat
 
 ## Acceptance checks
 
-- Playing an IR sends one type 158 with the selected item's index/name and field 8 set to 1; type 159 success updates the active preview indicator.
+- Playing an IR sends one type 158 with the selected item's index/name in field 3 and field 8 set to 1; type 159 success updates the active preview indicator.
 - The Cab/IR inspector retains its existing pedal-slot section and surrounding app layout; the new compact **From the library** section matches the pedal slot tile sizing and spacing.
 - Library search filters names, groups, and available details, hides groups with no matches, and shows an empty result message when appropriate.
 - Clicking a library tile opens slot selection; clicking its Preview button auditions without loading, highlights that tile, dims the current pedal slot, and changes the control to Stop. No bottom preview popup appears.
