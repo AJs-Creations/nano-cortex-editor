@@ -325,7 +325,6 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    show: false,
     title: 'Nano Cortex Editor',
     backgroundColor: '#121212',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -338,14 +337,6 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'toolbar-preload.js'), contextIsolation: true, sandbox: true }
   });
   toolbar.webContents.loadFile(path.join(__dirname, 'toolbar.html')).then(sendAccentToToolbar);
-  let initialViewsReady = 0;
-  const showWhenInitialViewsReady = () => {
-    if (++initialViewsReady < 2) return;
-    layout();
-    show('editor');
-    win.show();
-  };
-  toolbar.webContents.once('did-finish-load', showWhenInitialViewsReady);
 
   // Editor (local file, needs BLE + MIDI)
   editor = new WebContentsView({
@@ -353,7 +344,6 @@ function createWindow() {
   });
   grantDevicePermissions(editor.webContents.session);
   wireBluetooth(editor.webContents);
-  editor.webContents.once('did-finish-load', showWhenInitialViewsReady);
   loadEditor('pro');
   editor.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   // The editor's Activity log goes to the log file for everyone (Help → Show Log File). Running from source it is
@@ -413,7 +403,8 @@ function createWindow() {
   win.contentView.addChildView(editor);
   win.contentView.addChildView(cloud);
   win.contentView.addChildView(toolbar);
-  win.on('resize', layout);
+  // Native content bounds can settle after show (e.g. Windows menus) without a window resize.
+  win.contentView.on('bounds-changed', layout);
   layout();
   editor.setVisible(true);
   cloud.setVisible(false);
