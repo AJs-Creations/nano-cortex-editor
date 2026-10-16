@@ -81,7 +81,7 @@ Produces the ground truth every later step is tested against. Back up presets in
   the pedal answered type 14 with the cloud's hash, and the library listed it as user capture 2
   (recorded session, not published).
 - IRs from Cortex Cloud: implemented from the 2026-10-15 trace and authenticated page inspection (Investigation section 6a). The Cloud profile's Impulse Responses list receives per-row **Send to Nano** buttons; each downloads raw WAV data, sends type 15, waits for type 16, then refreshes type 76/77 so “IRs on pedal” updates. End-to-end pedal verification is still needed.
-- Delete a user IR from the pedal: implemented from `nano-cortex-bt6.pcap` (type 82/83), with type 76/77 refresh and a right-click **Delete…** action in the IR library list. Hardware verification is still needed; capture deletion remains undecoded.
+- Delete a user IR from the pedal: implemented from the decoded type 82/83 exchange (Investigation §6a), with type 76/77 refresh and a right-click **Delete…** action in the IR library list. Hardware verification is still needed; capture deletion remains undecoded.
 
 ## 4b. Queue after the first release (in suggested order)
 

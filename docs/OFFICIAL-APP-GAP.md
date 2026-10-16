@@ -202,7 +202,7 @@ off the repository.
 5. **Tempo storage.** [M] and [N210] confirm global vs per-preset tempo; where the per-preset tempo lives is
    unknown (state dump field 56 = f32 120.0 is a guess, PROTOCOL-NOTES §7). Step 9 checks whether it is saved with
    the preset.
-6. **Capture library deletion.** IR deletion is type 82/83 (confirmed in `nano-cortex-bt6.pcap`, Investigation §6a); capture deletion remains unknown (step 24).
+6. **Capture library deletion.** IR deletion is type 82/83 (decoded in Investigation §6a); capture deletion remains unknown (step 24).
 7. **IR download path.** Resolved: raw WAV uses type 15/16 and library refresh uses 76/77 (Investigation §6a).
 8. **Audition.** [M] says the pedal "can cache multiple Captures or IRs at once" and slots pulse; unknown whether
    this is a full type-13 upload into a cache or something else (step 21).

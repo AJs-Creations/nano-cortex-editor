@@ -1,6 +1,6 @@
 # Nano Cortex live-preview PCAP - decoded report
 
-Source: `C:\Users\cdhan\Desktop\nano-cortex-bt.pcap`
+Source: local BLE capture (not stored in the repository)
 Generated: `2026-10-14T23:03:22-05:00`
 PCAP 2.4, link type 201, snaplen 2048; 250 HCI records; 88 complete ATT messages.
 Capture time: `2026-10-14T17:54:16.236-05:00` to `2026-10-14T17:54:33.534-05:00`; relative duration `17.298s`.

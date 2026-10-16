@@ -185,7 +185,7 @@ verification with a connected pedal.
 
 ### Deleting an IR from the pedal
 
-Source: `nano-cortex-bt6.pcap`, captured with the iOS Cortex Cloud app deleting one user IR from a Nano Cortex
+Source: a local BLE capture of the iOS Cortex Cloud app deleting one user IR from a Nano Cortex
 (firmware 2.2.1). The app sends **type 82** with `{1: 2, 4: {1: libraryIndex, 2: name}}`; in the capture the
 record is index 41, `YA ZILA 212 BLND Mix 05`. The pedal confirms with **type 83** `{1: 6, 3: 1}`. The app then
 requests the library with type 76 and receives type 77 without the deleted IR. This gives us the request, success
