@@ -3287,13 +3287,19 @@
       }
 
       const stateRefreshed = state.connected && await refreshCurrentPresetAfterMove();
-      if (!listRefreshed || !stateRefreshed) {
-        toast('The pedal’s preset order could not be fully confirmed. Refresh the preset list to check it.');
+      log('Preset reorder confirmation: move=' + ackOk + ', list=' + listRefreshed + ', currentState=' + stateRefreshed);
+      if (!listRefreshed) {
+        toast('The pedal’s preset list could not be refreshed after the move. Refresh the preset list to check its order.');
         return false;
       }
       if (!ackOk) {
         toast('The pedal did not confirm the preset move; its current order has been refreshed.');
         return false;
+      }
+      if (!stateRefreshed) {
+        log('Preset move and list confirmed, but the current preset state was not refreshed.');
+        toast('Preset moved and the list refreshed, but the current preset details could not be confirmed.');
+        return true;
       }
       toast('Moved preset ' + (source + 1) + ' to position ' + (destination + 1) + '.');
       return true;

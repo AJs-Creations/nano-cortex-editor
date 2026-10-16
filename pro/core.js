@@ -657,7 +657,7 @@ async function requestCurrentPresetState() {
       state.stateTimer = null;
       state.stateMode = 'current';
       state.stateBytes = [];
-      await writeC304('Current preset state request', bytesFromHex('0C C0 08 03 18 01 20 01 28 01 01 00 00 00'));
+      return await writeC304('Current preset state request', bytesFromHex('0C C0 08 03 18 01 20 01 28 01 01 00 00 00'));
     }
 
 function cancelExpressionParamRefresh() {
@@ -946,6 +946,7 @@ function parseBufferedCurrentState() {
 
       state.stateBytes = [];
       state.stateMode = 'idle';
+      state.protocol.lastStateSync = Date.now();
 
       state.protocol.presetLoad = false;
 
@@ -1538,7 +1539,6 @@ function appendFEStreamPayload(data) {
     }
 
 function parseCurrentPresetState(data) {
-      state.protocol.lastStateSync = Date.now();
       log('CURRENT STATE CANDIDATE len=' + data.length + ': ' + hex(data));
     }
 

@@ -157,6 +157,21 @@ if (!msgSource.includes(libraryResponse)) throw new Error('Upstream MSG object m
 patches.set(msg, msgSource.replace(libraryResponse,
   libraryResponse + '\n      DeleteLibraryIRRequest: 82,\n      DeleteLibraryIRResponse: 83,'));
 
+// A current-state read completes in the buffered FE parser. The upstream
+// fallback sees unrelated single packets, so it cannot confirm a state read.
+const bufferedState = byName.get('parseBufferedCurrentState');
+const bufferedStateSource = src.slice(bufferedState.node.start, bufferedState.node.end);
+const stateParseComplete = /(state\.stateBytes = \[\];\r?\n[ \t]*state\.stateMode = 'idle';)/;
+if (!stateParseComplete.test(bufferedStateSource)) throw new Error('Upstream current-state parser moved; cannot mark completed reads');
+patches.set(bufferedState, bufferedStateSource.replace(stateParseComplete,
+  match => match + (match.includes('\r\n') ? '\r\n' : '\n') + '      state.protocol.lastStateSync = Date.now();'));
+
+const stateFallback = byName.get('parseCurrentPresetState');
+const stateFallbackSource = src.slice(stateFallback.node.start, stateFallback.node.end);
+const fallbackSync = /[ \t]*state\.protocol\.lastStateSync = Date\.now\(\);\r?\n/;
+if (!fallbackSync.test(stateFallbackSource)) throw new Error('Upstream current-state fallback moved; cannot remove false sync');
+patches.set(stateFallback, stateFallbackSource.replace(fallbackSync, ''));
+
 // Hooks become empty declarations: the override point exists, the upstream UI body is gone.
 for (const h of HOOKS) {
   const t = byName.get(h);
