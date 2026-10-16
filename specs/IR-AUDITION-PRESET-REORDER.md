@@ -24,15 +24,17 @@ The approved reference is [the IR library mockup](ir-library-layout-mockup.html)
 - Show the pedal's factory cabs and user IRs in their existing groups. Remove the redundant type-filter dropdown. The search field filters by item name, group/category, and available item details; hide empty groups and show a “Nothing matches…” message when no results remain.
 - Each library tile has a separate Preview button aligned at the right. Clicking the item name/body opens the existing slot chooser; confirming a destination then uses the normal library-to-slot load path. Preview auditions without opening the slot chooser or loading the IR. Keep any explicit slot-targeted context-menu actions working.
 - While auditioning, highlight the active library tile, change its Preview button to Stop, and dim the currently selected pedal slot tile. Do not show a separate bottom “Previewing” popup. Starting another IR audition may replace the current audition; the trace shows multiple Play requests followed by one Stop, without intervening stop requests.
+- Lock the factory microphone and position controls during any library IR audition and its start/stop transitions, whether the audition is from Factory cabs or Your IRs. Explain that the preview must stop before those settings can be changed, block new mic/position writes while locked, and finish any write already queued before sending type 158.
 - Preview must not invoke `loadLibraryCab`, `chooseSlot`, or type 78, and the editor must not optimistically change preset state or IR slot contents. The pedal may report dirty state after audition; handle that notification as described below.
 - Disable pedal audition in demo mode. On hardware, enable it after the connected pedal's library has loaded.
 
 ### Protocol
 
-Use the exact 0-based `item.index` and `item.name` from the picker. Encode the small, single-frame request as message type **158**. The IR record is protobuf field 3 (wire key `0x1A`); do not reuse field 4 from the factory slot-load request:
+Use the exact 0-based `item.index` and `item.name` from the picker. Encode the small, single-frame request as message type **158**. Factory cabs use protobuf field 3 (wire key `0x1A`), while Your IRs use field 4 (wire key `0x22`):
 
 ```text
-{ 3: { 1: item.index, 2: item.name }, 8: 1 }
+Factory cabs: { 3: { 1: item.index, 2: item.name }, 8: 1 }
+Your IRs:     { 4: { 1: item.index, 2: item.name }, 8: 1 }
 ```
 
 The observed pedal reply is message type **159**:
@@ -41,7 +43,7 @@ The observed pedal reply is message type **159**:
 { 1: 6, 3: status, 4: { 2: item.name } }
 ```
 
-Treat field 3 value `1` as accepted. A failed status, write failure, or reply timeout must clear the pending state and leave the From the library section available. Field 8 was `1` for every observed IR Play; preserve that value without assigning it an unverified meaning. The trace did not show a factory-versus-user discriminator in this request, so retain the item category in the UI model and use the item's exact index/name pair. Before claiming support for both categories, verify one factory IR and one user IR because the captures only validate the entries exercised by the user.
+Treat field 3 value `1` as accepted. A failed status, write failure, or reply timeout must clear the pending state and leave the From the library section available. Field 8 was `1` for every observed IR Play; preserve that value without assigning it an unverified meaning. The supplied trace verifies field 3 for a factory cab. Your IRs use field 4; the supplied trace does not verify that field for user IRs. Keep the item category in the UI model so each source uses its intended field, with the exact index/name pair.
 
 Stop uses message type **148** with a millisecond transaction value in field 2 and explicit zero in field 4:
 
@@ -107,10 +109,11 @@ The pedal emitted type 115 dirty then clean notifications around one move. Treat
 
 ## Acceptance checks
 
-- Playing an IR sends one type 158 with the selected item's index/name in field 3 and field 8 set to 1; type 159 success updates the active preview indicator.
+- Playing a factory cab sends one type 158 with the selected item's index/name in field 3; playing a user IR sends it in field 4. Both set field 8 to 1, and type 159 success updates the active preview indicator.
 - The Cab/IR inspector retains its existing pedal-slot section and surrounding app layout; the new compact **From the library** section matches the pedal slot tile sizing and spacing.
 - Library search filters names, groups, and available details, hides groups with no matches, and shows an empty result message when appropriate.
 - Clicking a library tile opens slot selection; clicking its Preview button auditions without loading, highlights that tile, dims the current pedal slot, and changes the control to Stop. No bottom preview popup appears.
+- Factory microphone and position controls are disabled while either category's type 158 is pending, its audition is active, or its type 148 Stop is pending; they are re-enabled after preview failure or a confirmed stop. A write queued before Play finishes before type 158, and stale button handlers cannot change the mic or position during the lock.
 - Playing an IR sends no type 78, type 80, preset-save, or slot-content write.
 - Stopping an IR preview sends type 148 with field 2 transaction and field 4 zero, then accepts only a matching successful type 149 response.
 - A long audition sends type 91 every 20 seconds and accepts type 92 with field 3 equal to `1`.

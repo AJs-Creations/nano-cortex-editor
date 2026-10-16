@@ -2117,6 +2117,10 @@
   }
 
   const irAudition = { active: null, pending: null, busy: false, stopping: false };
+  let cabMicPositionWritePromise = Promise.resolve(true);
+  function irAuditioning() {
+    return Boolean(irAudition.busy || irAudition.pending || irAudition.active);
+  }
 
   // The pedal keeps accepted capture and IR previews alive with type 91 requests
   // about every 20 seconds. The Nano answers with type 92.
@@ -2157,9 +2161,9 @@
   function irPreviewRequest(item) {
     const nameBytes = Array.from(new TextEncoder().encode(item.name));
     const record = [0x08, ...encodeVarint(item.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
-    // Type 158 uses field 3 for the IR record. Factory slot assignment uses
-    // field 4, but audition is a separate request with a different schema.
-    return buildFrame([0x1A, ...encodeVarint(record.length), ...record, 0x40, 0x01], 158);
+    // Factory cabs and user IRs use different record fields in type 158.
+    const recordField = item.kind === 'irFactory' ? 0x1A : 0x22;
+    return buildFrame([recordField, ...encodeVarint(record.length), ...record, 0x40, 0x01], 158);
   }
 
   async function startIRPreview(item) {
@@ -2173,6 +2177,9 @@
     irAudition.stopping = false;
     render();
     try {
+      // Finish a mic/position write queued before the audition so it cannot
+      // reach the pedal after the type 158 Play request.
+      await cabMicPositionWritePromise;
       const reply = await writeAndAwait('Preview IR "' + item.name + '"', irPreviewRequest(item), 159);
       const status = fieldValue(reply, 3);
       if (!reply || status !== 1) {
@@ -2546,19 +2553,26 @@
     return coreCabRefresh.call(this, data);
   };
   window.setCabIRMicPosition = async function (mic, position) {
-    if (!isFactoryCabIR()) { log('Cab mic/position ignored: current IR is not a factory cab slot.'); return; }
+    if (irAuditioning()) {
+      log('Cab mic/position ignored: stop the IR preview first.');
+      return false;
+    }
+    if (!isFactoryCabIR()) { log('Cab mic/position ignored: current IR is not a factory cab slot.'); return false; }
     const cabName = String(state.currentIR.shortName || '').trim();
     const micName = String(mic || state.cabIR.mic || '').trim();
     let index = state.cabIR.libraryIndex;
     if (!Number.isInteger(index)) { const hit = state.library.irFactory.find(x => sameName(x.name, cabName)); index = hit ? hit.index : null; }
-    if (!cabName || !micName || !Number.isInteger(index)) { log('Cab mic/position ignored: the cab\'s library index is unknown (read the cab first).'); return; }
+    if (!cabName || !micName || !Number.isInteger(index)) { log('Cab mic/position ignored: the cab\'s library index is unknown (read the cab first).'); return false; }
     const pos = clamp(Math.round(Number(position || state.cabIR.position || 1)), 1, 6);
     state.cabIR.mic = micName;
     state.cabIR.position = pos;
     const cab = new TextEncoder().encode(cabName), m = new TextEncoder().encode(micName);
     const inner = [0x08, ...encodeVarint(index), 0x12, cab.length, ...cab, 0x18, pos - 1, 0x22, m.length, ...m];
-    await writeC304('Cab mic/position ' + micName + ' pos ' + pos, new Uint8Array([inner.length + 6, 0xC0, 0x1A, inner.length, ...inner, 0x5E, 0, 0, 0]));
+    const writePromise = writeC304('Cab mic/position ' + micName + ' pos ' + pos, new Uint8Array([inner.length + 6, 0xC0, 0x1A, inner.length, ...inner, 0x5E, 0, 0, 0]));
+    cabMicPositionWritePromise = writePromise;
+    const written = await writePromise;
     render();
+    return written;
   };
 
   // Gate reduction read-back (verified on the pedal 2026-10-08): the state dump's
@@ -3499,25 +3513,32 @@
   function inspCab(s) {
     const on = state.cabIR.on;
     const factory = isFactoryCabIR();
+    const irPreviewing = irAuditioning();
+    const micPositionEditable = factory && on && !irPreviewing;
+    const micPositionLockTitle = irPreviewing
+      ? 'Stop the IR preview to change the microphone or position.'
+      : 'Mic and position apply to factory cabs only';
     const out = [head(s, [], bypassSwitch('cab', on))];
 
     const MICS = ['Condenser 184', 'Condenser 414', 'Dynamic 421', 'Dynamic 57', 'Ribbon 160'];
     const micRow = el('div', { class: 'params wide' },
-      el('div', { class: 'choice' + (factory && on ? '' : ' locked'), title: factory ? null : 'Mic and position apply to factory cabs only' },
+      el('div', { class: 'choice' + (micPositionEditable ? '' : ' locked'), title: micPositionEditable ? null : micPositionLockTitle },
         el('span', { class: 'label', text: 'Mic' }),
         el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Mic' },
           MICS.map(m => el('button', {
+            disabled: !micPositionEditable,
             class: sameName(state.cabIR.mic, m) ? 'on' : '', role: 'radio', 'aria-checked': String(sameName(state.cabIR.mic, m)),
             dataset: { fk: 'mic-' + m },
-            onclick: () => { if (!sameName(state.cabIR.mic, m)) { setCabIRMicPosition(m, state.cabIR.position); state.cabIR.mic = m; render(); } },
+            onclick: () => { if (micPositionEditable && !irAuditioning() && !sameName(state.cabIR.mic, m)) { void setCabIRMicPosition(m, state.cabIR.position); } },
           }, m)))),
-      el('div', { class: 'choice' + (factory && on ? '' : ' locked') },
+      el('div', { class: 'choice' + (micPositionEditable ? '' : ' locked'), title: micPositionEditable ? null : micPositionLockTitle },
         el('span', { class: 'label', text: 'Position' }),
         el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Mic position' },
           [1, 2, 3, 4, 5, 6].map(n => el('button', {
+            disabled: !micPositionEditable,
             class: Number(state.cabIR.position) === n ? 'on' : '', role: 'radio', 'aria-checked': String(Number(state.cabIR.position) === n),
             dataset: { fk: 'pos-' + n },
-            onclick: () => { if (Number(state.cabIR.position) !== n) { setCabIRMicPosition(state.cabIR.mic, n); state.cabIR.position = n; render(); } },
+            onclick: () => { if (micPositionEditable && !irAuditioning() && Number(state.cabIR.position) !== n) { void setCabIRMicPosition(state.cabIR.mic, n); } },
           }, String(n))))));
 
     const knobs = el('div', { class: 'params' },
@@ -3552,7 +3573,10 @@
 
     out.push(el('div', { class: 'section' }, el('h3', { text: 'Tone' }), knobs));
     out.push(el('div', { class: 'section' }, el('h3', { text: 'Microphone' }),
-      factory ? null : el('p', { class: 'note', text: 'Mic and position only apply to the factory cabs.' }), micRow));
+      irPreviewing
+        ? el('p', { class: 'note', text: 'Stop the IR preview to change the microphone or position.' })
+        : factory ? null : el('p', { class: 'note', text: 'Mic and position only apply to the factory cabs.' }),
+      micRow));
 
     const cur = activeIRSlot();
     const slots = el('div', { class: 'slots' + (on ? '' : ' disabled'), role: 'listbox', 'aria-label': 'IR slots' });
