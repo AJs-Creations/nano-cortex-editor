@@ -272,11 +272,31 @@
     if (!state.cabIR.on) return 0;
     if (state.cabIR.fromLibrary) return null;
     const sel = state.cabIR.selectedSlot;
-    if (sel && sameName(state.irNames.get(sel), state.currentIR.shortName)) return sel;
+    if (Number.isInteger(sel) && sel >= 1 && sel <= 5) return sel;
     for (let i = 1; i <= irSlotCount(); i++) {
       if (state.currentIR.shortName && sameName(state.irNames.get(i), state.currentIR.shortName)) return i;
     }
     return state.cabIR.selectedSlot || null;
+  }
+
+  function selectedIRIsFactory() {
+    const slot = activeIRSlot();
+    const name = slot && state.irNames.get(slot);
+    const factoryIRs = state.library.irFactory || [];
+    if (slot && slot >= 1 && slot <= 5 && state.library.loaded) {
+      // With the pedal library loaded, a pedal slot is factory only when its
+      // actual contents match a factory entry. Missing or user names must not
+      // inherit the microphone from an IR that was only being previewed.
+      return Boolean(name && factoryIRs.some(item => sameName(item.name, name)));
+    }
+    if (name) {
+      // The selected pedal slot is authoritative when preview state leaves the
+      // current IR name stale. Unknown slot names are non-factory once the
+      // pedal library has been read, rather than inheriting the preview's mic.
+      if (factoryIRs.some(item => sameName(item.name, name))) return true;
+      if ((state.library.irUser || []).some(item => sameName(item.name, name)) || state.library.loaded) return false;
+    }
+    return isFactoryCabIR();
   }
 
   const shortMic = (m) => String(m || '').replace('Condenser', 'Cond').replace('Dynamic', 'Dyn').replace('Ribbon', 'Rib');
@@ -312,7 +332,7 @@
       return {
         on,
         model: name || 'Cab / IR',
-        sub: !on ? 'Bypassed' : state.cabIR.fromLibrary ? 'From the library: ' + (name || 'cab') : (isFactoryCabIR() ? shortMic(state.cabIR.mic) + ', pos ' + state.cabIR.position : (state.currentIR.inBank === false ? 'Library IR' : 'User IR')),
+        sub: !on ? 'Bypassed' : state.cabIR.fromLibrary ? 'From the library: ' + (name || 'cab') : (selectedIRIsFactory() ? shortMic(state.cabIR.mic) + ', pos ' + state.cabIR.position : (state.currentIR.inBank === false ? 'Library IR' : 'User IR')),
         canToggle: true,
       };
     }
@@ -1297,6 +1317,38 @@
     if (!target) return;
     clearTimeout(target.timer);
     if (ui.pendingIRSlotTarget === target) ui.pendingIRSlotTarget = null;
+  }
+
+  function holdIRSlotTargetForPreview() {
+    const target = ui.pendingIRSlotTarget;
+    if (!target) return;
+    target.holdForPreviewStop = true;
+    clearTimeout(target.timer);
+    target.timer = null;
+  }
+
+  function releaseIRSlotTargetWhenPreviewFails() {
+    const target = ui.pendingIRSlotTarget;
+    if (!target || !target.holdForPreviewStop || irAudition.active) return;
+    target.holdForPreviewStop = false;
+    target.timer = setTimeout(() => settlePendingIRSlotTarget(target), 2500);
+  }
+
+  function settleIRSlotTargetAfterPreview() {
+    const target = ui.pendingIRSlotTarget;
+    if (!target || !target.holdForPreviewStop) return;
+    if (target.preset !== Number(state.selectedPreset)) {
+      clearPendingIRSlotTarget(target);
+      return;
+    }
+    state.cabIR.fromLibrary = false;
+    state.cabIR.on = target.slot > 0;
+    state.cabIR.selectedSlot = target.slot;
+    state.cabIR.stateSlot = target.slot;
+    if (target.slot > 0) state.cabIR.lastActiveSlot = target.slot;
+    if (target.currentIR) state.currentIR = { ...target.currentIR };
+    clearPendingIRSlotTarget(target);
+    render();
   }
 
   function settlePendingIRSlotTarget(target) {
@@ -2286,6 +2338,7 @@
         return false;
       }
       irAudition.active = { kind: item.kind, index: item.index, name: item.name };
+      holdIRSlotTargetForPreview();
       startPreviewKeepAlive();
       log('IR preview accepted: type 159 index=' + item.index + ' status=' + status);
       return true;
@@ -2296,6 +2349,7 @@
     } finally {
       irAudition.busy = false;
       irAudition.pending = null;
+      releaseIRSlotTargetWhenPreviewFails();
       render();
     }
   }
@@ -2346,6 +2400,7 @@
       irAudition.active = null;
       if (!ui.previewing) stopPreviewKeepAlive();
       await refreshAfterIRPreviewStop();
+      settleIRSlotTargetAfterPreview();
       return true;
     } catch (err) {
       log('ERROR: stopping IR preview: ' + err.message);
@@ -2665,11 +2720,13 @@
       log('Cab mic/position ignored: stop the IR preview first.');
       return false;
     }
-    if (!isFactoryCabIR()) { log('Cab mic/position ignored: current IR is not a factory cab slot.'); return false; }
-    const cabName = String(state.currentIR.shortName || '').trim();
+    if (!selectedIRIsFactory()) { log('Cab mic/position ignored: current IR is not a factory cab slot.'); return false; }
+    const selectedSlot = activeIRSlot();
+    const cabName = String((selectedSlot && state.irNames.get(selectedSlot)) || state.currentIR.shortName || '').trim();
     const micName = String(mic || state.cabIR.mic || '').trim();
-    let index = state.cabIR.libraryIndex;
-    if (!Number.isInteger(index)) { const hit = state.library.irFactory.find(x => sameName(x.name, cabName)); index = hit ? hit.index : null; }
+    const factoryIR = (state.library.irFactory || []).find(x => sameName(x.name, cabName));
+    let index = factoryIR ? factoryIR.index : state.cabIR.libraryIndex;
+    if (!Number.isInteger(index)) index = null;
     if (!cabName || !micName || !Number.isInteger(index)) { log('Cab mic/position ignored: the cab\'s library index is unknown (read the cab first).'); return false; }
     const pos = clamp(Math.round(Number(position || state.cabIR.position || 1)), 1, 6);
     state.cabIR.mic = micName;
@@ -2828,7 +2885,13 @@
         state.cabIR.selectedSlot = pendingIRTarget.slot;
         state.cabIR.stateSlot = pendingIRTarget.slot;
         if (pendingIRTarget.slot > 0) state.cabIR.lastActiveSlot = pendingIRTarget.slot;
+        if (pendingIRTarget.currentIR) state.currentIR = { ...pendingIRTarget.currentIR };
       }
+    } else if (src && src.cab >= 1 && src.cab <= 5) {
+      // Field 12 is the exact slot; matching by IR name can select another slot
+      // when the same IR is stored more than once.
+      state.cabIR.selectedSlot = src.cab;
+      state.cabIR.lastActiveSlot = src.cab;
     }
     try {
       const all = parseProtoFields(bytes);
@@ -2954,10 +3017,13 @@
       const target = {
         slot,
         preset: Number(state.selectedPreset),
+        currentIR: { ...state.currentIR },
+        holdForPreviewStop: Boolean(irAudition.active || irAudition.busy || irAudition.pending),
       };
       ui.pendingIRSlotTarget = target;
       // Current-state replies are untagged; an older read can arrive after a newer click.
-      target.timer = setTimeout(() => settlePendingIRSlotTarget(target), 2500);
+      if (target.holdForPreviewStop) holdIRSlotTargetForPreview();
+      else target.timer = setTimeout(() => settlePendingIRSlotTarget(target), 2500);
       return core.apply(this, arguments);
     };
   }
@@ -3710,7 +3776,7 @@
 
   function inspCab(s) {
     const on = state.cabIR.on;
-    const factory = isFactoryCabIR();
+    const factory = selectedIRIsFactory();
     const irPreviewing = irAuditioning();
     const irLoad = ui.cabIRLoadActive;
     const irLoadBusy = Boolean(irLoad);
