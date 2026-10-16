@@ -16,9 +16,12 @@ const { renderAccentIcon, normHex, DEFAULT_ACCENT } = require('./accent-icon');
 const LINKS = require('../pro/links');   // repo, manual, issues, support: the same constants the editor page uses
 const { menuTemplate, menuLabels } = require('./menu');
 const { createActivityLog } = require('./activity-log');
+const { randomUUID } = require('crypto');
 
 // Capture pages live under /cloud/discover/… and under pack pages like /cloud/<pack>/…
 const CAPTURE_PAGE = /\/neural-capture\/view\/([0-9a-f-]{36})/i;
+const CLOUD_IR_PAGE = /^\/cloud\/profile\/impulses\/?$/i;
+const CLOUD_PRODUCT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const CLOUD_URL = 'https://cloud.neuraldsp.com/cloud/';
 const CLOUD_PARTITION = 'persist:cortex-cloud';
@@ -43,6 +46,128 @@ const isCloudHost = (url) => {
   } catch { return false; }
 };
 
+// Add a pedal transfer action to each item on the account's own IR list. The
+// Cloud page is a React app; its rendered list component retains the same
+// product records that came from the account-list API, including productId.
+// If Neural DSP changes that page structure, the enhancement quietly stops
+// adding buttons while the official Cloud page continues to work normally.
+const CLOUD_IR_ACTION_SCRIPT = String.raw`(() => {
+  if (window.__nanoCloudIRActions) return;
+  const style = document.createElement('style');
+  style.id = 'nano-cloud-ir-actions-style';
+  style.textContent = '.nano-cloud-ir-row{position:relative!important;padding-right:126px!important}.nano-cloud-ir-send{position:absolute!important;right:8px!important;top:50%!important;transform:translateY(-50%)!important;z-index:5!important;padding:6px 10px!important;border:1px solid #7766ff!important;border-radius:6px!important;background:#6954ff!important;color:#fff!important;font:600 12px/1.2 system-ui,sans-serif!important;white-space:nowrap!important;cursor:pointer!important}.nano-cloud-ir-send:hover{filter:brightness(1.12)!important}.nano-cloud-ir-send:disabled{opacity:.62!important;cursor:wait!important}.nano-cloud-ir-send.nano-cloud-ir-on-nano:disabled{opacity:.9!important;cursor:default!important;background:#252333!important;border-color:#5d5683!important;color:#d5d0ff!important}';
+  document.documentElement.appendChild(style);
+
+  const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  function productEntries(row) {
+    const fiberKey = Object.keys(row).find(key => key.startsWith('__reactFiber'));
+    let fiber = fiberKey ? row[fiberKey] : null;
+    for (let depth = 0; fiber && depth < 16; depth++, fiber = fiber.return) {
+      const entries = fiber.memoizedProps && fiber.memoizedProps.entries;
+      if (Array.isArray(entries) && entries.length && entries.every(item => item && item.productId && item.name)) return entries;
+    }
+    return null;
+  }
+  function itemName(row) {
+    const input = row.querySelector('input[type="checkbox"]');
+    return String(input && input.name || '').replace(/\s+checkbox$/i, '').trim();
+  }
+  function scan() {
+    if (!/^\/cloud\/profile\/impulses\/?$/i.test(location.pathname)) return;
+    const rows = [...document.querySelectorAll('main li input[type="checkbox"]')]
+      .map(input => input.closest('li')).filter(Boolean);
+    const lists = new Map();
+    for (const row of rows) {
+      if (!lists.has(row.parentElement)) lists.set(row.parentElement, []);
+      lists.get(row.parentElement).push(row);
+    }
+    for (const [list, listRows] of lists) {
+      const entries = productEntries(listRows[0]);
+      if (!entries) continue;
+      for (const row of listRows) {
+        const name = itemName(row);
+        if (!name) continue;
+        const rowIndex = [...list.children].indexOf(row);
+        let entry = entries[rowIndex];
+        if (!entry || entry.name !== name) {
+          const occurrence = listRows.slice(0, listRows.indexOf(row) + 1).filter(item => itemName(item) === name).length - 1;
+          entry = entries.filter(item => item.name === name)[occurrence];
+        }
+        if (!entry || entry.name !== name || !idPattern.test(String(entry.productId))) continue;
+        let button = row.querySelector(':scope > .nano-cloud-ir-send');
+        if (button && button.dataset.productId === String(entry.productId)) continue;
+        if (button) button.remove();
+        row.classList.add('nano-cloud-ir-row');
+        button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'nano-cloud-ir-send';
+        button.textContent = 'Send to Nano';
+        button.title = 'Send ' + name + ' to the Nano Cortex IR library';
+        button.setAttribute('aria-label', 'Send ' + name + ' to Nano Cortex');
+        button.dataset.productId = String(entry.productId);
+        button.addEventListener('click', async event => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (button.disabled) return;
+          button.disabled = true;
+          button.textContent = 'Sending…';
+          button.title = 'Fetching and sending ' + name;
+          try {
+            if (!window.nanoCloudActions || !window.nanoCloudActions.sendImpulseResponse) throw new Error('The Nano Cortex Editor action is unavailable.');
+            const result = await window.nanoCloudActions.sendImpulseResponse(String(entry.productId), name);
+            if (result && result.alreadyOnNano) {
+              button.textContent = 'On Nano';
+              button.classList.add('nano-cloud-ir-on-nano');
+              button.title = (result.name || name) + ' is already in the Nano Cortex IR library.';
+              button.setAttribute('aria-label', (result.name || name) + ' is already on Nano Cortex');
+            } else if (result && result.ok && result.refreshed) {
+              button.textContent = 'On Nano';
+              button.classList.add('nano-cloud-ir-on-nano');
+              button.title = (result.name || name) + ' is now in the Nano Cortex IR library.';
+              button.setAttribute('aria-label', (result.name || name) + ' is on Nano Cortex');
+            } else if (result && result.ok) {
+              button.disabled = false;
+              button.textContent = 'Sent';
+              button.title = name + ' was sent; refresh the pedal library if it is not visible yet.';
+              setTimeout(() => { if (button.isConnected) { button.textContent = 'Send to Nano'; } }, 3000);
+            } else if (result && result.cancelled) {
+              button.disabled = false;
+              button.textContent = 'Cancelled';
+              setTimeout(() => { if (button.isConnected) button.textContent = 'Send to Nano'; }, 1800);
+            } else {
+              throw new Error(result && result.error || 'The IR was not sent.');
+            }
+          } catch (error) {
+            button.disabled = false;
+            button.textContent = 'Retry';
+            button.title = error && error.message || 'The IR was not sent.';
+          }
+        });
+        row.appendChild(button);
+      }
+    }
+  }
+  let scheduled = false;
+  const scheduleScan = () => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => { scheduled = false; scan(); });
+  };
+  const observer = new MutationObserver(scheduleScan);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  window.__nanoCloudIRActions = { observer, scan };
+  scan();
+})();`;
+
+function isCloudIRPage(url) {
+  try { return CLOUD_IR_PAGE.test(new URL(url || '').pathname); } catch { return false; }
+}
+
+function injectCloudIRActions() {
+  if (!cloud || cloud.webContents.isDestroyed() || !isCloudIRPage(cloud.webContents.getURL())) return;
+  cloud.webContents.executeJavaScript(CLOUD_IR_ACTION_SCRIPT, true).catch(() => {});
+}
+
 // Name and About panel. From source the process is still Electron.app, so the
 // Dock keeps Electron's name and icon tooltip; the packaged app (npm run dist)
 // carries the real name, bundle id, icon and usage strings from package.json.
@@ -63,6 +188,7 @@ if (process.platform === 'linux') app.commandLine.appendSwitch('enable-experimen
 let win, toolbar, editor, cloud;
 let autoConnecting = false;
 let active = 'editor';
+const cloudIRTransfers = new Map();
 
 // ---------- shell settings (userData/settings.json) ----------
 // What the main process needs before the editor page has loaded: the accent (for the Dock icon), the
@@ -199,6 +325,7 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
+    show: false,
     title: 'Nano Cortex Editor',
     backgroundColor: '#121212',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
@@ -211,6 +338,14 @@ function createWindow() {
     webPreferences: { preload: path.join(__dirname, 'toolbar-preload.js'), contextIsolation: true, sandbox: true }
   });
   toolbar.webContents.loadFile(path.join(__dirname, 'toolbar.html')).then(sendAccentToToolbar);
+  let initialViewsReady = 0;
+  const showWhenInitialViewsReady = () => {
+    if (++initialViewsReady < 2) return;
+    layout();
+    show('editor');
+    win.show();
+  };
+  toolbar.webContents.once('did-finish-load', showWhenInitialViewsReady);
 
   // Editor (local file, needs BLE + MIDI)
   editor = new WebContentsView({
@@ -218,6 +353,7 @@ function createWindow() {
   });
   grantDevicePermissions(editor.webContents.session);
   wireBluetooth(editor.webContents);
+  editor.webContents.once('did-finish-load', showWhenInitialViewsReady);
   loadEditor('pro');
   editor.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   // The editor's Activity log goes to the log file for everyone (Help → Show Log File). Running from source it is
@@ -243,7 +379,7 @@ function createWindow() {
 
   // Cortex Cloud (their real website, persistent login, no device permissions)
   cloud = new WebContentsView({
-    webPreferences: { contextIsolation: true, sandbox: true, partition: CLOUD_PARTITION }
+    webPreferences: { preload: path.join(__dirname, 'cloud-preload.js'), contextIsolation: true, sandbox: true, partition: CLOUD_PARTITION }
   });
   const cloudSes = session.fromPartition(CLOUD_PARTITION);
   cloudSes.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
@@ -260,12 +396,17 @@ function createWindow() {
     const file = dialog.showSaveDialogSync(win, { defaultPath: path.join(app.getPath('downloads'), item.getFilename()) });
     if (file) item.setSavePath(file); else item.cancel();
   });
-  const pushNav = () => toolbar.webContents.send('cloud-nav', {
-    canGoBack: cloud.webContents.navigationHistory.canGoBack(),
-    canGoForward: cloud.webContents.navigationHistory.canGoForward(),
-    captureId: captureIdOf(cloud.webContents.getURL()),
-    pageKind: captureIdOf(cloud.webContents.getURL()) ? 'capture' : /\/preset\/view\//.test(cloud.webContents.getURL()) ? 'preset' : 'other'
-  });
+  const pushNav = () => {
+    const url = cloud.webContents.getURL();
+    toolbar.webContents.send('cloud-nav', {
+      canGoBack: cloud.webContents.navigationHistory.canGoBack(),
+      canGoForward: cloud.webContents.navigationHistory.canGoForward(),
+      captureId: captureIdOf(url),
+      pageKind: captureIdOf(url) ? 'capture' : isCloudIRPage(url) ? 'impulse-responses' : /\/preset\/view\//.test(url) ? 'preset' : 'other'
+    });
+    injectCloudIRActions();
+  };
+  cloud.webContents.on('did-finish-load', pushNav);
   cloud.webContents.on('did-navigate', pushNav);
   cloud.webContents.on('did-navigate-in-page', pushNav);
 
@@ -274,7 +415,8 @@ function createWindow() {
   win.contentView.addChildView(toolbar);
   win.on('resize', layout);
   layout();
-  show('editor');
+  editor.setVisible(true);
+  cloud.setVisible(false);
 }
 
 function startDevRemote() {
@@ -331,11 +473,13 @@ ipcMain.on('cloud-cmd', (_e, cmd) => {
   if (cmd === 'forward' && wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward();
   if (cmd === 'reload') wc.reload();
   if (cmd === 'home') wc.loadURL(CLOUD_URL);
+  if (cmd === 'irs') wc.loadURL(CLOUD_URL + 'profile/impulses');
 });
 ipcMain.on('editor-reload', () => editor.webContents.reload());
 
 // ---------- editor settings IPC (src/editor-preload.js → window.nanoShell) ----------
 const fromEditor = (e) => editor && e.sender === editor.webContents;
+const fromCloud = (e) => cloud && e.sender === cloud.webContents;
 ipcMain.handle('settings-get', (e) => (fromEditor(e) ? {
   platform: process.platform, accent: shellSettings.accent, dockFollowsAccent: shellSettings.dockFollowsAccent,
   pedal: shellSettings.pedal, recordingsDir: recordingsDir(), version: app.getVersion(), devTools: shellSettings.devTools,
@@ -460,6 +604,82 @@ async function sendCaptureToNano(id) {
   }
 }
 ipcMain.handle('send-capture', () => sendCaptureToNano());
+
+function cloudIRFilename(name) {
+  const base = String(name || 'cloud-impulse-response')
+    .trim().replace(/[\\\/:*?"<>|]+/g, '_').replace(/[. ]+$/g, '').replace(/\.wav$/i, '').trim();
+  return (base || 'cloud-impulse-response') + '.wav';
+}
+
+async function fetchCloudIRBundle(productId, listedName) {
+  if (!CLOUD_PRODUCT_ID.test(String(productId || ''))) throw new Error('This Cloud IR has an invalid product ID.');
+  const res = await cloud.webContents.session.fetch(
+    'https://cloud-api.neuraldsp.com/api/v1/products/' + productId + '/download',
+    { credentials: 'include' }
+  );
+  if (!res.ok) throw new Error('Cortex Cloud answered ' + res.status + (res.status === 401 ? ' (sign in to Cortex Cloud first)' : ''));
+  let json;
+  try { json = await res.json(); } catch { throw new Error('Cortex Cloud returned an unreadable IR download.'); }
+  if (!json || typeof json.payload !== 'string' || !json.payload) throw new Error('The Cloud response has no IR payload.');
+  if (json.id && String(json.id).toLowerCase() !== String(productId).toLowerCase()) throw new Error('Cortex Cloud returned a different product than the selected IR.');
+  const wav = Buffer.from(json.payload, 'base64');
+  if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
+    throw new Error('The Cloud IR payload is not a WAV file.');
+  }
+  const name = String(json.name || listedName || 'Cloud impulse response').trim();
+  return {
+    wav: wav.toString('base64'),
+    meta: { productId: String(productId), name, filename: cloudIRFilename(name) },
+  };
+}
+
+function finishCloudIRTransfer(transferId, result) {
+  const key = String(transferId || '');
+  const pending = cloudIRTransfers.get(key);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  cloudIRTransfers.delete(key);
+  pending.resolve({
+    ok: !!(result && result.ok),
+    cancelled: !!(result && result.cancelled),
+    alreadyOnNano: !!(result && result.alreadyOnNano),
+    refreshed: !!(result && result.refreshed),
+    index: Number(result && result.index) || 0,
+    name: String(result && result.name || '').slice(0, 256),
+    error: String(result && result.error || '').slice(0, 500),
+  });
+  return true;
+}
+
+ipcMain.on('cloud-ir-transfer-complete', (event, transferId, result) => {
+  if (fromEditor(event)) finishCloudIRTransfer(transferId, result);
+});
+
+ipcMain.handle('send-cloud-ir', async (event, productId, listedName) => {
+  if (!fromCloud(event) || !isCloudIRPage(cloud.webContents.getURL())) return { ok: false, error: 'Open your Cortex Cloud Impulse Responses page first.' };
+  if (editorFlavor !== 'pro') return { ok: false, error: 'Switch to the Pro Editor to send an IR to the pedal.' };
+  if (!CLOUD_PRODUCT_ID.test(String(productId || ''))) return { ok: false, error: 'This Cloud IR has an invalid product ID.' };
+  if (!editor || editor.webContents.isDestroyed()) return { ok: false, error: 'The editor is not ready.' };
+
+  let transferId = '';
+  try {
+    const bundle = await fetchCloudIRBundle(productId, listedName);
+    transferId = randomUUID();
+    const response = new Promise(resolve => {
+      const timer = setTimeout(() => finishCloudIRTransfer(transferId, {
+        ok: false, error: 'The editor did not finish the IR transfer. Check its status and try again if needed.'
+      }), 3 * 60 * 1000);
+      cloudIRTransfers.set(transferId, { resolve, timer });
+    });
+    editor.webContents.send('cloud-ir-bundle', { ...bundle, transferId });
+    show('editor');
+    return await response;
+  } catch (err) {
+    const error = String(err && err.message || err);
+    if (transferId) finishCloudIRTransfer(transferId, { ok: false, error });
+    return { ok: false, error };
+  }
+});
 
 // Live audition uses the same Cloud bundle, but the editor sends it through
 // the separate type-150 preview path instead of the normal type-13 library

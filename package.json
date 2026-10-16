@@ -3,7 +3,7 @@
   "productName": "Nano Cortex Editor",
   "version": "1.0.0",
   "private": true,
-  "description": "Unofficial desktop editor for the Neural DSP Nano Cortex (macOS, Windows and Linux): presets, every block, captures, footswitches, expression, tempo, tuner, metronome and Cortex Cloud capture transfer over Bluetooth.",
+  "description": "Unofficial desktop editor for the Neural DSP Nano Cortex (macOS, Windows and Linux): presets, every block, captures, footswitches, expression, tempo, tuner, metronome and Cortex Cloud capture/IR transfer over Bluetooth.",
   "main": "src/main.js",
   "license": "MIT",
   "author": "AJs Creations",

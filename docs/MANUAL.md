@@ -241,8 +241,11 @@ When a preset plays a capture straight from the library rather than from a slot,
 "From the library: *name*".
 
 **Cab / IR.** **Level**, **High pass** and **Low pass**, then the **Microphone** (mic and position, for factory cabs),
-then the **Cabs and IRs on the pedal**: five slots, with **Load from library…** as for captures. The microphone and
-position are stored in the cab slot, so changing them affects every preset that uses that slot.
+then the **Cabs and IRs on the pedal**: five slots. The **From the library** section lists the pedal's factory cabs
+and user IRs. Click an item to choose a slot; click its play button to audition it without changing a slot. Right-click
+a library item for **Preview** and **Load into slot…**; user IRs also have **Delete…**. Deleting a user IR from the
+pedal cannot be undone. The microphone and position are stored in the cab slot, so changing them affects every preset
+that uses that slot.
 
 ![The Cab / IR inspector: tone knobs, mic choices and positions 1–6, and the five cab slots](images/inspector-cab.png)
 
@@ -366,7 +369,10 @@ confirm:
 preset changes. The editor then offers to load it into a slot right away (**Choose a slot**) or **Later** (it is in
 **Load from library…** whenever you want it). The pedal must be connected; the phone app must not be.
 
-Only captures can be sent for now; preset pages and IRs from Cortex Cloud still go through the official app.
+**Sending an IR to the pedal.** Open your profile's **Impulse Responses** list. The app adds **Send to Nano** beside
+each IR. Click it, confirm in the Editor, and the app sends the WAV to the pedal's IR library over Bluetooth. It does
+not change a preset slot. After the pedal accepts the IR, the Editor refreshes **IRs on pedal** automatically. The
+pedal must be connected; preset downloads from Cortex Cloud still go through the official app.
 
 ## 12. Settings
 
@@ -529,9 +535,9 @@ first, and report anything odd.
 work but are untested.
 
 **Does the app see my Cortex Cloud password?** No. You sign in on the website's own page; the app only uses the
-resulting session to download a capture when you click **Send to Nano Cortex**.
+resulting session to fetch a capture or IR after you click a **Send to Nano** button.
 
-**Can I send IRs or presets from Cortex Cloud?** Not yet; only captures. Use the official app for those.
+**Can I send presets from Cortex Cloud?** Not yet. Use the official app for presets.
 
 **Is there a Mac-native version?** Yes:
 [Nano Cortex Editor for Mac](https://github.com/AJs-Creations/nano-cortex-editor-mac), with the same features.

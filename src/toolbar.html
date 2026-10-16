@@ -46,6 +46,7 @@
     <button id="c-fwd" disabled title="Forward">&#8594;</button>
     <button id="c-reload" title="Reload">&#8635;</button>
     <button id="c-home" title="Cortex Cloud home">Home</button>
+    <button id="c-irs" title="Open your Cortex Cloud impulse responses">IRs</button>
     <button id="c-send" disabled title="Send this capture to the pedal over Bluetooth (open a capture page first)">Send to Nano Cortex</button>
     <button id="c-preview" disabled title="Audition this capture on the Nano without loading it into a slot">Live Preview</button>
     <button id="c-ir" disabled title="Toggle Cab / IR processing on the Nano">IR: --</button>
@@ -73,6 +74,7 @@
   $('c-fwd').onclick    = () => window.shell.cloud('forward');
   $('c-reload').onclick = () => window.shell.cloud('reload');
   $('c-home').onclick   = () => window.shell.cloud('home');
+  $('c-irs').onclick    = () => window.shell.cloud('irs');
   $('c-signout').onclick = () => window.shell.signOut();
 
   let captureId = null;
