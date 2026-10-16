@@ -22,6 +22,8 @@
 
   const MSG_UPLOAD_CAPTURE = 13;
   const MSG_UPLOAD_CAPTURE_REPLY = 14;
+  const MSG_DOWNLOAD_IR = 15;
+  const MSG_DOWNLOAD_IR_REPLY = 16;
   // Capture auditioning is separate from the normal library upload. These
   // message numbers and shapes were decoded from the official iOS app trace.
   const MSG_PREVIEW_STOP = 148;
@@ -53,6 +55,12 @@
 
   function uploadMessage(cns, meta) {
     return [...int(1, 6), ...bytes(3, bytes(1, Array.from(cns))), ...bytes(4, captureRecord(meta))];
+  }
+
+  function irDownloadMessage(wav, meta) {
+    // type 15 from the iOS Cloud app: {1:6, 3:{1:WAV,2:MD5}, 4:product UUID, 5:filename}
+    const content = [...bytes(1, Array.from(wav)), ...str(2, md5Hex(wav))];
+    return [...int(1, 6), ...bytes(3, content), ...str(4, meta.productId), ...str(5, meta.filename)];
   }
 
   // The preview trace includes an MD5 of the .cns bytes. Web Crypto does not
@@ -159,7 +167,24 @@
 
   // Catch the pedal's reply before the core's dispatch sees it.
   let waiting = null;
+  let irDownloadWaiting = null;
   let previewWaiting = null;
+
+  function waitForIRDownloadReply(timeoutMs = 20000) {
+    let waiter;
+    const promise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (irDownloadWaiting === waiter) irDownloadWaiting = null;
+        reject(new Error('The pedal did not answer the IR download within ' + (timeoutMs / 1000) + ' s'));
+      }, timeoutMs);
+      waiter = {
+        resolve(data) { clearTimeout(timer); if (irDownloadWaiting === waiter) irDownloadWaiting = null; resolve(parseIRDownloadReply(data)); },
+        reject(error) { clearTimeout(timer); if (irDownloadWaiting === waiter) irDownloadWaiting = null; reject(error instanceof Error ? error : new Error(String(error))); },
+      };
+      irDownloadWaiting = waiter;
+    });
+    return { promise, cancel: error => waiter && waiter.reject(error) };
+  }
 
   function waitForPreviewReply(type, parser, timeoutMs = 20000) {
     let waiter;
@@ -185,6 +210,12 @@
       log('RX capture upload reply: ' + hex(data));
       const w = waiting; waiting = null;
       w(parseUploadReply(data));
+      return;
+    }
+    if (irDownloadWaiting && frameType(data) === MSG_DOWNLOAD_IR_REPLY) {
+      const waiter = irDownloadWaiting;
+      waiter.resolve(data);
+      log('RX IR download reply ' + MSG_DOWNLOAD_IR_REPLY + ': ' + hex(data));
       return;
     }
     if (previewWaiting) {
@@ -216,6 +247,43 @@
     const r = await reply;
     log('Capture upload ' + (r.ok ? 'accepted' : 'REFUSED') + ': "' + r.name + '" user index ' + r.index + (r.message ? ' (' + r.message + ')' : ''));
     return r;
+  }
+
+  function parseIRDownloadReply(data) {
+    const f = parseProtoFields(data.slice(2, data.length - 4));
+    const first = (fields, n) => fields[n] && fields[n][0];
+    const text = (fields, n) => { const x = first(fields, n); return x && x.wire === 2 ? new TextDecoder().decode(Uint8Array.from(x.raw)) : ''; };
+    const status = first(f, 3) ? first(f, 3).value : 0;
+    const rec = first(f, 4) && first(f, 4).wire === 2 ? parseProtoFields(first(f, 4).raw) : {};
+    return {
+      ok: status === 1,
+      status,
+      index: first(rec, 1) ? first(rec, 1).value : 0,
+      name: text(rec, 2),
+      message: text(f, 5) || text(rec, 4) || '',
+    };
+  }
+
+  async function downloadImpulseResponse({ wav, meta }, onProgress) {
+    if (!state.connected) throw new Error('Not connected');
+    if (waiting || irDownloadWaiting || previewWaiting) throw new Error('Another pedal transfer is still in progress.');
+    if (!wav || !meta || !meta.productId || !meta.filename || !/\.wav$/i.test(meta.filename)) throw new Error('The Cloud IR download is incomplete.');
+    const parts = chunks(irDownloadMessage(wav, meta), MSG_DOWNLOAD_IR);
+    const reply = waitForIRDownloadReply();
+    try {
+      for (let i = 0; i < parts.length; i++) {
+        const ok = await writeC304('Cloud IR download "' + meta.name + '" ' + (i + 1) + '/' + parts.length, parts[i]);
+        if (!ok) throw new Error('Bluetooth write failed at IR download part ' + (i + 1) + ' of ' + parts.length);
+        if (onProgress) onProgress(i + 1, parts.length);
+      }
+    } catch (err) {
+      reply.cancel(err);
+      await reply.promise.catch(() => {});
+      throw err;
+    }
+    const result = await reply.promise;
+    log('Cloud IR download ' + (result.ok ? 'accepted' : 'REFUSED') + ': "' + (result.name || meta.name) + '" user IR index ' + result.index + (result.message ? ' (' + result.message + ')' : ''));
+    return result;
   }
 
   function parsePreviewReply(data) {
@@ -273,9 +341,9 @@
   }
 
   window.NanoTransfer = {
-    MSG_UPLOAD_CAPTURE, MSG_UPLOAD_CAPTURE_REPLY, MSG_PREVIEW_STOP, MSG_PREVIEW_STOP_REPLY,
+    MSG_UPLOAD_CAPTURE, MSG_UPLOAD_CAPTURE_REPLY, MSG_DOWNLOAD_IR, MSG_DOWNLOAD_IR_REPLY, MSG_PREVIEW_STOP, MSG_PREVIEW_STOP_REPLY,
     MSG_PREVIEW_CAPTURE, MSG_PREVIEW_CAPTURE_REPLY, WRITE_SIZE, uploadMessage, previewMessage,
-    captureRecord, chunks, makeReassembler, md5Hex, parseUploadReply, parsePreviewReply,
-    uploadCapture, previewCapture, stopPreview,
+    captureRecord, chunks, makeReassembler, md5Hex, irDownloadMessage, parseUploadReply, parseIRDownloadReply, parsePreviewReply,
+    uploadCapture, downloadImpulseResponse, previewCapture, stopPreview,
   };
 })();

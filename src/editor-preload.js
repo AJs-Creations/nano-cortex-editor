@@ -5,6 +5,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('nanoCloud', {
   onCapture: (fn) => ipcRenderer.on('capture-bundle', (_e, bundle) => fn(bundle)),
   onPreview: (fn) => ipcRenderer.on('preview-bundle', (_e, bundle) => fn(bundle)),
+  onImpulseResponse: (fn) => ipcRenderer.on('cloud-ir-bundle', (_e, bundle) => fn(bundle)),
+  completeImpulseResponse: (transferId, result) => ipcRenderer.send('cloud-ir-transfer-complete', String(transferId || ''), result || {}),
 });
 
 contextBridge.exposeInMainWorld('nanoShell', {

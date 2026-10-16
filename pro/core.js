@@ -1733,6 +1733,8 @@ const MSG = {
       RetrievePresetCabinetSettingsLiteResponse: 96,
       RetrieveLibraryContentRequest: 76,
       RetrieveLibraryContentResponse: 77,
+      DeleteLibraryIRRequest: 82,
+      DeleteLibraryIRResponse: 83,
       SetCaptureSlotContentRequest: 80,
       SetCaptureSlotContentResponse: 81,
       SetCabinetSlotContentRequest: 78,

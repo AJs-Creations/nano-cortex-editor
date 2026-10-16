@@ -108,9 +108,9 @@ separates these pedal settings from preset settings.
 |---|---|---|---|---|---|
 | Library → slot (captures and IRs) | Swap / IR LIBRARY [M] | done | decoded (76–81) | no | — |
 | Download a capture from Cortex Cloud | Download button [M][GA] | done (Send to Nano) | decoded (13/14) | no | — |
-| Download a user IR from Cortex Cloud | Upload on the website, then Profile → Impulse Responses → download [M] | missing | unknown (probably type 13 with another kind) | **yes** | Download one throw-away IR |
+| Download a user IR from Cortex Cloud | Profile → Impulse Responses → Download [M] | implemented: per-row Send to Nano action; refreshes “IRs on pedal” after type 16 | Cloud list/download API verified; BLE decoded (15/16, 76/77) | **yes** | Needs an end-to-end check with a connected pedal |
 | Audition a capture / IR before downloading | Play button; slots pulse; EXIT or Stop ends it; pedal caches several [M][N220] | missing | unknown | **yes** | Play one capture 5 s, Stop; play one IR 5 s, Stop |
-| Delete a capture / IR from the pedal | Capture details → ⋯ → DELETE [M][GA]; IR deletion implied by [N210] fixes | missing (BACKLOG) | unknown (type 50 with another kind is a guess) | **yes** | Delete the throw-away IR, then one capture Anup no longer wants |
+| Delete a capture / IR from the pedal | Capture details → ⋯ → DELETE [M][GA] | implemented for user IRs: right-click a library item → Delete; capture deletion remains open | IR: decoded (82/83, then 76/77); capture: unknown | **yes** | Verify IR deletion on hardware; capture deletion still needs a trace |
 | Edit capture details (name, type, description, instrument) | EDIT, own captures only [M] | missing | unknown | optional | Only if Anup has a capture of his own |
 | Upload capture to Cloud, visibility, send to a friend | Capture details [M] | n/a (Cloud-side, our Cloud tab has the website) | — | no | — |
 | Create a Neural Capture (≈ 5 min, needs a target device) | Guided flow: calibration, capture gain ≤ +24 dB, metadata, A/B compare, save to slot / library [M] | missing | unknown | **no** (needs a target rig; separate session) | — |
@@ -202,8 +202,8 @@ off the repository.
 5. **Tempo storage.** [M] and [N210] confirm global vs per-preset tempo; where the per-preset tempo lives is
    unknown (state dump field 56 = f32 120.0 is a guess, PROTOCOL-NOTES §7). Step 9 checks whether it is saved with
    the preset.
-6. **Library delete message.** Our BACKLOG guesses type 50 with another kind; unverified (steps 23–24).
-7. **IR download path.** Presumably type 13 like captures with an IR record; unverified (step 22).
+6. **Capture library deletion.** IR deletion is type 82/83 (confirmed in `nano-cortex-bt6.pcap`, Investigation §6a); capture deletion remains unknown (step 24).
+7. **IR download path.** Resolved: raw WAV uses type 15/16 and library refresh uses 76/77 (Investigation §6a).
 8. **Audition.** [M] says the pedal "can cache multiple Captures or IRs at once" and slots pulse; unknown whether
    this is a full type-13 upload into a cache or something else (step 21).
 9. **Footswitch fields.** Type 29 fields 5–8 are the assignment fields per DrD85, and the state dump reports them

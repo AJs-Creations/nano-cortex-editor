@@ -138,6 +138,7 @@
     knobDragging: false,  // defer full renders while a pointer drag owns a knob
     renderAfterKnob: false,
     sideSig: '',
+    presetReorderBusy: false,
     lastAction: '',
     logs: [],
     logSeq: 0,   // lines ever logged; each entry carries its number, so readers can index past the trim below
@@ -149,6 +150,8 @@
     previewName: '',
   };
   window.__ui = ui; // handy for poking at from DevTools
+  let presetMoveProtocolPending = false;
+  let suppressPresetClickUntil = 0;
 
   // ------------------------------------------------------------------ settings storage + accent colour
   // Small per-machine preferences in localStorage under "settings.*". The metronome keeps its own "metronome" key.
@@ -1572,6 +1575,7 @@
   window.__tempo = { state: tempo, frame: tempoFrame, live: tempoLive, commit: tempoCommit, tap: tempoTap, setFollow: setFollowPreset };
 
   // ------------------------------------------------------------------ pedal library
+  let irLibraryQuery = '';
   async function ensureLibrary() {
     if (state.library.loaded) return true;
     requestLibraryContent();
@@ -1579,6 +1583,99 @@
     while (!state.library.loaded && Date.now() - t0 < 6000) await new Promise(r => setTimeout(r, 100));
     return state.library.loaded;
   }
+
+  function applyIRLibrarySearch(root) {
+    const query = irLibraryQuery.trim().toLowerCase();
+    let visible = 0;
+    root.querySelectorAll('.cab-library-group').forEach(group => {
+      let groupVisible = 0;
+      group.querySelectorAll('.library-row').forEach(row => {
+        const match = !query || row.dataset.search.includes(query);
+        row.hidden = !match;
+        if (match) groupVisible++;
+      });
+      group.hidden = groupVisible === 0;
+      visible += groupVisible;
+    });
+    const empty = root.querySelector('.library-empty');
+    if (empty) {
+      const loaded = state.library.loaded;
+      empty.hidden = loaded && visible > 0;
+      if (!loaded) empty.textContent = state.connected ? 'Reading the pedal library…' : 'Connect your Nano Cortex to read its library.';
+      else if (query) empty.textContent = 'Nothing matches “' + irLibraryQuery.trim() + '”.';
+      else empty.textContent = 'No cabs or IRs are available in the pedal library.';
+    }
+  }
+
+  function irLibrarySection() {
+    const root = el('div', { class: 'cab-library-content' });
+    const search = el('input', {
+      class: 'search cab-library-search', type: 'search', placeholder: 'Search cabs and IRs',
+      'aria-label': 'Search cabs and IRs', autocomplete: 'off', spellcheck: 'false', value: irLibraryQuery,
+      oninput: (e) => { irLibraryQuery = e.currentTarget.value; applyIRLibrarySearch(root); },
+    });
+    const groups = [
+      ['irFactory', 'Factory cabs', state.library.irFactory || []],
+      ['irUser', 'Your IRs', state.library.irUser || []],
+    ];
+    const list = el('div', { class: 'cab-library-groups' });
+    for (const [kind, label, items] of groups) {
+      if (!items.length) continue;
+      const grid = el('div', { class: 'library-grid' });
+      for (const item of items) {
+        const details = [label, item.type, item.instrument, item.author, item.description, ...(item.tags || [])].filter(Boolean).join(' · ');
+        const isActive = () => Boolean(irAudition.active && irAudition.active.kind === kind && irAudition.active.index === item.index);
+        const isPending = () => Boolean(irAudition.pending && irAudition.pending.kind === kind && irAudition.pending.index === item.index);
+        const row = el('div', {
+          class: 'library-row' + (isActive() ? ' previewing' : ''),
+          dataset: { search: [item.name, details].join(' ').toLowerCase() },
+          title: details || item.name,
+          oncontextmenu: (e) => contextMenu(e, [
+            {
+              label: isActive() ? 'Stop preview' : 'Preview',
+              disabled: !state.connected || !state.library.loaded || ui.demo || ui.uploading || ui.previewBusy || irAudition.busy,
+              action: () => isActive() ? stopIRPreview() : startIRPreview({ kind, index: item.index, name: item.name }),
+            },
+            {
+              label: 'Load into slot…',
+              disabled: !state.connected || !state.library.loaded || ui.uploading,
+              action: () => loadFromLibrary('cab', { kind, index: item.index, name: item.name }),
+            },
+            ...(kind === 'irUser' ? ['-', {
+              label: 'Delete…', danger: true,
+              disabled: !state.connected || !state.library.loaded || ui.uploading || ui.previewBusy || irAudition.busy,
+              action: () => deleteLibraryIR({ ...item, kind }),
+            }] : []),
+          ]),
+        });
+        const pick = el('button', {
+          class: 'library-item', type: 'button', disabled: !state.connected || !state.library.loaded,
+          'aria-label': 'Choose a slot for ' + item.name,
+          onclick: () => loadFromLibrary('cab', { kind, index: item.index, name: item.name }),
+        }, el('span', { text: item.name }));
+        const previewIcon = sv('svg', { class: 'library-preview-icon', viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' });
+        previewIcon.append(isActive()
+          ? sv('path', { d: 'M4 3h8v10H4z', fill: 'currentColor' })
+          : sv('path', { d: 'M5 3v10l8-5z', fill: 'currentColor' }));
+        const preview = el('button', {
+          class: 'library-preview' + (isActive() ? ' playing' : ''), type: 'button',
+          disabled: !state.connected || !state.library.loaded || ui.demo || irAudition.busy,
+          'aria-pressed': String(isActive()),
+          'aria-label': isActive() ? 'Stop preview of ' + item.name : 'Preview ' + item.name,
+          title: ui.demo ? 'Connect to a pedal to audition IRs' : isPending() ? 'Starting preview' : isActive() && irAudition.stopping ? 'Stopping preview' : (isActive() ? 'Stop preview' : 'Audition without loading into a slot'),
+          onclick: () => isActive() ? stopIRPreview() : startIRPreview({ kind, index: item.index, name: item.name }),
+        }, isPending() ? el('span', { class: 'library-preview-pending', 'aria-hidden': 'true', text: '…' }) : previewIcon);
+        row.append(pick, preview);
+        grid.append(row);
+      }
+      list.append(el('div', { class: 'cab-library-group' }, el('h4', { text: label }), grid));
+    }
+    const empty = el('p', { class: 'library-empty' });
+    root.append(search, list, empty);
+    applyIRLibrarySearch(root);
+    return root;
+  }
+
   // `slot`: load the pick straight into that slot (from a slot button's menu) instead of asking.
   async function openLibraryPicker(kind, anchor, slot) {
     ui.slotPreselect = slot || 0;
@@ -1612,6 +1709,64 @@
     if (ui.demo) (kind === 'capture' ? demo.pickCapture : demo.pickIR)(slot);
     toast((kind === 'capture' ? 'Capture ' : 'Cab ') + item.name + ' loaded into slot ' + slot);
     render();
+  }
+
+  async function deleteLibraryIR(item) {
+    if (!state.connected || !item || item.kind !== 'irUser' || !Number.isInteger(item.index)) return;
+    if (ui.uploading || ui.previewBusy || irAudition.busy) {
+      toast('Finish the current pedal action before deleting an IR.');
+      return;
+    }
+    if (!state.library.loaded && !await ensureLibrary()) {
+      toast('Could not read the pedal IR library. Refresh it and try again.');
+      return;
+    }
+    const current = state.library.irUser.find(candidate => candidate.index === item.index);
+    if (!current || !sameName(current.name, item.name)) {
+      toast('The pedal IR library changed. Refresh it before deleting this IR.');
+      state.library.loaded = false;
+      await ensureLibrary();
+      render();
+      return;
+    }
+    const choice = await modal({
+      title: 'Delete IR “' + current.name + '” from the pedal?',
+      body: 'This permanently removes the IR from the Nano Cortex library. There is no undo.',
+      buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', primary: true }],
+    });
+    if (choice !== 'ok') { render(); return; }
+    if (ui.previewing && !(await stopCapturePreview())) return;
+    if (irAudition.active && !(await stopIRPreview())) return;
+
+    const nameBytes = Array.from(new TextEncoder().encode(current.name));
+    const record = [0x08, ...encodeVarint(current.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
+    const frame = buildFrame([0x08, 0x02, 0x22, ...encodeVarint(record.length), ...record], MSG.DeleteLibraryIRRequest);
+    ui.uploading = true;
+    ui.lastAction = 'Deleting IR ' + current.name;
+    renderStatus();
+    let reply;
+    try {
+      reply = await writeAndAwait('Delete IR ' + current.name, frame, MSG.DeleteLibraryIRResponse);
+    } finally {
+      ui.uploading = false;
+      ui.lastAction = '';
+      render();
+    }
+    if (!reply || fieldValue(reply, 3) !== 1) {
+      toast('The pedal did not confirm deleting ' + current.name + '.');
+      return;
+    }
+
+    state.library.loaded = false;
+    state.library.requested = false;
+    const refreshed = await ensureLibrary();
+    if (!refreshed) {
+      state.library.irUser = state.library.irUser.filter(candidate => candidate.index !== current.index);
+    }
+    render();
+    toast(refreshed
+      ? current.name + ' deleted from the pedal IR library.'
+      : current.name + ' deleted, but the pedal IR list could not be refreshed.');
   }
 
   // ------------------------------------------------------------------ slot usage scan
@@ -1830,6 +1985,112 @@
   window.__uploadCapture = receiveCapture;
   if (window.nanoCloud && window.nanoCloud.onCapture) window.nanoCloud.onCapture(receiveCapture);
 
+  async function receiveCloudIR(bundle) {
+    const transferId = String(bundle && bundle.transferId || '');
+    const meta = bundle && bundle.meta || {};
+    const name = String(meta.name || 'Cloud impulse response');
+    let outcome = { ok: false, name };
+    try {
+      if (!state.connected || ui.demo) {
+        const error = 'Connect your Nano Cortex first, then send ' + name + ' again.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      if (ui.uploading) {
+        const error = 'A library transfer is already in progress.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      if (ui.previewBusy || ui.previewing || irAudition.busy || irAudition.active) {
+        const error = 'Stop the active preview before sending a Cloud IR.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      if (!await ensureLibrary()) {
+        const error = 'Could not read the Nano Cortex IR library. Refresh it and try again.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      const existingIR = [...(state.library.irUser || []), ...(state.library.irFactory || [])]
+        .find(item => sameName(item.name, name));
+      if (existingIR) {
+        toast(existingIR.name + ' is already in IRs on pedal.');
+        outcome = { ok: true, alreadyOnNano: true, name: existingIR.name, index: existingIR.index, refreshed: true };
+        return outcome;
+      }
+      if (typeof bundle.wav !== 'string' || !bundle.wav) throw new Error('The Cloud IR download has no WAV data.');
+      const wav = Uint8Array.from(atob(bundle.wav), c => c.charCodeAt(0));
+      if (wav.length < 44 || String.fromCharCode(...wav.slice(0, 4)) !== 'RIFF' || String.fromCharCode(...wav.slice(8, 12)) !== 'WAVE') {
+        throw new Error('The Cloud IR download is not a WAV file.');
+      }
+      if (!meta.productId || !meta.filename || !/\.wav$/i.test(meta.filename)) throw new Error('The Cloud IR download is missing its product ID or WAV filename.');
+
+      const choice = await modal({
+        title: 'Send ' + name + ' to the pedal?',
+        body: (wav.length / 1024).toFixed(1) + ' KB over Bluetooth. This adds it to “IRs on pedal”; it does not change any preset slot.',
+        buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'send', label: 'Send IR', primary: true }],
+      });
+      if (choice !== 'send') {
+        render();
+        outcome.cancelled = true;
+        return outcome;
+      }
+
+      ui.uploading = true;
+      ui.lastAction = 'Sending IR ' + name;
+      renderStatus();
+      let reply;
+      try {
+        reply = await NanoTransfer.downloadImpulseResponse({ wav, meta }, (i, n) => {
+          ui.lastAction = 'Sending IR ' + name + ': ' + i + ' / ' + n;
+          renderStatus();
+        });
+      } finally {
+        ui.uploading = false;
+        ui.lastAction = '';
+        render();
+      }
+      if (!reply.ok) {
+        const error = 'The pedal refused ' + name + (reply.message ? ': ' + reply.message : '.');
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+
+      // type 16 gives the assigned user-IR index. Re-read type 77 so the
+      // editor's “IRs on pedal” section immediately contains the new item.
+      state.library.loaded = false;
+      const refreshed = await ensureLibrary();
+      render();
+      const libraryItem = refreshed
+        ? state.library.irUser.find(item => item.index === reply.index) || state.library.irUser.find(item => sameName(item.name, reply.name || name))
+        : null;
+      const pedalName = libraryItem && libraryItem.name || reply.name || name;
+      if (libraryItem) {
+        toast(pedalName + ' is now in IRs on pedal.');
+      } else {
+        toast(pedalName + ' was sent to the pedal, but its IR list did not refresh. Use Refresh to reload it.');
+      }
+      outcome = { ok: true, name: pedalName, index: reply.index, refreshed: !!libraryItem };
+      return outcome;
+    } catch (err) {
+      const error = 'Cloud IR transfer failed: ' + String(err && err.message || err);
+      toast(error);
+      outcome.error = error;
+      return outcome;
+    } finally {
+      if (transferId && window.nanoCloud && window.nanoCloud.completeImpulseResponse) {
+        window.nanoCloud.completeImpulseResponse(transferId, outcome);
+      }
+    }
+  }
+  window.__receiveCloudIR = receiveCloudIR;
+  if (window.nanoCloud && window.nanoCloud.onImpulseResponse) window.nanoCloud.onImpulseResponse(receiveCloudIR);
+
   function notifyPreviewState(active, name = '', error = '', phase = null) {
     if (shellBridge && shellBridge.previewState) shellBridge.previewState({
       active: !!active,
@@ -1855,9 +2116,10 @@
       : Uint8Array.from(bundle.cns || []);
   }
 
-  // The iOS app keeps an accepted live preview alive with type 91 requests
-  // about every 20 seconds. The Nano answers with type 92. This is separate
-  // from the full type 150 preview transfer and must stop with the preview.
+  const irAudition = { active: null, pending: null, busy: false, stopping: false };
+
+  // The pedal keeps accepted capture and IR previews alive with type 91 requests
+  // about every 20 seconds. The Nano answers with type 92.
   const PREVIEW_KEEP_ALIVE_MS = 20000;
   const PREVIEW_KEEP_ALIVE_TYPE = 91;
   let previewKeepAliveTimer = null;
@@ -1873,24 +2135,124 @@
   }
 
   async function sendPreviewKeepAlive() {
-    if (!ui.previewing || !state.connected || previewKeepAliveInFlight) return;
+    if ((!ui.previewing && !irAudition.active) || !state.connected || previewKeepAliveInFlight) return;
     previewKeepAliveInFlight = true;
     try {
       const ok = await writeC304(
         'Preview keep-alive',
         buildFrame([0x08, 0x03], PREVIEW_KEEP_ALIVE_TYPE)
       );
-      if (!ok && ui.previewing) log('ERROR: Preview keep-alive write failed.');
+      if (!ok && (ui.previewing || irAudition.active)) log('ERROR: Preview keep-alive write failed.');
     } finally {
       previewKeepAliveInFlight = false;
     }
   }
 
   function startPreviewKeepAlive() {
-    stopPreviewKeepAlive();
+    if (previewKeepAliveTimer !== null) return;
     log('Live preview keep-alive started (every ' + (PREVIEW_KEEP_ALIVE_MS / 1000) + ' s).');
     previewKeepAliveTimer = setInterval(() => { void sendPreviewKeepAlive(); }, PREVIEW_KEEP_ALIVE_MS);
   }
+
+  function irPreviewRequest(item) {
+    const nameBytes = Array.from(new TextEncoder().encode(item.name));
+    const record = [0x08, ...encodeVarint(item.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
+    return buildFrame([0x22, ...encodeVarint(record.length), ...record, 0x40, 0x01], 158);
+  }
+
+  async function startIRPreview(item) {
+    if (!state.connected || ui.demo || !state.library.loaded) return false;
+    if (irAudition.busy || ui.previewBusy || ui.uploading) return false;
+    if (!item || !Number.isInteger(item.index) || !item.name) return false;
+    if (ui.previewing && !(await stopCapturePreview())) return false;
+
+    irAudition.busy = true;
+    irAudition.pending = item;
+    irAudition.stopping = false;
+    render();
+    try {
+      const reply = await writeAndAwait('Preview IR "' + item.name + '"', irPreviewRequest(item), 159);
+      const status = fieldValue(reply, 3);
+      if (!reply || status !== 1) {
+        log('IR preview rejected: type 159 index=' + item.index + ' status=' + status);
+        toast('The pedal did not accept the IR preview.');
+        return false;
+      }
+      irAudition.active = { kind: item.kind, index: item.index, name: item.name };
+      startPreviewKeepAlive();
+      log('IR preview accepted: type 159 index=' + item.index + ' status=' + status);
+      return true;
+    } catch (err) {
+      log('ERROR: IR preview: ' + err.message);
+      toast('IR preview failed: ' + err.message);
+      return false;
+    } finally {
+      irAudition.busy = false;
+      irAudition.pending = null;
+      render();
+    }
+  }
+
+  async function refreshAfterIRPreviewStop() {
+    if (!state.connected) return;
+    const previousSync = Number(state.protocol.lastStateSync) || 0;
+    try {
+      const sent = await requestCurrentPresetState();
+      if (!sent) {
+        if (state.stateMode === 'current') state.stateMode = 'idle';
+        log('IR preview stopped; current preset state refresh could not be sent.');
+        return;
+      }
+      const refreshed = await waitUntil(() => !state.connected || (state.stateMode === 'idle' && Number(state.protocol.lastStateSync) > previousSync), 6000);
+      if (!state.connected && state.stateMode === 'current') state.stateMode = 'idle';
+      if (!refreshed) log('IR preview stopped; current preset state refresh timed out.');
+    } catch (err) {
+      log('ERROR: current state refresh after IR preview: ' + err.message);
+    }
+  }
+
+  async function stopIRPreview() {
+    if (!irAudition.active || irAudition.busy) return !irAudition.active;
+    if (!state.connected) return false;
+    const transaction = Date.now();
+    irAudition.busy = true;
+    irAudition.stopping = true;
+    render();
+    try {
+      const transactionBytes = [];
+      let remaining = transaction;
+      while (remaining > 0x7f) {
+        transactionBytes.push((remaining % 128) | 0x80);
+        remaining = Math.floor(remaining / 128);
+      }
+      transactionBytes.push(remaining);
+      const frame = buildFrame([0x10, ...transactionBytes, 0x20, 0x00], 148);
+      const reply = await writeAndAwait('Stop IR preview', frame, 149);
+      const status = fieldValue(reply, 3);
+      const acknowledgedTransaction = fieldValue(reply, 2);
+      if (!reply || status !== 1 || acknowledgedTransaction !== transaction) {
+        log('IR preview stop unconfirmed: type 149 transaction=' + acknowledgedTransaction + ' status=' + status + ' expected=' + transaction);
+        toast('The pedal did not confirm stopping the IR preview.');
+        return false;
+      }
+      log('IR preview stop confirmed: type 149 transaction=' + transaction + ' status=' + status);
+      irAudition.active = null;
+      if (!ui.previewing) stopPreviewKeepAlive();
+      await refreshAfterIRPreviewStop();
+      return true;
+    } catch (err) {
+      log('ERROR: stopping IR preview: ' + err.message);
+      toast('Stopping the IR preview failed: ' + err.message);
+      return false;
+    } finally {
+      irAudition.busy = false;
+      irAudition.stopping = false;
+      render();
+    }
+  }
+
+  window.__previewIR = startIRPreview;
+  window.__stopIRPreview = stopIRPreview;
 
   // The official Cloud app's Play button sends the capture to a temporary
   // audition cache. It is intentionally not the library upload path above:
@@ -1903,6 +2265,7 @@
       toast(error); notifyPreviewState(false, '', error); return false;
     }
     if (ui.uploading) { const error = 'A capture is already being sent to the library.'; toast(error); notifyPreviewState(false, '', error); return false; }
+    if (irAudition.busy || (irAudition.active && !(await stopIRPreview()))) return false;
     if (ui.previewBusy) return false;
     if (ui.previewing && !(await stopCapturePreview())) return false;
 
@@ -2011,6 +2374,10 @@
     try {
       const v = event && event.target && event.target.value;
       const d = v && v.buffer ? new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength || v.buffer.byteLength) : null;
+      if (d && presetMoveProtocolPending && frameType(d) === MSG.PresetDirtyStateChanged) {
+        log('Ignoring transient preset-dirty notification during preset reorder.');
+        return;
+      }
       if (d && d.length >= 6 && (d[1] & 0xC0) === 0xC0 && replyWaiters.size) {
         const type = d[d.length - 4] | (d[d.length - 3] << 8) | (d[d.length - 2] << 16) | (d[d.length - 1] << 24);
         const waiter = replyWaiters.get(type);
@@ -2099,12 +2466,18 @@
         d.monitorPending = {}; d.monitorAcks.length = 0;
         clearTimeout(d.monitorReadTimer); d.monitorReadTimer = null;
       }
-      const previewWasActive = ui.previewing || ui.previewBusy;
+      const capturePreviewWasActive = ui.previewing || ui.previewBusy;
+      const irPreviewWasActive = Boolean(irAudition.active) || irAudition.busy;
       stopPreviewKeepAlive();
       ui.previewing = false;
       ui.previewBusy = false;
       ui.previewName = '';
-      if (previewWasActive) notifyPreviewState(false, '', 'The Nano Cortex disconnected; live preview stopped.');
+      irAudition.active = null;
+      irAudition.pending = null;
+      irAudition.busy = false;
+      irAudition.stopping = false;
+      if (capturePreviewWasActive) notifyPreviewState(false, '', 'The Nano Cortex disconnected; live preview stopped.');
+      if (irPreviewWasActive) log('IR preview ended because the Nano Cortex disconnected.');
       ui.dirty = false; ui.lastAction = ''; state.presetTempo = null;
     }
     if (!connected) { state.exp.loaded = false; state.exp.preset = null; }
@@ -2521,15 +2894,151 @@
     $('tunerBtn').classList.toggle('on', state.tuner.open);
   }
 
+  function presetIndexAfterMove(index, source, destination) {
+    if (index === source) return destination;
+    if (source < destination && index > source && index <= destination) return index - 1;
+    if (source > destination && index >= destination && index < source) return index + 1;
+    return index;
+  }
+
+  async function askBeforePresetReorder() {
+    if (!pedalDirtyForUI()) return true;
+    const current = state.selectedPreset;
+    const choice = await modal({
+      title: 'Save changes to ' + presetName(current) + '?',
+      body: 'Reordering presets can discard edits that haven’t been saved to the pedal.',
+      buttons: [
+        { id: 'cancel', label: 'Cancel' },
+        { id: 'discard', label: 'Don’t save' },
+        { id: 'save', label: 'Save and reorder', primary: true },
+      ],
+    });
+    if (choice === 'save') {
+      await doSave();
+      if (pedalDirtyForUI()) {
+        toast('Save the current preset before reordering.');
+        return false;
+      }
+      return true;
+    }
+    if (choice !== 'discard') return false;
+
+    const previousSync = Number(state.protocol.lastStateSync) || 0;
+    state.exp.loaded = false;
+    await selectPreset(current);
+    const discarded = await waitUntil(() => state.stateMode === 'idle' && !state.protocol.presetLoad && Number(state.protocol.lastStateSync) > previousSync, 7000);
+    if (!discarded) {
+      toast('The pedal did not confirm reloading the saved preset.');
+      return false;
+    }
+    return true;
+  }
+
+  async function refreshPresetNamesAfterMove() {
+    if (!state.connected) return false;
+    state.protocol.metadataLoaded = false;
+    state.protocol.feSyncComplete = false;
+    state.feBytes = [];
+    state.feLastPacketAt = Date.now();
+    state.stateMode = 'metadata';
+    const sent = await writeC304('Refresh preset list after reorder', buildFrame([
+      0x08, 0x03, 0x18, 0x00, 0x20, 0x01, 0x28, 0x01,
+    ], 1));
+    if (!sent) {
+      if (state.stateMode === 'metadata') state.stateMode = 'idle';
+      return false;
+    }
+    const refreshed = await waitUntil(() => !state.connected || (state.protocol.metadataLoaded && state.stateMode === 'idle'), 20000);
+    if ((!refreshed || !state.connected) && state.stateMode === 'metadata') state.stateMode = 'idle';
+    return state.connected && refreshed && state.protocol.metadataLoaded;
+  }
+
+  async function refreshCurrentPresetAfterMove() {
+    if (!state.connected) return false;
+    const previousSync = Number(state.protocol.lastStateSync) || 0;
+    const sent = await requestCurrentPresetState();
+    if (!sent) {
+      if (state.stateMode === 'current') state.stateMode = 'idle';
+      return false;
+    }
+    const refreshed = await waitUntil(() => !state.connected || (state.stateMode === 'idle' && Number(state.protocol.lastStateSync) > previousSync), 10000);
+    if (!state.connected && state.stateMode === 'current') state.stateMode = 'idle';
+    return state.connected && refreshed;
+  }
+
+  async function movePresetOrder(source, destination) {
+    if (source === destination || ui.presetReorderBusy) return false;
+    if (!state.connected || ui.demo) return false;
+    if (state.stateMode !== 'idle' || state.protocol.presetLoad || state.presetLoadTimer || state.pendingParamBlock || state.paramRefreshQueue.length || state.fileBusy || state.saveBusy ||
+        gattWriteQueue.length || gattWritePumpRunning || ui.uploading || ui.previewBusy || ui.previewing || irAudition.active || irAudition.busy) {
+      toast('Wait for the current pedal operation to finish before reordering.');
+      return false;
+    }
+
+    ui.presetReorderBusy = true;
+    ui.sideSig = '';
+    render();
+    try {
+      if (!(await askBeforePresetReorder())) return false;
+      if (!state.connected) return false;
+
+      const selectedBefore = state.selectedPreset;
+      const selectedName = presetName(selectedBefore);
+      presetMoveProtocolPending = true;
+      const reply = await writeAndAwait('Move preset ' + (source + 1) + ' to position ' + (destination + 1), buildFrame([
+        0x08, 0x04,
+        0x18, ...encodeVarint(source),
+        0x20, ...encodeVarint(destination),
+      ], 143), 144);
+      const ackSource = fieldValue(reply, 3);
+      const ackDestination = fieldValue(reply, 4);
+      const ackOk = Boolean(reply) && fieldValue(reply, 5) === 1 && ackSource === source && ackDestination === destination;
+      log('Preset reorder ' + (ackOk ? 'acknowledged' : 'unconfirmed') + ': type 144 source=' + ackSource + ' destination=' + ackDestination + ' status=' + fieldValue(reply, 5));
+
+      const listRefreshed = await refreshPresetNamesAfterMove();
+      if (listRefreshed) {
+        const nameMatches = Array.from(state.presetNames.entries()).filter(([, name]) => sameName(name, selectedName));
+        const selectedAfter = nameMatches.length === 1
+          ? nameMatches[0][0]
+          : ackOk ? presetIndexAfterMove(selectedBefore - 1, source, destination) + 1 : selectedBefore;
+        state.selectedPreset = selectedAfter;
+      } else {
+        log('Could not confirm the refreshed preset list after reorder.');
+      }
+
+      const stateRefreshed = state.connected && await refreshCurrentPresetAfterMove();
+      if (!listRefreshed || !stateRefreshed) {
+        toast('The pedal’s preset order could not be fully confirmed. Refresh the preset list to check it.');
+        return false;
+      }
+      if (!ackOk) {
+        toast('The pedal did not confirm the preset move; its current order has been refreshed.');
+        return false;
+      }
+      toast('Moved preset ' + (source + 1) + ' to position ' + (destination + 1) + '.');
+      return true;
+    } catch (err) {
+      log('ERROR: preset reorder: ' + err.message);
+      toast('Preset reorder failed: ' + err.message);
+      return false;
+    } finally {
+      presetMoveProtocolPending = false;
+      ui.presetReorderBusy = false;
+      ui.sideSig = '';
+      render();
+    }
+  }
+
   function renderSide() {
     const q = ui.filter.trim().toLowerCase();
     const names = [];
     for (let i = 1; i <= 64; i++) names.push(presetName(i));
-    const sig = [state.connected, state.selectedPreset, q, names.join('|')].join('#');
+    const sig = [state.connected, state.selectedPreset, q, ui.presetReorderBusy, names.join('|')].join('#');
     if (sig === ui.sideSig) return;
     ui.sideSig = sig;
 
     const list = $('presetList');
+    list.setAttribute('aria-busy', String(ui.presetReorderBusy));
     $('presetFilter').disabled = !state.connected;
     if (!state.connected) {
       list.replaceChildren(el('div', { class: 'side-empty', text: 'Your presets appear here once the pedal is connected.' }));
@@ -2541,6 +3050,30 @@
       if (q && !name.toLowerCase().includes(q) && String(i) !== q) continue;
       const empty = /^empty$/i.test(name);
       rows.push(el('div', {
+        draggable: state.connected && !ui.demo && !ui.presetReorderBusy ? 'true' : null,
+        ondragstart: (e) => {
+          if (ui.presetReorderBusy || ui.demo || !state.connected) { e.preventDefault(); return; }
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(i));
+          e.currentTarget.classList.add('dragging');
+        },
+        ondragover: (e) => {
+          if (!ui.presetReorderBusy && Array.from(e.dataTransfer.types).includes('text/plain')) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            e.currentTarget.classList.add('drop-target');
+          }
+        },
+        ondragleave: (e) => e.currentTarget.classList.remove('drop-target'),
+        ondrop: (e) => {
+          e.preventDefault();
+          const sourceRow = Number(e.dataTransfer.getData('text/plain'));
+          e.currentTarget.classList.remove('drop-target');
+          if (!Number.isInteger(sourceRow) || sourceRow < 1 || sourceRow > 64 || sourceRow === i) return;
+          suppressPresetClickUntil = Date.now() + 350;
+          void movePresetOrder(sourceRow - 1, i - 1);
+        },
+        ondragend: () => document.querySelectorAll('.preset-row.dragging, .preset-row.drop-target').forEach(r => r.classList.remove('dragging', 'drop-target')),
         oncontextmenu: (e) => contextMenu(e, [
           { label: i === state.selectedPreset ? 'Current preset' : 'Load', disabled: !state.connected || i === state.selectedPreset, action: () => goToPreset(i) },
           ...(i === state.selectedPreset ? [{ label: 'Discard edits', disabled: !state.connected || !isDirtyNow(), action: () => doDiscard() }] : []),
@@ -2552,11 +3085,11 @@
           '-',
           { label: 'Delete\u2026', danger: true, disabled: !state.connected || empty, action: () => doDelete(i) },
         ]),
-        class: 'preset-row' + (state.connected && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : ''),
+        class: 'preset-row' + (state.connected && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : '') + (ui.presetReorderBusy ? ' reorder-pending' : ''),
         role: 'option',
         'aria-selected': String(state.connected && i === state.selectedPreset),
         dataset: { n: i },
-        onclick: () => goToPreset(i),
+        onclick: () => { if (Date.now() > suppressPresetClickUntil) goToPreset(i); },
       }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name })));
     }
     if (!rows.length) rows.push(el('div', { class: 'side-empty', text: 'No presets match “' + ui.filter + '”.' }));
@@ -3024,7 +3557,7 @@
     for (let i = 1; i <= irSlotCount(); i++) {
       const name = state.irNames.get(i) || ('IR ' + i);
       slots.append(el('button', {
-        class: 'slot' + (i === cur ? ' on' : ''), role: 'option', 'aria-selected': String(i === cur),
+        class: 'slot' + (i === cur ? ' on' : '') + (irAudition.active && i === cur ? ' preview-muted' : ''), role: 'option', 'aria-selected': String(i === cur),
         dataset: { fk: 'irslot-' + i }, disabled: !state.connected,
         oncontextmenu: (e) => { const anchor = e.currentTarget; contextMenu(e, [
           { label: i === cur ? 'Loaded in this preset' : 'Load into this preset', disabled: !state.connected || i === cur, action: () => anchor.click() },
@@ -3040,12 +3573,13 @@
       }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name }), usageBadge('cab', i)));
     }
     const cabFromLib = on && state.cabIR.fromLibrary;
-    out.push(el('div', { class: 'section' }, el('div', { class: 'section-head' }, el('h3', { text: 'Cabs and IRs on the pedal' }),
-        el('button', { class: 'btn ghost small', dataset: { fk: 'lib-cab' }, disabled: !state.connected,
-          title: 'Pick a cab or IR from the library stored on the pedal and load it into a slot',
-          onclick: (e) => openLibraryPicker('cab', e.currentTarget) }, 'Load from library…')),
+    out.push(el('div', { class: 'section' }, el('div', { class: 'section-head' }, el('h3', { text: 'Cabs and IRs on the pedal' })),
       cabFromLib ? el('p', { class: 'note', dataset: { fk: 'cab-from-lib' }, text: 'From the library: ' + (state.currentIR.shortName || 'a cab') + '. This preset plays it straight from the pedal\u2019s library, not from a slot.' }) : null,
       !on ? el('p', { class: 'note', text: 'Turn the cab back on to pick a slot.' }) : null, slots));
+    out.push(el('div', { class: 'section cab-library-section' },
+      el('div', { class: 'section-divider' }, el('h3', { text: 'From the library' })),
+      el('p', { class: 'library-hint', text: 'Click a cab or IR to choose a slot. Preview auditions it without changing any slot.' }),
+      irLibrarySection()));
     return out;
   }
 
@@ -3452,13 +3986,30 @@
       class: 'ctx-item' + (it.danger ? ' danger' : ''), role: 'menuitem', disabled: it.disabled ? 'true' : null,
       onclick: () => { closeContextMenu(); it.action(); },
     }, it.label)));
+    menu.style.visibility = 'hidden';
     const bg = el('div', { class: 'ctx-bg', oncontextmenu: (ev) => { ev.preventDefault(); if (ui.stageContextNativePending) { ui.stageContextNativePending = false; return; } closeContextMenu(); }, onmousedown: (ev) => { if (ev.target === bg) closeContextMenu(); } }, menu);
     document.body.append(bg); ctx = bg;
-    const r = menu.getBoundingClientRect();
-    menu.style.left = Math.min(e.clientX, window.innerWidth - r.width - 8) + 'px';
-    menu.style.top = Math.min(e.clientY, window.innerHeight - r.height - 8) + 'px';
-    document.addEventListener('keydown', ctxKey, true);
-    const first = menu.querySelector('button:not(:disabled)'); if (first) first.focus();
+    requestAnimationFrame(() => {
+      if (ctx !== bg) return;
+      const bounds = bg.getBoundingClientRect();
+      const margin = 8;
+      const maxWidth = Math.max(0, bounds.width - margin * 2);
+      const maxHeight = Math.max(0, bounds.height - margin * 2);
+      menu.style.setProperty('--ctx-max-width', maxWidth + 'px');
+      menu.style.setProperty('--ctx-max-height', maxHeight + 'px');
+      const r = menu.getBoundingClientRect();
+      const pointerX = e.clientX - bounds.left;
+      const pointerY = e.clientY - bounds.top;
+      const maxLeft = Math.max(margin, bounds.width - r.width - margin);
+      const maxTop = Math.max(margin, bounds.height - r.height - margin);
+      const left = pointerX + r.width > bounds.width - margin ? pointerX - r.width : pointerX;
+      const top = pointerY + r.height > bounds.height - margin ? pointerY - r.height : pointerY;
+      menu.style.left = Math.min(Math.max(left, margin), maxLeft) + 'px';
+      menu.style.top = Math.min(Math.max(top, margin), maxTop) + 'px';
+      menu.style.visibility = '';
+      document.addEventListener('keydown', ctxKey, true);
+      const first = menu.querySelector('button:not(:disabled)'); if (first) first.focus();
+    });
   }
   window.__contextMenu = contextMenu;
   window.__closePopover = closePopover;
@@ -3819,7 +4370,10 @@
   function onAlive(d) {
     const f = bodyOf(d);
     dev.alive = { firmware: pf.str(f, 5), serial: pf.str(f, 6), name: pf.str(f, 7) };
-    if (ui.previewing) log('Live preview keep-alive acknowledged.');
+    if (ui.previewing || irAudition.active) {
+      const accepted = Boolean(f[3] && f[3][0] && f[3][0].value === 1);
+      log('Live preview keep-alive ' + (accepted ? 'acknowledged.' : 'was not accepted.'));
+    }
     if (dev.redraw) dev.redraw();
   }
   function onSettingsAck(d) {
@@ -4458,6 +5012,17 @@
         // Demo writes model the pedal: edit writes become dirty only through
         // the simulated pedal's authoritative type-115 report.
         notify(buildFrame([0x08, 0x01, 0x18, 0x01], MSG.PresetDirtyStateChanged));
+      }
+      else if (type === MSG.DeleteLibraryIRRequest) {
+        const f = framePayloadFields(bytes);
+        const record = f[4] && f[4][0] ? parseProtoFields(f[4][0].raw) : {};
+        const index = record[1] && record[1][0] ? record[1][0].value : -1;
+        const removed = LIB.irUser.some(item => item.index === index);
+        if (removed) {
+          LIB.irUser = LIB.irUser.filter(item => item.index !== index);
+          LIB.irUser.forEach((item, nextIndex) => { item.index = nextIndex; });
+        }
+        notify(buildFrame([0x08, 0x06, 0x18, removed ? 0x01 : 0x00], MSG.DeleteLibraryIRResponse));
       }
       else if (type === MSG.SetCaptureSlotContentRequest) reply(buildFrame([0x18, 0x01], MSG.SetCaptureSlotContentResponse));
       else if (type === MSG.SetCabinetSlotContentRequest) reply(buildFrame([0x18, 0x01], MSG.SetCabinetSlotContentResponse));

@@ -147,6 +147,16 @@ patches.set(dollar, `// patched by build-core.js: upstream UI code may touch ids
       return id => document.getElementById(id) || stubs.get(id) || (stubs.set(id, Object.assign(document.createElement('div'), { hidden: true })), stubs.get(id));
     })();`);
 
+// The upstream core does not define the IR-library deletion messages. Keep
+// these in the generated MSG object because pro/ui.js builds and waits for
+// this request after every `npm start` regenerates core.js.
+const msg = byName.get('MSG');
+const msgSource = src.slice(msg.node.start, msg.node.end);
+const libraryResponse = 'RetrieveLibraryContentResponse: 77,';
+if (!msgSource.includes(libraryResponse)) throw new Error('Upstream MSG object moved; cannot add IR-library deletion messages');
+patches.set(msg, msgSource.replace(libraryResponse,
+  libraryResponse + '\n      DeleteLibraryIRRequest: 82,\n      DeleteLibraryIRResponse: 83,'));
+
 // Hooks become empty declarations: the override point exists, the upstream UI body is gone.
 for (const h of HOOKS) {
   const t = byName.get(h);
@@ -167,6 +177,9 @@ const out = header + pieces.join('\n\n') + '\n';
 // Guarantees the desktop shell relies on.
 if (/midiOutput|\.send\(\[0xC0/.test(out)) throw new Error('core.js sends MIDI; the pro UI expects preset switching over BLE only');
 for (const h of HOOKS) if (!new RegExp('^\\s*function ' + h + '\\s*\\(', 'm').test(out)) throw new Error('core.js lost hook ' + h);
+if (!/DeleteLibraryIRRequest:\s*82/.test(out) || !/DeleteLibraryIRResponse:\s*83/.test(out)) {
+  throw new Error('core.js lost the IR-library deletion message types');
+}
 
 // ---------------------------------------------------------------- 5. sandbox load
 const element = () => ({
