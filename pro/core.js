@@ -2545,7 +2545,10 @@ function tunerModeFrame(on) {
       return buildFrame([0x20, 0x01, 0x2D, ...float32LE(state.tuner.baseFrequency), 0x30, state.tuner.live ? 1 : 0, 0x38, state.tuner.muted ? 1 : 0], MSG.TunerMode);
     }
 
+let tunerInputMuteSnapshot = null;
+
 function openTuner(fromDevice = false) {
+      tunerInputMuteSnapshot = typeof window.__captureTunerInputMute === 'function' ? window.__captureTunerInputMute() : null;
       state.tuner.open = true;
       state.tuner.live = !fromDevice;
       state.tuner.logged = 0;
@@ -2560,7 +2563,18 @@ function closeTuner(send = true) {
       if (!state.tuner.open) return;
       state.tuner.open = false;
       $('tunerOverlay').hidden = true;
-      if (send && state.connected) writeC304('Tuner off', tunerModeFrame(false));
+      const muteSnapshot = tunerInputMuteSnapshot;
+      tunerInputMuteSnapshot = null;
+      const restoreInputMute = () => {
+        if (muteSnapshot === null || typeof window.__restoreTunerInputMute !== 'function') return;
+        // The pedal applies tuner shutdown after accepting the BLE write. Reassert
+        // the saved monitoring state after that transition has had time to settle.
+        setTimeout(() => {
+          if (state.connected && !state.tuner.open) window.__restoreTunerInputMute(muteSnapshot);
+        }, 200);
+      };
+      if (send && state.connected) writeC304('Tuner off', tunerModeFrame(false)).then((sent) => { if (sent && !state.tuner.open) restoreInputMute(); });
+      else if (state.connected && !state.tuner.open) restoreInputMute();
     }
 
 function handleTunerMetering(data) {

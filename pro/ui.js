@@ -2623,6 +2623,13 @@
       tapC304();
       ui.cabIRLoadPaused = false;
       ui.cabIRLoadTimedOut = null;
+      const d = window.__dev;
+      if (d && !d.settingsRequestedForConnection) {
+        // Read the global mute state as soon as the pedal is available so the
+        // header control is usable without first opening Settings → Device.
+        d.settingsRequestedForConnection = true;
+        requestDeviceSettings();
+      }
     }
     if (!connected && /disconnect/i.test(text)) {
       ui.cabIRLoadPaused = false;
@@ -2635,6 +2642,7 @@
       const d = window.__dev;
       if (d) {
         d.info = null; d.alive = null; d.settings = null; d.reading = false;
+        d.settingsRequestedForConnection = false;
         d.monitorPending = {}; d.monitorAcks.length = 0;
         clearTimeout(d.monitorReadTimer); d.monitorReadTimer = null;
       }
@@ -3172,6 +3180,17 @@
     $('renameBtn').disabled = !state.connected;
     $('tunerBtn').disabled = !state.connected;
     $('tunerBtn').classList.toggle('on', state.tuner.open);
+    renderMuteButton();
+  }
+
+  function renderMuteButton() {
+    const button = $('muteBtn');
+    if (!button) return;
+    const settings = state.connected && window.__dev && window.__dev.settings;
+    const muted = Boolean(settings && settings.muteInput);
+    button.disabled = !settings;
+    button.classList.toggle('mute-active', muted);
+    button.setAttribute('aria-pressed', String(muted));
   }
 
   function presetIndexAfterMove(index, source, destination) {
@@ -4573,8 +4592,26 @@
   });
   const USB_DB = { min: -20, max: 0, step: 0.5 };
   const dev = { info: null, alive: null, settings: null, reading: false, redraw: null, capWait: null,
-    monitorPending: {}, monitorAcks: [], monitorReadTimer: null };
+    monitorPending: {}, monitorAcks: [], monitorReadTimer: null, muteInputRevision: 0,
+    settingsRequestedForConnection: false };
   window.__dev = dev;
+  window.__captureTunerInputMute = () => state.connected && dev.settings
+    ? { muted: Boolean(dev.settings.muteInput), revision: dev.muteInputRevision }
+    : null;
+  window.__restoreTunerInputMute = (snapshot) => {
+    if (!snapshot || !state.connected || !dev.settings || dev.muteInputRevision !== snapshot.revision) return;
+    if (!snapshot.muted) return;
+    // The pedal leaves the setting bit on after tuner shutdown, but its audio
+    // path appears to need a fresh off-to-on edge to restore the input mute.
+    const offWrite = writeMonitorSetting('muteInput', false);
+    const pulseRevision = dev.muteInputRevision;
+    offWrite.then(() => {
+      setTimeout(() => {
+        if (!state.connected || state.tuner.open || dev.muteInputRevision !== pulseRevision) return;
+        writeMonitorSetting('muteInput', true);
+      }, 100);
+    });
+  };
   // Varint that stays exact past 2^31 (the Unix time is close to it).
   const varint = (n) => { const out = []; n = Math.max(0, Math.floor(n)); while (n > 127) { out.push((n % 128) | 128); n = Math.floor(n / 128); } out.push(n); return out; };
   // A typed frame whose body may pass 255 bytes: bit 0 of the flags byte is the length's ninth bit.
@@ -4626,6 +4663,7 @@
   function writeMonitorSetting(key, value) {
     const spec = DEV_MONITOR[key], s = dev.settings;
     if (!state.connected || !s || !spec) return;
+    if (key === 'muteInput') dev.muteInputRevision++;
     const previous = Boolean(s[key]);
     const prior = dev.monitorPending[key];
     const seq = (prior ? prior.seq : 0) + 1;
@@ -4635,7 +4673,8 @@
     const frame = buildFrame([0x08, 0x01, spec.tag, pending.value ? 1 : 0], DEV_MSG.SET);
     const ack = { ...pending, sent: false };
     dev.monitorAcks.push(ack);
-    writeC304('Device monitoring: ' + spec.label + ' ' + (pending.value ? 'ON' : 'OFF'), frame).then((ok) => {
+    const writePromise = writeC304('Device monitoring: ' + spec.label + ' ' + (pending.value ? 'ON' : 'OFF'), frame);
+    writePromise.then((ok) => {
       ack.sent = ok;
       if (!ok) {
         const i = dev.monitorAcks.indexOf(ack);
@@ -4644,8 +4683,11 @@
       if (ok || dev.monitorPending[key] !== pending) return;
       delete dev.monitorPending[key];
       s[key] = previous;
+      if (key === 'muteInput') renderMuteButton();
       if (dev.redraw) dev.redraw();
     });
+    if (key === 'muteInput') renderMuteButton();
+    return writePromise;
   }
 
   function onDeviceInfo(d) {
@@ -4677,6 +4719,7 @@
       }
     }
     dev.settings = next;
+    renderMuteButton();
     log('Device settings: "' + dev.settings.name + '", LED brightness ' + dev.settings.brightness + ', USB playback ' + dev.settings.usbDb.toFixed(1) + ' dB, input mute ' + (dev.settings.muteInput ? 'on' : 'off') + ', output mute ' + (dev.settings.muteOutput ? 'on' : 'off'));
     dev.reading = !dev.info;
     if (dev.redraw) dev.redraw();
@@ -4704,6 +4747,7 @@
       if (pending && pending.seq === ack.seq) {
         delete dev.monitorPending[ack.key];
         if (dev.settings) dev.settings[ack.key] = ack.previous;
+        if (ack.key === 'muteInput') renderMuteButton();
         if (dev.redraw) dev.redraw();
       }
       return;
@@ -5118,6 +5162,10 @@
   $('supportBtn').addEventListener('click', () => openLink(LINKS.support));
   $('renameBtn').addEventListener('click', doRename);
   $('tunerBtn').addEventListener('click', toggleTuner);
+  $('muteBtn').addEventListener('click', () => {
+    if (!state.connected || !dev.settings) return;
+    writeMonitorSetting('muteInput', !dev.settings.muteInput);
+  });
   $('chain').addEventListener('pointerdown', onStagePointerDown);
   $('chain').addEventListener('click', onStageClick, true);
   $('chain').addEventListener('contextmenu', onStageContextMenu, true);
