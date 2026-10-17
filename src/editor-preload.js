@@ -4,6 +4,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('nanoCloud', {
   onCapture: (fn) => ipcRenderer.on('capture-bundle', (_e, bundle) => fn(bundle)),
+  onPreview: (fn) => ipcRenderer.on('preview-bundle', (_e, bundle) => fn(bundle)),
+  onImpulseResponse: (fn) => ipcRenderer.on('cloud-ir-bundle', (_e, bundle) => fn(bundle)),
+  completeImpulseResponse: (transferId, result) => ipcRenderer.send('cloud-ir-transfer-complete', String(transferId || ''), result || {}),
 });
 
 contextBridge.exposeInMainWorld('nanoShell', {
@@ -15,6 +18,8 @@ contextBridge.exposeInMainWorld('nanoShell', {
   revealRecordings: () => ipcRenderer.invoke('reveal-recordings'),
   saveRecording: (name, json) => ipcRenderer.invoke('save-recording', String(name), String(json)),
   autoConnect: () => ipcRenderer.invoke('auto-connect'),
+  previewState: (state) => ipcRenderer.send('preview-state', state),
+  cabIRState: (state) => ipcRenderer.send('cab-ir-state', state),
   openExternal: (url) => ipcRenderer.invoke('open-external', String(url)),
   onOpenSettings: (fn) => ipcRenderer.on('open-settings', () => fn()),
 });
