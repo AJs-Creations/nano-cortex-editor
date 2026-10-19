@@ -152,6 +152,7 @@
     cabIRLoadQueue: [],
     cabIRLoadPaused: false,
     cabIRLoadTimedOut: null,
+    captureSlotPreselect: 0,
     pendingIRSlotTarget: null,
   };
   window.__ui = ui; // handy for poking at from DevTools
@@ -1854,7 +1855,13 @@
       queueCabIRLoad(item, preselectedSlot);
       return;
     }
-    const slot = await loadLibraryCapture(item.kind, item.index);
+    if (preselectedSlot) ui.captureSlotPreselect = Number(preselectedSlot) || 0;
+    let slot;
+    try {
+      slot = await loadLibraryCapture(item.kind, item.index);
+    } finally {
+      ui.captureSlotPreselect = 0;
+    }
     if (!slot) { render(); return; }
     if (ui.demo) demo.pickCapture(slot);
     toast('Capture ' + item.name + ' loaded into slot ' + slot);
@@ -2637,6 +2644,7 @@
       ui.cabIRLoadQueue.length = 0;
       ui.cabIRLoadActive = null;
       ui.slotPreselect = 0;
+      ui.captureSlotPreselect = 0;
       state.pendingCabAssignment = null;
       state.presetDirty = false; beginExpressionBoundary();
       const d = window.__dev;
@@ -3046,6 +3054,11 @@
   }
 
   window.chooseSlot = function (kind, itemName) {
+    if (kind === 'capture' && ui.captureSlotPreselect) {
+      const s = ui.captureSlotPreselect;
+      ui.captureSlotPreselect = 0;
+      return Promise.resolve(s);
+    }
     if (ui.slotPreselect) {
       const s = ui.slotPreselect;
       ui.slotPreselect = 0;

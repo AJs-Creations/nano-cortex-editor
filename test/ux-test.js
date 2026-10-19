@@ -1350,9 +1350,8 @@ async function run() {
   await checkSoon('capture node shows it', async () => (await js('document.querySelector("[data-stage=capture] .model").textContent')) === libName);
   await checkSoon('no popover or dialog left open', '!document.querySelector(".pop") && !document.querySelector(".modal")');
   await key('5'); await frame();
-  await click('[data-fk="lib-cab"]'); await waitFor('document.querySelectorAll(".pop .pop-item").length >= 5');
-  check('cab rows in the library picker stay plain one-line names (no kind icons)', await js('document.querySelectorAll(".pop .pop-item").length >= 5 && !document.querySelector(".pop .pop-item.two, .pop .kind") && document.querySelector(".pop .pop-item").textContent === "412 V30"'), await js('document.querySelector(".pop .pop-item")?.outerHTML'));
-  await key('Escape'); await frame();
+  await waitFor('document.querySelectorAll(".cab-library-section .library-item").length >= 5');
+  check('cab library rows show plain names with preview controls', await js('(() => { const rows = [...document.querySelectorAll(".cab-library-section .library-row")]; return rows.length >= 5 && rows[0].querySelector(".library-item")?.textContent === "412 V30" && rows[0].querySelector(".library-preview")?.getAttribute("aria-label") === "Preview 412 V30" && !rows[0].querySelector(".kind"); })()'), await js('document.querySelector(".cab-library-section .library-row")?.outerHTML'));
   await key('4'); await frame();
 
   // ---------------------------------------------------------------- slot usage scan
