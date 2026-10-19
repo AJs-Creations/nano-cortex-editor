@@ -80,7 +80,8 @@ Produces the ground truth every later step is tested against. Back up presets in
   refresh → optional slot load. Verified on the pedal 2026-10-08: "Klon Centaur 1" (10 350 B) went over in 22 writes,
   the pedal answered type 14 with the cloud's hash, and the library listed it as user capture 2
   (recorded session, not published).
-- IRs from Cortex Cloud: same route presumably (`/api/v1/user/products/impulse_response` exists). Not traced yet.
+- IRs from Cortex Cloud: implemented from the 2026-10-15 trace and authenticated page inspection (Investigation section 6a). The Cloud profile's Impulse Responses list receives per-row **Send to Nano** buttons; each downloads raw WAV data, sends type 15, waits for type 16, then refreshes type 76/77 so “IRs on pedal” updates. End-to-end pedal verification is still needed.
+- Delete a user IR from the pedal: implemented from the decoded type 82/83 exchange (Investigation §6a), with type 76/77 refresh and a right-click **Delete…** action in the IR library list. Hardware verification is still needed; capture deletion remains undecoded.
 
 ## 4b. Queue after the first release (in suggested order)
 
@@ -91,7 +92,7 @@ Produces the ground truth every later step is tested against. Back up presets in
    scans all presets; upstream has `scanSlotUsage`, currently dropped by build-core). Needs a progress UI.
 4. **Connect polish** (Opus): keep scanning while the connect card is open instead of giving up after 5 s;
    reconnect automatically after a drop; remember the last pedal.
-5. IRs from Cortex Cloud (Fable, one more trace), cab-from-library tone knobs, preset reorder/copy.
+5. Cab-from-library tone knobs, preset reorder/copy; verify the new Cloud IR send flow on hardware.
 5b. Parity with the official app's upload (Sonnet): send `3.2 = hex MD5 of the .cns bytes` in the type-13 message
    (found while porting to Swift; the pedal accepts uploads without it). Add to `pro/transfer.js` + a test.
 5c. **Library-referenced captures/cabs** (Opus, done in PR #19): the state dump reports capture position 6 / cab slot 6 (one past

@@ -95,7 +95,7 @@ Other notes:
 The website is a React app over `https://cloud-api.neuraldsp.com`. After login the token lives in the cookie
 `WEB_API_ACCESS_TOKEN`, so `fetch(..., { credentials: 'include' })` from the Cloud tab is authenticated. Routes seen
 in the bundle: `/login/v1/validate`, `/api/v1/user/signin|signout|profile|refresh_token`, `/homefeed/v1`,
-`/search/v1/for/{preset|neuralCapture|user}?page=&query=&sort=&sortDir=&size=`, `/api/v1/products/{id}`,
+`/search/v1/for/{preset|neuralCapture|impulseResponse|user}?page=&query=&sort=&sortDir=&size=`, `/api/v1/products/{id}`,
 `/api/v1/user/downloaded_products/{id}` (the site's "Download" button: marks the item for the user's devices),
 `/api/v1/user/downloaded_products_history/…`, `/api/v1/user/products/…` (own uploads).
 
@@ -152,6 +152,45 @@ millisecond timestamp, answered "Slot is empty").
 Implementation: `pro/transfer.js` (`NanoTransfer.uploadCapture`), the "Send to Nano" button in the Cloud tab
 (`src/main.js` fetches and unpacks the bundle with the Cloud session and hands it to the editor through
 `src/editor-preload.js`), and `receiveCapture()` in `pro/ui.js`.
+
+## 6a. IR download from Cortex Cloud to the pedal
+
+Source: a user-supplied iOS Bluetooth HCI capture (2026-10-15, Nano firmware 2.2.1). The pcap contains Bluetooth HCI traffic only; Cortex Cloud HTTPS requests and responses are not present. The capture records one successful user-IR download to the pedal.
+
+The phone streams **type 15** to C304 using the same 500-byte chunk framing described above:
+
+```
+{ 1: 6,
+  3: { 1: <WAV bytes>, 2: <32-character lowercase MD5 hex of WAV bytes> },
+  4: <36-character Cortex Cloud product UUID>,
+  5: <filename ending in .wav> }
+```
+
+The observed WAV is 4,154 bytes: mono, 48 kHz, IEEE float32, 1,024 samples. The MD5 in field 3.2 matches the WAV bytes. The pedal replies with **type 16** `{1: 6, 3: 1, 4: {1: userIRIndex, 2: name}}`; field 3 is success, and the observed index is 40. The app then refreshes current state (type 1), requests only user IRs (type 76 with field 6 set), and receives the updated library (type 77); the new name appears at index 40 in that response. No type 13 capture upload or type 78 slot-load request is used. The IR is placed in the pedal library, ready to be assigned to a slot separately.
+
+This confirms the Bluetooth transfer protocol, WAV packaging, MD5, product identifier, acknowledgment, and library refresh.
+
+The authenticated Cloud Impulse Responses page was inspected in Chrome on 2026-10-15. Its account list uses
+`GET /search/v1/for/impulseResponse?...&ownedByMe=true...`; each paginated result includes `productId` and `name`.
+`GET /api/v1/products/{id}/download` returns `{ id, name, payload, payload_hash }`. For an IR, `payload` is
+base64-encoded raw RIFF/WAVE bytes (not a gzip/tar bundle). The verified sample was 4,154 bytes, mono, 48 kHz,
+IEEE float32, matching the IR in the Bluetooth trace. The pedal expects an MD5 of the decoded WAV, so the editor
+computes it locally instead of passing through Cloud's `payload_hash`.
+
+The app now injects a **Send to Nano** action on each IR row on the account page, fetches the WAV through the
+embedded Cloud session, confirms the transfer in the Pro Editor, sends type 15, waits for type 16, and refreshes
+type 76/77 so the new IR appears in “IRs on pedal.” The implementation is present in `src/main.js`,
+`src/cloud-preload.js`, `src/editor-preload.js`, `pro/transfer.js`, and `pro/ui.js`; the end-to-end UI still needs
+verification with a connected pedal.
+
+### Deleting an IR from the pedal
+
+Source: a local BLE capture of the iOS Cortex Cloud app deleting one user IR from a Nano Cortex
+(firmware 2.2.1). The app sends **type 82** with `{1: 2, 4: {1: libraryIndex, 2: name}}`; in the capture the
+record is index 41, `YA ZILA 212 BLND Mix 05`. The pedal confirms with **type 83** `{1: 6, 3: 1}`. The app then
+requests the library with type 76 and receives type 77 without the deleted IR. This gives us the request, success
+acknowledgment, and refresh flow needed for deletion. The editor uses this only for user IRs; factory cabs are
+not deletable.
 
 ## 7. Deleting a preset (decoded from the phone app, 2026-10-08)
 
@@ -311,12 +350,25 @@ length, which the core's `frameType()` rejects, so `pro/ui.js` reads it before t
 | 9 | 12 (?) | 0 / 1 | 4-Preset / 2-Preset mode? The pedal re-sends its preset after a write | **unverified**, not exposed |
 | 7 | ? | 1 / 0 | A boolean touching capture/cab routing (state dump follows) | **unverified** |
 | 8 | ? | 1 / 0 | A boolean | **unverified** |
-| 12 | ? | 1 / 0 | A boolean | **unverified** |
-| 13 | ? | 1 / 0 | A boolean | **unverified** |
+| 12 (varint, explicit 0/1) | 15 | 1 / 0 | Mute Guitar Input | **confirmed** |
+| 13 (varint, explicit 0/1) | 16 | 1 / 0 | Mute Guitar Output (Outputs 1L/2R) | **confirmed** |
 | 15 | ? | 0 / 1 / 2 | A 3-way choice (MIDI clock source?) | **unverified** |
 | 16 | ? | 0…3 | A 4-way choice (IR bypass on outputs?) | **unverified** |
 | 18 | ? | 1 / 0 | A boolean | **unverified** |
 | — | 7, 11, 13, 14 | 1, 0, 129, 1 | Read-only so far (13 read 172 during capture mode) | **unverified** |
+
+The two monitoring mappings are now confirmed by correlating the local trace's standalone 67.12/67.13 boolean writes
+with the type-66 readback layout and the normal type-68 acknowledgement. Type 67 field 12 reads back as type 66
+field 15, and type 67 field 13 reads back as type 66 field 16. Each setting is sent alone with an explicit varint 0
+or 1. The official manual confirms the user-facing behavior: input mute affects the Guitar Input monitor path, while
+output mute affects the processed signal at Outputs 1L/2R; USB audio is a separate path.
+
+Normalized frames used by the editor and demo are:
+
+- Mute Input on/off: `08 C0 08 01 60 01 43 00 00 00` / `08 C0 08 01 60 00 43 00 00 00`.
+- Mute Outputs 1L/2R on/off: `08 C0 08 01 68 01 43 00 00 00` / `08 C0 08 01 68 00 43 00 00 00`.
+- Successful type-68 ACK: `08 C0 08 01 18 01 44 00 00 00`.
+- Type-66 readback uses protobuf tags `0x78` (field 15) and `0x80` (field 16); an omitted boolean is off.
 
 The 66 ↔ 67 numbering is not a fixed offset (4 ↔ 6 but 14 ↔ 17), so the unexposed 66 fields cannot be matched to
 their 67 field yet. Guesses in our code: a brightness of 0 is sent as an explicit `20 00` (the app never sent 0); the

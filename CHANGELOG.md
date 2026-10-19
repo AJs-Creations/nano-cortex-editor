@@ -2,6 +2,18 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
+## 1.0.1 — 2026-10-17
+
+### Added
+
+- Add a header Mute button beside Tuner, synchronized with the pedal's global Guitar Input mute setting.
+- Read device settings on connection so the header Mute button reflects the pedal's current state at startup.
+
+### Fixed
+
+- Preserve input mute when closing the tuner by reapplying it after tuner shutdown settles.
+- Allow release builds without Apple signing credentials; macOS builds use an ad-hoc signature and are not notarized when the secret is unavailable.
+
 ## 1.0.0 — 2026-10-10
 
 First public release.
