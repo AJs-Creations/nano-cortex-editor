@@ -64,9 +64,10 @@ let active = 'editor';
 
 // ---------- shell settings (userData/settings.json) ----------
 // What the main process needs before the editor page has loaded: the accent (for the Dock icon), the
-// remembered pedal and Developer tools (for the menu). Everything else lives in the editor page's localStorage.
+// remembered pedal, Developer tools (for the menu) and the update settings (checked at launch). Everything else
+// lives in the editor page's localStorage.
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
-let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false };
+let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false, autoUpdate: true, skippedVersion: null };
 function loadShellSettings() {
   try { Object.assign(shellSettings, JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))); } catch { /* defaults */ }
 }
@@ -189,6 +190,7 @@ function createWindow() {
   });
   grantDevicePermissions(editor.webContents.session);
   wireBluetooth(editor.webContents);
+  editor.webContents.on('did-finish-load', () => { if (pendingUpdate && editorFlavor === 'pro') editor.webContents.send('update-event', pendingUpdate); });
   loadEditor('pro');
   editor.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   // The editor's Activity log goes to the log file for everyone (Help → Show Log File). Running from source it is
@@ -310,7 +312,7 @@ const fromEditor = (e) => editor && e.sender === editor.webContents;
 ipcMain.handle('settings-get', (e) => (fromEditor(e) ? {
   platform: process.platform, accent: shellSettings.accent, dockFollowsAccent: shellSettings.dockFollowsAccent,
   pedal: shellSettings.pedal, recordingsDir: recordingsDir(), version: app.getVersion(), devTools: shellSettings.devTools,
-  logFile: activityLog().file,
+  logFile: activityLog().file, autoUpdate: shellSettings.autoUpdate !== false, updates: !!updates,
 } : null));
 // Developer tools (Settings → General → Advanced): the page sends it on every change and at launch; the menu follows.
 ipcMain.handle('set-dev-tools', (e, on) => {
@@ -450,6 +452,62 @@ ipcMain.handle('sign-out', async () => {
   return true;
 });
 
+// ---------- updates (src/updates.js: electron-updater reading GitHub Releases) ----------
+// Only in packaged builds: never from source and never in the UX test, which drives the page's modal itself.
+// release.yml uploads the metadata electron-updater reads (latest-mac.yml, latest.yml, latest-linux*.yml) and the
+// blockmaps with every release.
+const { createUpdates, installMode } = require('./updates');
+let updates = null;
+let pendingUpdate = null;   // the offer, download or install the page hasn't answered yet: shown again after a reload
+function sendUpdate(ev) {
+  if (ev.type === 'available' || ev.type === 'progress' || ev.type === 'downloaded') pendingUpdate = ev;
+  else if (ev.type === 'error') pendingUpdate = null;
+  if (editor && !editor.webContents.isDestroyed()) editor.webContents.send('update-event', ev);
+}
+function startUpdates() {
+  if (!app.isPackaged) return;
+  const { autoUpdater } = require('electron-updater');
+  const write = (level) => (m) => activityLog().write('[updater] ' + (level ? level + ': ' : '') + m);
+  autoUpdater.logger = { info: write(''), warn: write('warn'), error: write('error'), debug: () => {} };
+  updates = createUpdates({
+    updater: autoUpdater,
+    store: {
+      get: () => ({ auto: shellSettings.autoUpdate !== false, skipped: shellSettings.skippedVersion || null }),
+      set: (p) => {
+        if ('auto' in p) shellSettings.autoUpdate = !!p.auto;
+        if ('skipped' in p) shellSettings.skippedVersion = p.skipped;
+        saveShellSettings();
+      },
+    },
+    send: sendUpdate,
+    openExternal: (url) => openOutside(url),
+    currentVersion: app.getVersion(),
+    mode: installMode(process.platform, process.env),
+    releaseUrl: (v) => LINKS.releases + '/tag/v' + v,
+    log: (m) => activityLog().write('[updates] ' + m),
+  });
+  updates.start();
+}
+// Help → Check for Updates…
+function checkForUpdates() {
+  show('editor');
+  if (updates) updates.check(true);
+  else sendUpdate({ type: 'error', message: 'Updates are checked only in the installed app.' });
+}
+ipcMain.handle('update-action', (e, what, version) => {
+  if (!fromEditor(e)) return null;
+  what = String(what);
+  if (what !== 'download') pendingUpdate = null;
+  return updates ? updates.action(what, String(version || '')) : null;
+});
+ipcMain.handle('set-auto-update', (e, on) => {
+  if (!fromEditor(e)) return null;
+  if (updates) return updates.setAuto(!!on);
+  shellSettings.autoUpdate = !!on;
+  saveShellSettings();
+  return !!on;
+});
+
 // ---------- Activity log file (Help → Show Log File) ----------
 let actLog = null;
 function activityLog() {
@@ -473,6 +531,7 @@ function buildMenu() {
       openSettings,
       openLink: (url) => shell.openExternal(url),
       showLogFile,
+      checkForUpdates,
     },
   })));
 }
@@ -485,6 +544,7 @@ app.whenReady().then(() => {
   buildMenu();
   createWindow();
   applyAppIcon();
+  startUpdates();
   app.on('activate', () => { if (!win || win.isDestroyed()) createWindow(); });
 });
 app.on('window-all-closed', () => app.quit());

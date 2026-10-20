@@ -7,6 +7,7 @@
   const NANO_LINKS = Object.freeze({
     version: '1.0.0',   // keep in step with package.json (the UX test checks)
     repo: REPO,
+    releases: REPO + '/releases',
     manual: MANUAL,
     troubleshooting: MANUAL + '#15-troubleshooting',
     issues: REPO + '/issues/new/choose',

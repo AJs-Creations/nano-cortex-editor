@@ -3038,6 +3038,116 @@
   }
   window.__devTools = { get on() { return devTools; }, set: setDevTools };
 
+  // ------------------------------------------------------------------ updates (desktop app)
+  // The shell (src/updates.js) checks GitHub Releases and sends events here; this draws the modal and sends the
+  // answers back. Without the shell (the UX test) __updates.event() drives it and the answers collect in
+  // __updates.actions.
+  //   events: checking | none | error {message} | available {version, notes, url, mode: 'install' | 'notify'}
+  //           | progress {percent} | downloaded {version}
+  const upd = { box: null, stage: '', version: '', actions: [] };
+  function updAnswer(what) {
+    upd.actions.push(what);
+    if (shellBridge && shellBridge.updateAction) shellBridge.updateAction(what, upd.version).catch(() => {});
+  }
+  function closeUpdate() {
+    const b = upd.box;
+    if (!b) return;
+    upd.box = null; upd.stage = '';
+    b.bg.remove();
+    document.removeEventListener('keydown', b.onKey, true);
+  }
+  // Esc and a click outside mean "not now": Remind me later, or Later once downloaded. Nothing while downloading.
+  function updDismiss() {
+    if (upd.stage === 'available') { updAnswer('later'); closeUpdate(); }
+    else if (upd.stage === 'downloaded') { updAnswer('later'); closeUpdate(); toast('The update installs when you quit.'); }
+  }
+  function updateModal() {
+    if (upd.box) return upd.box;
+    const title = el('h2', { dataset: { fk: 'upd-title' } });
+    const notes = el('p', { class: 'upd-notes', dataset: { fk: 'upd-notes' } });
+    const more = el('p', { class: 'upd-more' });
+    const bar = el('div', { class: 'upd-bar' }, el('span'));
+    const pct = el('span', { class: 'upd-pct', dataset: { fk: 'upd-pct' } });
+    const progress = el('div', { class: 'upd-progress', dataset: { fk: 'upd-progress' }, hidden: true }, bar, pct);
+    const row = el('div', { class: 'row' });
+    const dialog = el('div', { class: 'modal upd-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'updTitle', dataset: { fk: 'upd-modal' } }, title, notes, more, progress, row);
+    title.id = 'updTitle';
+    const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) updDismiss(); } }, dialog);
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); updDismiss(); return; }
+      if (e.key === 'Tab') {
+        const f = [...bg.querySelectorAll('button:not(:disabled), a[href]')];
+        const i = f.indexOf(document.activeElement);
+        e.preventDefault();
+        if (f.length) f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+      }
+      e.stopPropagation();
+    };
+    document.addEventListener('keydown', onKey, true);
+    document.body.append(bg);
+    upd.box = { bg, title, notes, more, progress, bar, pct, row, onKey };
+    return upd.box;
+  }
+  const updButtons = (b, list) => {
+    b.row.replaceChildren(...list.map(([id, label, primary]) => el('button', { class: 'btn' + (primary ? ' primary' : ''), dataset: { fk: 'upd-' + id }, onclick: () => updClick(id) }, label)));
+    const p = b.row.querySelector('.primary');
+    if (p) p.focus();
+  };
+  function updClick(id) {
+    if (id === 'download') {
+      updAnswer('download');
+      if (upd.mode === 'install') { upd.stage = 'downloading'; updateEvent({ type: 'progress', percent: 0 }); }
+      else closeUpdate();   // the release page opens in the browser
+    } else if (id === 'skip') { updAnswer('skip'); closeUpdate(); }
+    else if (id === 'later') updDismiss();
+    else if (id === 'restart') { updAnswer('restart'); upd.stage = 'restarting'; upd.box.row.replaceChildren(); }
+  }
+  function updateEvent(ev) {
+    if (!ev || !ev.type) return;
+    if (ev.type === 'checking') { toast('Checking for updates\u2026'); return; }
+    if (ev.type === 'none') { toast('You\u2019re up to date.'); return; }
+    if (ev.type === 'error') {
+      const downloading = upd.stage === 'downloading';
+      closeUpdate();
+      toast((downloading ? 'The update couldn\u2019t be downloaded: ' : 'Couldn\u2019t check for updates: ') + ev.message);
+      return;
+    }
+    if (ev.type === 'available') {
+      Object.assign(upd, { stage: 'available', version: String(ev.version), mode: ev.mode === 'install' ? 'install' : 'notify' });
+      const b = updateModal();
+      b.title.textContent = 'Version ' + upd.version + ' is available';
+      b.notes.textContent = ev.notes || '';
+      b.notes.hidden = !ev.notes;
+      b.more.replaceChildren(linkEl(ev.url || LINKS.releases, 'Full release notes', 'upd-notes-link'));
+      b.more.hidden = false;
+      b.progress.hidden = true;
+      updButtons(b, [['skip', 'Skip this version'], ['later', 'Remind me later'],
+        upd.mode === 'install' ? ['download', 'Download and install', true] : ['download', 'Download', true]]);
+      return;
+    }
+    if (ev.type === 'progress') {
+      if (!upd.box) return;
+      upd.stage = 'downloading';
+      const p = Math.max(0, Math.min(100, Math.round(ev.percent || 0)));
+      upd.box.progress.hidden = false;
+      upd.box.bar.firstChild.style.width = p + '%';
+      upd.box.pct.textContent = 'Downloading\u2026 ' + p + '\u202f%';
+      upd.box.row.replaceChildren();
+      return;
+    }
+    if (ev.type === 'downloaded') {
+      Object.assign(upd, { stage: 'downloaded', version: String(ev.version) });
+      const b = updateModal();
+      b.title.textContent = 'Version ' + upd.version + ' is ready';
+      b.notes.hidden = !b.notes.textContent;
+      b.more.hidden = !b.more.textContent;
+      b.progress.hidden = true;
+      updButtons(b, [['later', 'Later'], ['restart', 'Restart to update', true]]);
+    }
+  }
+  window.__updates = { event: updateEvent, close: closeUpdate, get stage() { return upd.stage; }, actions: upd.actions };
+  if (shellBridge && shellBridge.onUpdate) shellBridge.onUpdate(updateEvent);
+
   // ------------------------------------------------------------------ toast + modal
   let toastTimer;
   function toast(msg) {
@@ -3442,6 +3552,8 @@
     const auto = toggleSwitch('set-autoconnect', 'Reconnect to the last pedal at launch', shellBridge && pref.get('autoConnect', false), (v) => pref.set('autoConnect', v), !shellBridge);
 
     // Advanced
+    const updSwitch = toggleSwitch('set-autoupdate', 'Check for updates automatically', shellInfo ? shellInfo.autoUpdate !== false : false,
+      (v) => { if (shellBridge && shellBridge.setAutoUpdate) shellBridge.setAutoUpdate(v).catch(() => {}); }, !shellBridge);
     const devSwitch = toggleSwitch('set-devtools', 'Developer tools', devTools, setDevTools);
     const drawerAtLaunch = toggleSwitch('set-drawer', 'Show the Activity drawer at launch', pref.get('drawerAtLaunch', false), (v) => pref.set('drawerAtLaunch', v));
     const reveal = el('button', { class: 'btn small', dataset: { fk: 'set-reveal' }, disabled: !shellBridge ? 'true' : null,
@@ -3468,6 +3580,8 @@
         setRow('', auto),
         setRow('', pedalLine, shellBridge ? forget : null)),
       el('section', {}, el('h3', { text: 'Advanced' }),
+        setRow('', updSwitch),
+        setNote(shellBridge ? 'Checks GitHub for new versions.' : desktopOnly, 'set-autoupdate-note'),
         setRow('', devSwitch),
         setNote('Shows the Activity log, session recording and protocol details. For troubleshooting and development.', 'set-devtools-note'),
         devOnly(setRow('', drawerAtLaunch)),
