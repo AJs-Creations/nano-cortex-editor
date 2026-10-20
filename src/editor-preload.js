@@ -17,4 +17,13 @@ contextBridge.exposeInMainWorld('nanoShell', {
   autoConnect: () => ipcRenderer.invoke('auto-connect'),
   openExternal: (url) => ipcRenderer.invoke('open-external', String(url)),
   onOpenSettings: (fn) => ipcRenderer.on('open-settings', () => fn()),
+  // Bluetooth picker (src/bt-picker.js): announce a requestDevice() (sync, returns the scan mode 'nano' or 'all'),
+  // answer the chooser, and say how connecting went ('ok' remembers the device).
+  bluetoothRequest: (opts) => ipcRenderer.sendSync('bt-request', {
+    want: opts && (opts.want === 'all' || opts.want === 'nano') ? opts.want : null,
+    auto: !!(opts && opts.auto), choose: !!(opts && opts.choose), notice: opts && opts.notice === 'not-nano' ? 'not-nano' : '',
+  }),
+  bluetoothChoose: (choice) => ipcRenderer.invoke('bt-choose', String(choice)),
+  bluetoothResult: (kind) => ipcRenderer.invoke('bt-result', String(kind)),
+  onBluetoothChooser: (fn) => ipcRenderer.on('bt-chooser', (_e, view) => fn(view)),
 });

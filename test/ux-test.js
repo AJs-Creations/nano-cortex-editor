@@ -1787,6 +1787,156 @@ async function run() {
   await js('localStorage.removeItem("settings.firmwareWarned")');
   await loadDemo('');
 
+  // ---------------------------------------------------------------- Bluetooth chooser (issue #15)
+  // The shell's picker (src/bt-picker.js) with fake devices, its chooser drawn by this page and answered with real
+  // clicks. The test carries the messages between them, as the shell's IPC does: views to __bleChooser.show(),
+  // the page's choices (__ble.choices) and connect results (__ble.results) back to the picker.
+  {
+    const { createBluetoothPicker, sortDevices, realName } = require('../src/bt-picker');
+    const dev = (deviceId, deviceName = '') => ({ deviceId, deviceName });
+    const OTHERS = [dev('AA:01', 'JBL Flip 5'), dev('AA:02', 'Razer Nomv2X LE'), dev('AA:03', 'Bose QC45'), dev('AA:04'),
+      dev('AA:05', 'Logitech MX Keys'), dev('AA:06', 'Nanoleaf Shapes'), dev('AA:07', 'Unknown or Unsupported Device (AA:07)'),
+      dev('AA:08', 'Galaxy Buds2'), dev('AA:09', 'Sonos Roam'), dev('AA:0A', 'Cortex Speaker'), dev('AA:0B', 'Apple Watch'), dev('AA:0C')];
+    const NANO = dev('NN:01', 'Neural DSP Nano Cortex');
+    let saved = null;
+    let pageQueue = Promise.resolve();
+    const makePicker = () => {
+      const p = { again: [], hints: [], picked: [] };
+      p.picker = createBluetoothPicker({
+        store: { get: () => saved, set: (v) => { saved = v; } },
+        show: (view) => { pageQueue = pageQueue.then(() => js('__bleChooser.show(' + JSON.stringify(view) + ')')); },
+        hint: async (h) => { p.hints.push(h); }, connectAgain: (o) => p.again.push(o), chooserMs: 40, autoMs: 150,
+      });
+      p.cb = (id) => p.picked.push(id);
+      return p;
+    };
+    const synced = async () => { await pageQueue; await frame(); };
+    const toShell = async (p) => {   // the page's answers, as the preload bridge would carry them
+      for (const c of await js('__ble.choices.splice(0)')) p.picker.choose(c);
+      for (const k of await js('__ble.results.splice(0)')) p.picker.result(k);
+    };
+    const chooserUp = () => js('!!document.querySelector(".bt-chooser")');
+    const rowsText = () => js('[...document.querySelectorAll(".bt-row")].map(r => r.querySelector(".name").textContent + (r.querySelector(".tag") ? " [" + r.querySelector(".tag").textContent + "]" : "") + (r.textContent === r.querySelector(".name").textContent + (r.querySelector(".tag")?.textContent || "") ? "" : " <stray text>"))');
+    // The core's log lines when the picked device has no A002/A003 (from the issue's log).
+    const failNoService = () => js(`(() => { for (const u of ['0000a002', '0000a003']) log('Service unavailable ' + u + '-0000-1000-8000-00805f9b34fb: No Services matching UUID ' + u + '-0000-1000-8000-00805f9b34fb found in Device.');
+      log('Connect failed: C304/C305 not found under A002/A003'); })()`);
+    await js('__ble.choices.length = 0; __ble.results.length = 0');
+
+    // Order and names
+    const order = sortDevices(OTHERS.map(d => ({ id: d.deviceId, name: realName(d.deviceName, d.deviceId) })), { notNano: new Set(['AA:02']) }).map(d => d.id);
+    check('chooser order: Nano-like names, then unnamed devices, then the rest, then devices that failed the service check',
+      order.join() === 'AA:06,AA:0A,AA:04,AA:07,AA:0C,AA:01,AA:03,AA:05,AA:08,AA:09,AA:0B,AA:02', order.join());
+    check('a name made from the address ("Unknown or Unsupported Device (…)") counts as unnamed', realName('Unknown or Unsupported Device (AA:07)', 'AA:07') === '' && realName('Neural DSP Nano Cortex', 'NN:01') === 'Neural DSP Nano Cortex');
+
+    // A fresh install scans for the Nano's service; a pedal found that way is taken at once, even without a name.
+    let p = makePicker();
+    check('with nothing remembered, Connect scans for the Nano Cortex service only ("nano" scan)', p.picker.beginRequest({}) === 'nano');
+    p.picker.onSelect([dev('NN:02')], p.cb);
+    check('"nano" scan: the first device offering the service is picked without a chooser, even unnamed', p.picked.join() === 'NN:02' && !(await chooserUp()));
+    check('picking it does not remember it yet', saved === null);
+    await js('__ui.demo = false; setStatus("Connected", true); __ui.demo = true'); await toShell(p);
+    check('remembered once the editor found C304/C305 on it (the page reports "ok")', saved && saved.id === 'NN:02' && saved.via === 'nano' && saved.name === 'Nano Cortex', JSON.stringify(saved));
+    saved = null;
+
+    // Nothing found yet: the chooser waits, with the pairing hint and the way to every device.
+    p = makePicker();
+    p.picker.beginRequest({});
+    p.picker.onSelect([], p.cb);
+    await waitFor(chooserUp); await synced();
+    check('"nano" scan, nothing yet: "Looking for your Nano Cortex" with the pairing hint',
+      (await js('document.querySelector("[data-fk=bt-title]").textContent')) === 'Looking for your Nano Cortex'
+      && /^Put the Nano Cortex in pairing mode: hold EXIT \+ CAPTURE for about a second, until the Gain ring lights up\./.test(await js('document.querySelector("[data-fk=bt-hint]").textContent')),
+      await js('document.querySelector("[data-fk=bt-hint]").textContent'));
+    check('"nano" scan: an empty list explains itself and offers Show all Bluetooth devices', await js('!!document.querySelector("[data-fk=bt-empty]") && !document.querySelector("[data-fk=bt-all]").hidden'));
+    await shot('bt-chooser-waiting');
+    await click('[data-fk="bt-all"]');
+    check('Show all Bluetooth devices closes the chooser and asks for an "all" scan', !(await chooserUp()) && JSON.stringify(await js('__ble.choices')) === '["all"]');
+    await toShell(p);
+    check('… which cancels the filtered request (the page starts the next one)', p.picked.join() === '' && p.picked.length === 1);
+
+    // Every device nearby: all listed, sorted, live, nothing remembered by picking.
+    p = makePicker();
+    check('the fallback list is an "all" scan', p.picker.beginRequest({ want: 'all' }) === 'all');
+    p.picker.onSelect(OTHERS.slice(0, 3), p.cb);
+    await waitFor(chooserUp); await synced();
+    check('"all" scan: no Nano-like name, so the chooser opens', (await js('document.querySelector("[data-fk=bt-title]").textContent')) === 'Choose your Nano Cortex' && (await js('document.querySelector("[data-fk=bt-all]").hidden')));
+    p.picker.onSelect(OTHERS, p.cb);
+    await synced();
+    const listed = await rowsText();
+    check('more than 8 devices: all 12 are listed (no cap)', listed.length === 12, listed.length + ': ' + listed.join(' | '));
+    check('the list updates while the chooser stays open', await chooserUp() && /Scanning… 12 devices nearby\./.test(await js('document.querySelector("[data-fk=bt-status]").textContent')));
+    check('in the chooser: Nano-like names first, then unnamed devices, then the rest',
+      listed.slice(0, 5).join(' | ') === 'Nanoleaf Shapes [Looks like a Nano Cortex] | Cortex Speaker [Looks like a Nano Cortex] | Unnamed device · …AA04 | Unnamed device · …AA07 | Unnamed device · …AA0C'
+      && listed[5] === 'JBL Flip 5', listed.join(' | '));
+    check('the list scrolls instead of growing past the window', await js('(() => { const l = document.querySelector(".bt-list"); return l.scrollHeight > l.clientHeight + 20 && document.querySelector(".bt-chooser").getBoundingClientRect().bottom <= innerHeight; })()'));
+    await shot('bt-chooser-all');
+    const razer = await js('[...document.querySelectorAll(".bt-row")].findIndex(r => r.dataset.id === "AA:02")');
+    await click('[data-fk="bt-dev-' + razer + '"]');   // scrolled into view, then a real click
+    await toShell(p);
+    check('clicking a row picks that device', p.picked.join() === 'AA:02' && !(await chooserUp()));
+    await failNoService(); await toShell(p);
+    check('a non-Nano pick is not remembered (its services were not found)', saved === null && p.picker.notNano.has('AA:02'));
+    check('… and the chooser is asked for again, with a notice', JSON.stringify(p.again) === '[{"want":"all","choose":true,"notice":"not-nano"}]', JSON.stringify(p.again));
+    p.picker.beginRequest(p.again[0]);
+    p.picker.onSelect(OTHERS, p.cb);
+    await waitFor(chooserUp); await synced();
+    const again = await rowsText();
+    check('the device that failed sorts last, marked "Not a Nano Cortex", and the notice says why',
+      again[again.length - 1] === 'Razer Nomv2X LE [Not a Nano Cortex]' && /isn’t a Nano Cortex/.test(await js('document.querySelector("[data-fk=bt-notice]").textContent')), again.join(' | '));
+    p.picker.onSelect([...OTHERS, NANO], p.cb);
+    await synced();
+    check('the Nano Cortex turning up while the chooser is open is picked by its name, and the chooser closes', p.picked.join() === 'AA:02,NN:01' && !(await chooserUp()));
+    await js('__ui.demo = false; setStatus("Connected", true); __ui.demo = true'); await toShell(p);
+    check('found via the full list: remembered with via "all", so the next scan starts there', saved && saved.id === 'NN:01' && saved.name === 'Neural DSP Nano Cortex' && saved.via === 'all' && p.picker.beginRequest({}) === 'all', JSON.stringify(saved));
+    p.picker.onSelect([NANO], p.cb);
+    check('the remembered pedal is picked at once', p.picked.slice(-1)[0] === 'NN:01');
+    await js('__ui.connectError = ""; render()');
+
+    // 1.0.0 remembered a Razer headset: the service failure forgets it and the chooser opens again.
+    saved = { id: 'AA:02', name: 'Razer Nomv2X LE', at: '2026-10-17T13:47:35.739Z' };
+    p = makePicker();
+    p.picker.beginRequest({ want: 'all' });
+    p.picker.onSelect(OTHERS, p.cb);
+    check('a remembered device is picked without asking', p.picked.join() === 'AA:02');
+    await failNoService(); await toShell(p);
+    check('a service failure (No Services matching A002/A003) clears the remembered device', saved === null);
+    check('… and asks for the chooser again', p.again.length === 1 && p.again[0].choose === true);
+    p.picker.beginRequest(p.again[0]);
+    p.picker.onSelect(OTHERS, p.cb);
+    await waitFor(chooserUp); await synced();
+    check('the forgotten device is not picked again; the chooser opens at once', p.picked.join() === 'AA:02' && await chooserUp());
+    await key('Escape'); await toShell(p);
+    check('Esc cancels the chooser', !(await chooserUp()) && p.picked.join() === 'AA:02,');
+    await js('__ui.connectError = ""; render()');
+
+    // A dropped link while looking for the services proves nothing: the remembered pedal stays.
+    saved = { id: 'NN:01', name: 'Neural DSP Nano Cortex', at: '2026-10-20T10:00:00.000Z', via: 'nano' };
+    p = makePicker();
+    p.picker.beginRequest({});
+    p.picker.onSelect([NANO], p.cb);
+    await js(`(() => { log('Requesting Nano Cortex...'); log('Service unavailable 0000a002-0000-1000-8000-00805f9b34fb: GATT Server is disconnected. Cannot retrieve services.'); log('Connect failed: C304/C305 not found under A002/A003'); })()`);
+    await toShell(p);
+    check('a dropped link during service discovery keeps the remembered pedal', saved && saved.id === 'NN:01' && p.again.length === 0);
+    await js('__ui.connectError = ""; render()');
+
+    // Scan again, and reconnect at launch.
+    p = makePicker();
+    p.picker.beginRequest({ want: 'all' });
+    p.picker.onSelect([dev('AA:01', 'JBL Flip 5')], p.cb);
+    await waitFor(chooserUp); await synced();
+    await click('[data-fk="bt-rescan"]');
+    check('Scan again closes the chooser and asks for a new scan', !(await chooserUp()) && (await js('__ble.choices.slice(-1)[0]')) === 'rescan');
+    await toShell(p);
+    check('… cancelling the running request first', p.picked.join() === '');
+    p = makePicker();
+    p.picker.beginRequest({ auto: true });
+    p.picker.onSelect([dev('NN:03', 'Neural DSP Nano Cortex'), ...OTHERS], p.cb);
+    await waitFor(() => p.picked.length > 0, { timeout: 2000 });
+    check('reconnect at launch takes only the remembered pedal: another Nano is not picked, no chooser', p.picked.join() === '' && p.hints.join() === 'auto-none' && !(await chooserUp()));
+    saved = null;
+    await js('__ble.choices.length = 0; __ble.results.length = 0; __ui.connectError = ""; render()');
+  }
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }
 
