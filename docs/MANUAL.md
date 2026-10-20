@@ -69,6 +69,10 @@ The macOS app is signed by "Anup Sebastian" (Developer ID) and notarised by Appl
 - Bluetooth goes through BlueZ, the standard Linux Bluetooth stack: your adapter has to be on and the `bluetooth`
   service running (see [Troubleshooting](#15-troubleshooting)).
 
+**Updates.** The app checks GitHub for new versions and lets you install one, skip it or be reminded later; turn
+this off in [Settings](#12-settings) → General → Advanced. The portable `.exe` and the deb only link to the download.
+Version 1.0.0 doesn't check, so get the next version from the Releases page once.
+
 **Before you save anything**, back up your presets with the official Cortex Cloud app. Edits from this editor are live
 on the pedal, and saves are permanent.
 
@@ -82,8 +86,16 @@ The editor opens on the connect screen.
    only one Bluetooth connection at a time**; while the phone holds it, the editor cannot see the pedal.
 2. **Make it visible.** After a power-up, hold **EXIT** + **CAPTURE** for about a second, until the Gain ring lights
    up. After a plain disconnect from the editor it stays reachable without this.
-3. **Click Connect.** The app scans for a few seconds and picks your Nano Cortex automatically. If it can't tell which
-   device is the pedal, it shows a list to choose from. No USB cable is needed.
+3. **Click Connect.** The app looks only for devices that offer the Nano Cortex's Bluetooth service and connects to
+   the pedal as soon as it shows up, with or without a name. If that takes more than a moment, a "Looking for your
+   Nano Cortex" window repeats step 2 and keeps scanning. No USB cable is needed.
+
+If the pedal still doesn't appear, click **Show all Bluetooth devices** in that window. It lists every device nearby,
+updated while it scans: names that look like the pedal first, then devices without a name (on Windows the Nano Cortex
+often has none), then everything else. Pick the pedal there. **Scan again** restarts the scan (each one runs about a
+minute). The app remembers a device only after it has found the Nano Cortex's editor service on it, so picking the
+wrong one does no harm: it says "That device isn't a Nano Cortex", marks it, and lets you choose again. A pedal found
+through the full list is remembered with it, and the next Connect starts there.
 
 If the pedal doesn't show up or Bluetooth is off, the message on the connect screen has a **Troubleshooting** link to
 [section 15](#15-troubleshooting). **Read the manual** at the bottom opens this manual in your browser.
@@ -141,7 +153,7 @@ message sent and the **Record** and **Activity** buttons.
 ![The status bar: demo-mode indicator and the Settings, Shortcuts and Support buttons](images/status-bar.png)
 
 **Help menu**: **Manual** (this page), **GitHub Repository**, **Report an Issue**, **Show Log File** (see
-[Troubleshooting](#15-troubleshooting)) and **Support the Project…**. The links open in your default browser.
+[Troubleshooting](#15-troubleshooting)), **Check for Updates…** and **Support the Project…**. The links open in your default browser.
 
 ## 4. Presets
 
@@ -415,7 +427,8 @@ Open Settings with ⌘, (Ctrl+, on Windows), from the app menu, or with **Settin
   **Follow the preset tempo**, beats per bar, which mode the panel **Opens in**, and the Advanced defaults (pattern,
   subdivision, count-in and the three levels).
 - **Connection**: **Reconnect to the last pedal at launch** and **Forget pedal**.
-- **Advanced**: **Developer tools** (below). With it on, also **Show the Activity drawer at launch** and **Show
+- **Advanced**: **Check for updates automatically** (on by default; see Updates in
+  [section 1](#1-install-and-first-launch)) and **Developer tools** (below). With it on, also **Show the Activity drawer at launch** and **Show
   recordings folder**.
 
 <a id="developer-tools"></a>
@@ -498,12 +511,21 @@ manual. On Windows and Linux the keys are Ctrl for ⌘ and Shift for ⇧ (the in
 
 ## 15. Troubleshooting
 
-**"No Nano Cortex showed up nearby."**
+**The pedal doesn't show up ("Looking for your Nano Cortex" finds nothing).**
 - Make sure the pedal is on and the Cortex Cloud phone app is **not** connected to it (quit the app or turn off the
   phone's Bluetooth). The pedal takes one connection at a time.
-- After a power-up, hold **EXIT** + **CAPTURE** for a second until the Gain ring lights up, then click **Connect**
-  again. The first scan after the pedal boots can come up empty; try once more.
+- After a power-up, hold **EXIT** + **CAPTURE** for a second until the Gain ring lights up. The window keeps scanning;
+  once the scan has finished, click **Scan again**. The first scan after the pedal boots can come up empty.
+- Still nothing: click **Show all Bluetooth devices** and look near the top of the list, including **Unnamed device**
+  rows ([section 2](#2-connecting)).
 - Move closer; Bluetooth LE range drops behind walls and racks.
+
+**The list shows other devices (speakers, headsets) but not the pedal, or "That device isn't a Nano Cortex".**
+- Put the pedal in pairing mode as above and wait a few seconds: the list updates while it scans. On Windows the Nano
+  Cortex often appears as **Unnamed device**; those are listed right after pedal-like names.
+- A device you picked that turned out not to be the pedal is marked **Not a Nano Cortex** and moved to the bottom. The
+  app never remembers it. Version 1.0.0 could remember such a device and then try it on every Connect; the first
+  failed attempt now forgets it and shows the list again. **Settings → Connection → Forget pedal** does the same by hand.
 
 **"The pedal dropped the connection."** Usually the phone app grabbed it. Close it and connect again.
 

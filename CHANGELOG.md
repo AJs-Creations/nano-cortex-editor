@@ -4,10 +4,9 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 
 ## Unreleased
 
-Contributed by @itsbreaded in #14, integrated with maintainer changes. Not yet verified on a pedal.
-
 ### Added
 
+- Update notifications: install a new version from the app, skip it or be reminded later (Help → Check for Updates…).
 - **Live sync with the pedal**: knobs, effect parameters, footswitch bypasses and the expression pedal update the
   editor as they change on the pedal; the unsaved-changes mark follows the pedal's own report.
 - **Cortex Cloud IRs to the pedal**: **Send to Nano** on each IR in your Cloud profile's Impulse Responses list (and
@@ -24,11 +23,21 @@ Contributed by @itsbreaded in #14, integrated with maintainer changes. Not yet v
 
 ### Fixed
 
+- Connecting on a computer with many Bluetooth devices ([#15](https://github.com/AJs-Creations/nano-cortex-editor/issues/15)).
+  Connect now looks only for devices that offer the Nano Cortex's Bluetooth service and takes the pedal as soon as it
+  appears, with or without a name. While it looks, a window repeats how to put the pedal in pairing mode. **Show all
+  Bluetooth devices** lists every device nearby (no longer only the first eight), live while it scans, with names that
+  look like the pedal first and unnamed devices next; **Scan again** restarts the scan.
+- The app remembers a device only after it has found the Nano Cortex's editor service on it. Before, any device picked
+  in the list was remembered and then tried on every Connect, so one wrong pick (a headset, say) blocked connecting.
+  A remembered device that turns out not to be a Nano Cortex is now forgotten, and the list opens again.
 - Closing the tuner keeps the guitar input muted if it was (the pedal needs the mute re-applied).
 - A click or right-click on the signal chain is no longer lost when the pedal's report redraws it at that moment.
 - Context menus stay inside small windows.
 - The window's footer is laid out when the content area settles after the window opens (Windows).
 - `npm start` and the other scripts run on Windows too (a Node launcher clears `ELECTRON_RUN_AS_NODE`).
+
+The live sync, Cloud IR, audition, reorder and monitoring entries were contributed by @itsbreaded in #14 and integrated with maintainer changes; they are not yet verified on a pedal.
 
 ## 1.0.0 — 2026-10-10
 

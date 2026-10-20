@@ -27,7 +27,6 @@ const CLOUD_PRODUCT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 const CLOUD_URL = 'https://cloud.neuraldsp.com/cloud/';
 const CLOUD_PARTITION = 'persist:cortex-cloud';
 const TOOLBAR_HEIGHT = 44;
-const NANO_NAME = /nano|cortex|ndsp|neural/i;
 
 // Dev remote: lets a terminal drive the editor during hardware sessions.
 //   NANO_DEV_PORT=4848 npm start
@@ -187,15 +186,15 @@ app.setAboutPanelOptions({
 if (process.platform === 'linux') app.commandLine.appendSwitch('enable-experimental-web-platform-features');
 
 let win, toolbar, editor, cloud;
-let autoConnecting = false;
 let active = 'editor';
 const cloudIRTransfers = new Map();
 
 // ---------- shell settings (userData/settings.json) ----------
 // What the main process needs before the editor page has loaded: the accent (for the Dock icon), the
-// remembered pedal and Developer tools (for the menu). Everything else lives in the editor page's localStorage.
+// remembered pedal, Developer tools (for the menu) and the update settings (checked at launch). Everything else
+// lives in the editor page's localStorage.
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
-let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false };
+let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false, autoUpdate: true, skippedVersion: null };
 function loadShellSettings() {
   try { Object.assign(shellSettings, JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))); } catch { /* defaults */ }
 }
@@ -244,66 +243,39 @@ function show(tab) {
 }
 
 // ---------- Bluetooth device picking ----------
-// Web Bluetooth's requestDevice() normally shows Chrome's picker. Electron has no
-// picker, so we get a stream of scan results and choose here: auto-connect to
-// anything that looks like a Nano Cortex, otherwise offer a native chooser.
+// Web Bluetooth's requestDevice() normally shows Chrome's picker. Electron has none, so every scan result comes
+// here and src/bt-picker.js decides: the remembered pedal or the first device advertising the Nano's service is
+// taken at once, otherwise the editor page shows its chooser. A device is remembered only after the page has found
+// the Nano's services on it (bt-result 'ok'); one without them is forgotten (issue #15).
+const { createBluetoothPicker } = require('./bt-picker');
+let btPicker = null;
+const BT_HINT = 'Put the Nano Cortex in pairing mode: hold EXIT + CAPTURE for about a second, until the Gain ring lights up.';
 function wireBluetooth(contents) {
-  let pending = null;
-
+  let nativeAbort = null;   // the shell's own chooser, for the Classic Editor (it has none)
+  async function showNative(view) {
+    if (!view.open) { if (nativeAbort) nativeAbort.abort(); return; }
+    if (nativeAbort || !view.devices.length) return;   // a message box can't update; wait for a first device
+    nativeAbort = new AbortController();
+    const list = view.devices;
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question', message: 'Choose your Nano Cortex', detail: BT_HINT, signal: nativeAbort.signal,
+      buttons: [...list.map(d => d.name || 'Unnamed device (' + d.id + ')'), 'Cancel'], cancelId: list.length,
+    }).catch(() => ({ response: -1 }));
+    nativeAbort = null;
+    btPicker.choose(response >= 0 && response < list.length ? list[response].id : '');
+  }
+  btPicker = createBluetoothPicker({
+    store: { get: () => shellSettings.pedal, set: (pedal) => { shellSettings.pedal = pedal; saveShellSettings(); } },
+    show: (view) => (view.native || (!view.open && nativeAbort) ? showNative(view) : contents.send('bt-chooser', view)),
+    hint: (name) => contents.executeJavaScript('window.__bleHint = ' + JSON.stringify(name)).catch(() => {}),
+    // A new requestDevice() needs a user gesture, which executeJavaScript can grant.
+    connectAgain: (opts) => contents.executeJavaScript('window.__connectAgain && window.__connectAgain(' + JSON.stringify(opts) + ')', true).catch(() => {}),
+    log: (msg) => { activityLog().write('[bluetooth] ' + msg); if (!app.isPackaged) console.log('[bluetooth] ' + msg); },
+  });
   contents.on('select-bluetooth-device', (event, devices, callback) => {
     event.preventDefault();
-
-    if (!pending) {
-      // autoConnecting: the reconnect at launch. It takes only the remembered pedal and never shows a chooser.
-      pending = { callback, seen: new Map(), done: false, auto: autoConnecting };
-      autoConnecting = false;
-      const p = pending;
-      // Give the scan a few seconds; if nothing auto-matched, let the user choose.
-      p.timer = setTimeout(async () => {
-        if (p.done) return;
-        const list = [...p.seen.values()];
-        if (p.auto) {
-          await contents.executeJavaScript("window.__bleHint = 'auto-none'").catch(() => {});
-          finish(p, '');
-          return;
-        }
-        if (list.length === 0) {
-          // The editor page explains this in its connect card.
-          // Set the hint before cancelling, so it's there when the page sees the error.
-          await contents.executeJavaScript("window.__bleHint = 'none-found'").catch(() => {});
-          finish(p, '');
-          return;
-        }
-        const shown = list.slice(0, 8);
-        const { response } = await dialog.showMessageBox(win, {
-          type: 'question',
-          message: 'Choose your Nano Cortex',
-          buttons: [...shown.map(d => d.deviceName || d.deviceId), 'Cancel'],
-          cancelId: shown.length
-        });
-        finish(p, response < shown.length ? shown[response].deviceId : '');
-      }, 5000);
-    }
-
-    for (const d of devices) pending.seen.set(d.deviceId, d);
-    const known = shellSettings.pedal && shellSettings.pedal.id;
-    const match = pending.auto && known ? devices.find(d => d.deviceId === known)
-      : devices.find(d => d.deviceId === known) || devices.find(d => NANO_NAME.test(d.deviceName || ''));
-    if (match) finish(pending, match.deviceId);
+    btPicker.onSelect(devices, callback);
   });
-
-  function finish(p, deviceId) {
-    if (p.done) return;
-    p.done = true;
-    clearTimeout(p.timer);
-    p.callback(deviceId); // '' cancels requestDevice()
-    if (pending === p) pending = null;
-    if (deviceId) {
-      const d = p.seen.get(deviceId);
-      shellSettings.pedal = { id: deviceId, name: (d && d.deviceName) || 'Nano Cortex', at: new Date().toISOString() };
-      saveShellSettings();
-    }
-  }
 }
 
 function grantDevicePermissions(ses) {
@@ -345,6 +317,7 @@ function createWindow() {
   });
   grantDevicePermissions(editor.webContents.session);
   wireBluetooth(editor.webContents);
+  editor.webContents.on('did-finish-load', () => { if (pendingUpdate && editorFlavor === 'pro') editor.webContents.send('update-event', pendingUpdate); });
   loadEditor('pro');
   editor.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   // The editor's Activity log goes to the log file for everyone (Help → Show Log File). Running from source it is
@@ -476,7 +449,7 @@ const fromToolbar = (e) => toolbar && e.sender === toolbar.webContents;
 ipcMain.handle('settings-get', (e) => (fromEditor(e) ? {
   platform: process.platform, accent: shellSettings.accent, dockFollowsAccent: shellSettings.dockFollowsAccent,
   pedal: shellSettings.pedal, recordingsDir: recordingsDir(), version: app.getVersion(), devTools: shellSettings.devTools,
-  logFile: activityLog().file,
+  logFile: activityLog().file, autoUpdate: shellSettings.autoUpdate !== false, updates: !!updates,
 } : null));
 // Developer tools (Settings → General → Advanced): the page sends it on every change and at launch; the menu follows.
 ipcMain.handle('set-dev-tools', (e, on) => {
@@ -530,14 +503,21 @@ ipcMain.handle('save-recording', async (e, name, json) => {
   console.log('[download] completed ' + file);
   return file;
 });
-// Reconnect at launch: requestDevice() needs a user gesture, which executeJavaScript can grant.
+// Reconnect at launch: requestDevice() needs a user gesture, which executeJavaScript can grant. The page then tells
+// the picker (bt-request, auto) that this scan takes only the remembered pedal.
 ipcMain.handle('auto-connect', async (e) => {
   if (!fromEditor(e) || !shellSettings.pedal) return false;
-  autoConnecting = true;
-  setTimeout(() => { autoConnecting = false; }, 3000);   // the picker event normally arrives within a second
   await editor.webContents.executeJavaScript('window.__autoConnect && window.__autoConnect()', true).catch(() => {});
   return true;
 });
+// Bluetooth picker (src/bt-picker.js). bt-request is synchronous: the page sends it right before requestDevice(), so
+// the picker knows the scan mode before the first 'select-bluetooth-device' event, and the reply is that mode.
+ipcMain.on('bt-request', (e, opts) => {
+  e.returnValue = fromEditor(e) && btPicker ? btPicker.beginRequest(opts && typeof opts === 'object' ? opts : {}) : null;
+});
+ipcMain.handle('bt-choose', (e, choice) => (fromEditor(e) && btPicker ? btPicker.choose(String(choice)) : false));
+// How connecting to the picked device went: only 'ok' (the Nano's services and characteristics found) remembers it.
+ipcMain.handle('bt-result', (e, kind) => (fromEditor(e) && btPicker ? btPicker.result(String(kind)) : null));
 function openSettings() {
   show('editor');
   if (editorFlavor === 'pro') editor.webContents.send('open-settings');
@@ -753,6 +733,62 @@ ipcMain.handle('sign-out', async () => {
   return true;
 });
 
+// ---------- updates (src/updates.js: electron-updater reading GitHub Releases) ----------
+// Only in packaged builds: never from source and never in the UX test, which drives the page's modal itself.
+// release.yml uploads the metadata electron-updater reads (latest-mac.yml, latest.yml, latest-linux*.yml) and the
+// blockmaps with every release.
+const { createUpdates, installMode } = require('./updates');
+let updates = null;
+let pendingUpdate = null;   // the offer, download or install the page hasn't answered yet: shown again after a reload
+function sendUpdate(ev) {
+  if (ev.type === 'available' || ev.type === 'progress' || ev.type === 'downloaded') pendingUpdate = ev;
+  else if (ev.type === 'error') pendingUpdate = null;
+  if (editor && !editor.webContents.isDestroyed()) editor.webContents.send('update-event', ev);
+}
+function startUpdates() {
+  if (!app.isPackaged) return;
+  const { autoUpdater } = require('electron-updater');
+  const write = (level) => (m) => activityLog().write('[updater] ' + (level ? level + ': ' : '') + m);
+  autoUpdater.logger = { info: write(''), warn: write('warn'), error: write('error'), debug: () => {} };
+  updates = createUpdates({
+    updater: autoUpdater,
+    store: {
+      get: () => ({ auto: shellSettings.autoUpdate !== false, skipped: shellSettings.skippedVersion || null }),
+      set: (p) => {
+        if ('auto' in p) shellSettings.autoUpdate = !!p.auto;
+        if ('skipped' in p) shellSettings.skippedVersion = p.skipped;
+        saveShellSettings();
+      },
+    },
+    send: sendUpdate,
+    openExternal: (url) => openOutside(url),
+    currentVersion: app.getVersion(),
+    mode: installMode(process.platform, process.env),
+    releaseUrl: (v) => LINKS.releases + '/tag/v' + v,
+    log: (m) => activityLog().write('[updates] ' + m),
+  });
+  updates.start();
+}
+// Help → Check for Updates…
+function checkForUpdates() {
+  show('editor');
+  if (updates) updates.check(true);
+  else sendUpdate({ type: 'error', message: 'Updates are checked only in the installed app.' });
+}
+ipcMain.handle('update-action', (e, what, version) => {
+  if (!fromEditor(e)) return null;
+  what = String(what);
+  if (what !== 'download') pendingUpdate = null;
+  return updates ? updates.action(what, String(version || '')) : null;
+});
+ipcMain.handle('set-auto-update', (e, on) => {
+  if (!fromEditor(e)) return null;
+  if (updates) return updates.setAuto(!!on);
+  shellSettings.autoUpdate = !!on;
+  saveShellSettings();
+  return !!on;
+});
+
 // ---------- Activity log file (Help → Show Log File) ----------
 let actLog = null;
 function activityLog() {
@@ -776,6 +812,7 @@ function buildMenu() {
       openSettings,
       openLink: (url) => shell.openExternal(url),
       showLogFile,
+      checkForUpdates,
     },
   })));
 }
@@ -788,6 +825,7 @@ app.whenReady().then(() => {
   buildMenu();
   createWindow();
   applyAppIcon();
+  startUpdates();
   app.on('activate', () => { if (!win || win.isDestroyed()) createWindow(); });
 });
 app.on('window-all-closed', () => app.quit());

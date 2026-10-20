@@ -1942,6 +1942,9 @@
       await connectAll();
     } finally {
       ui.connecting = false;
+      closeBleChooser();
+      if (ble.restart) { ble.restart = false; if (!state.connected && !ui.demo) doConnect(); }   // Scan again, Show all, or choose again
+      else ble.next = null;
       render();
     }
   }
@@ -1957,6 +1960,159 @@
     if (/GATT|disconnect|connection/i.test(msg)) return 'The pedal dropped the connection. Make sure your phone isn\u2019t connected to it, then try again.';
     return 'Couldn\u2019t connect: ' + msg;
   }
+
+  // ------------------------------------------------------------------ Bluetooth chooser (desktop app)
+  // The shell's picker (src/bt-picker.js) answers requestDevice(): it takes the remembered pedal or the first device
+  // that advertises the Nano's service by itself, and otherwise has this chooser drawn. The page tells it, right
+  // before each requestDevice(), what the scan is for (bt-request, which answers with the scan mode), and afterwards
+  // how connecting went: only 'ok' (C304/C305 found) remembers the device (issue #15).
+  //   'nano' scan: requestDevice() filtered on the Nano's services, so nothing else is listed.
+  //   'all' scan: every device nearby (the fallback, "Show all Bluetooth devices").
+  // Without the shell (tests, the web preview) choices and results are only collected in __ble.
+  const ble = {
+    next: null,        // options for the next requestDevice(): { want, auto, choose, notice }
+    restart: false,    // start another scan once the current attempt has ended
+    mode: 'nano',
+    attempt: { noService: 0, otherService: 0, accessible: 0 },
+    chooser: null,     // { bg, list, status, view }
+    choices: [], results: [],
+  };
+  window.__ble = ble;
+  const BLE_SERVICES = typeof SERVICE_UUIDS !== 'undefined' ? SERVICE_UUIDS : [];
+  if (shellBridge && shellBridge.bluetoothRequest && navigator.bluetooth && navigator.bluetooth.requestDevice) {
+    const realRequest = navigator.bluetooth.requestDevice.bind(navigator.bluetooth);
+    navigator.bluetooth.requestDevice = (options) => {
+      const opts = ble.next || {};
+      ble.next = null;
+      ble.mode = shellBridge.bluetoothRequest(opts) === 'all' ? 'all' : 'nano';
+      if (ble.mode === 'all' || !BLE_SERVICES.length) return realRequest(options);
+      return realRequest({ filters: BLE_SERVICES.map(s => ({ services: [s] })), optionalServices: BLE_SERVICES });
+    };
+  }
+  // A new scan from the shell (after a device turned out not to be a Nano, with a user gesture) or from the
+  // chooser's buttons. While an attempt is running it is cancelled first and the scan starts when it has ended.
+  window.__connectAgain = (opts) => {
+    if (state.connected || ui.demo) return false;
+    ble.next = Object.assign({}, opts);
+    if (ui.connecting) ble.restart = true; else doConnect();
+    return true;
+  };
+  function bleChoose(choice) {
+    ble.choices.push(choice);
+    if (shellBridge && shellBridge.bluetoothChoose) shellBridge.bluetoothChoose(choice).catch(() => {});
+  }
+  function bleResult(kind) {
+    ble.results.push(kind);
+    if (shellBridge && shellBridge.bluetoothResult) shellBridge.bluetoothResult(kind).catch(() => {});
+  }
+  // From the core's log lines for one connect attempt: did the device answer "no such service" (not a Nano), or did
+  // something else go wrong (a dropped link proves nothing)?
+  function bleTrack(text) {
+    const a = ble.attempt;
+    if (/^Requesting Nano Cortex/.test(text)) Object.assign(a, { noService: 0, otherService: 0, accessible: 0 });
+    else if (/^Service accessible/.test(text)) a.accessible++;
+    else if (/^Service unavailable /.test(text)) { if (/No Services matching/i.test(text)) a.noService++; else a.otherService++; }
+    else if (/^Connect failed:/.test(text)) {
+      const msg = text.replace(/^Connect failed:\s*/, '');
+      bleResult(/cancel/i.test(msg) ? 'cancelled'
+        : /C304\/C305 not found/.test(msg) && !a.otherService && (a.noService || a.accessible) ? 'no-service' : 'failed');
+      Object.assign(a, { noService: 0, otherService: 0, accessible: 0 });
+    }
+  }
+
+  function closeBleChooser() {
+    const c = ble.chooser;
+    if (!c) return;
+    ble.chooser = null;
+    c.bg.remove();
+    document.removeEventListener('keydown', c.onKey, true);
+    if (c.prev && c.prev.isConnected) c.prev.focus({ preventScroll: true });
+  }
+  // The user's answer: a device id, or 'cancel' / 'rescan' / 'all'.
+  function bleChooserAction(what) {
+    const c = ble.chooser;
+    if (!c) return;
+    const mode = c.view.mode;
+    closeBleChooser();
+    if (what === 'rescan' || what === 'all') {
+      window.__connectAgain({ want: what === 'all' ? 'all' : mode, choose: true });
+      bleChoose(what);
+    } else bleChoose(what === 'cancel' ? '' : what);
+  }
+  const unnamedLabel = (id) => 'Unnamed device · …' + String(id).replace(/[^0-9a-z]/gi, '').slice(-4).toUpperCase();
+  // view from the shell: { open, mode, scanning, notice, devices: [{ id, name, nano, remembered, notNano }] }, in order.
+  function showBleChooser(view) {
+    if (!view || !view.open) { closeBleChooser(); return; }
+    let c = ble.chooser;
+    if (!c) {
+      const list = el('div', { class: 'bt-list', role: 'listbox', 'aria-label': 'Bluetooth devices', dataset: { fk: 'bt-list' } });
+      const status = el('div', { class: 'bt-status', dataset: { fk: 'bt-status' } });
+      const title = el('h2', { dataset: { fk: 'bt-title' } });
+      const notice = el('p', { class: 'warn bt-notice', dataset: { fk: 'bt-notice' } });
+      const allBtn = el('button', { class: 'btn', dataset: { fk: 'bt-all' }, onclick: () => bleChooserAction('all') }, 'Show all Bluetooth devices');
+      const btns = el('div', { class: 'row' }, allBtn, el('span', { class: 'grow' }),
+        el('button', { class: 'btn', dataset: { fk: 'bt-rescan' }, onclick: () => bleChooserAction('rescan') }, 'Scan again'),
+        el('button', { class: 'btn', dataset: { fk: 'bt-cancel' }, onclick: () => bleChooserAction('cancel') }, 'Cancel'));
+      const kbd = (t) => el('kbd', { text: t });
+      const bg = el('div', { class: 'modal-bg bt-bg', onclick: (e) => { if (e.target === bg) bleChooserAction('cancel'); } },
+        el('div', { class: 'modal bt-chooser', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'btTitle', dataset: { fk: 'bt-chooser' } },
+          title, notice,
+          el('p', { class: 'bt-hint', dataset: { fk: 'bt-hint' } }, 'Put the Nano Cortex in pairing mode: hold ', kbd('EXIT'), ' + ', kbd('CAPTURE'),
+            ' for about a second, until the Gain ring lights up. Close Cortex Cloud on your phone first; the pedal takes one connection at a time.'),
+          status, list, btns));
+      title.id = 'btTitle';
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); bleChooserAction('cancel'); return; }
+        if (e.key === 'Tab') {   // keep focus inside
+          const f = [...bg.querySelectorAll('button:not(:disabled)')];
+          const i = f.indexOf(document.activeElement);
+          e.preventDefault();
+          if (f.length) f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+        }
+        e.stopPropagation();
+      };
+      c = ble.chooser = { bg, list, status, title, notice, allBtn, onKey, prev: document.activeElement, rows: new Map(), view };
+      document.addEventListener('keydown', onKey, true);
+      document.body.append(bg);
+    }
+    c.view = view;
+    const devices = view.devices || [];
+    const nanoScan = view.mode === 'nano';
+    c.title.textContent = nanoScan ? 'Looking for your Nano Cortex' : 'Choose your Nano Cortex';
+    c.notice.textContent = view.notice === 'not-nano' ? 'That device isn’t a Nano Cortex: it has no Nano Cortex service. Pick another one.' : '';
+    c.allBtn.hidden = !nanoScan;
+    const n = devices.length;
+    const count = n === 1 ? '1 device' : n + ' devices';
+    c.status.replaceChildren(el('span', { class: 'led' + (view.scanning ? ' busy' : '') }), el('span', { text: nanoScan
+      ? (view.scanning ? 'Scanning for the Nano Cortex…' : 'Scan finished. Scan again, or show all Bluetooth devices.')
+      : (view.scanning ? 'Scanning… ' + count + ' nearby.' : 'Scan finished: ' + count + '. Scan again to keep looking.') }));
+    // Rows are kept per device and moved, not rebuilt, so a click isn't lost when the list updates under it.
+    const scroll = c.list.scrollTop;
+    const keep = new Set(devices.map(d => d.id));
+    for (const [id, row] of c.rows) if (!keep.has(id)) { row.remove(); c.rows.delete(id); }
+    const rows = devices.map((d, i) => {
+      let row = c.rows.get(d.id);
+      if (!row) {
+        row = el('button', { class: 'bt-row', role: 'option', onclick: () => bleChooserAction(row.dataset.id) });
+        c.rows.set(d.id, row);
+      }
+      row.dataset.id = d.id;
+      row.dataset.fk = 'bt-dev-' + i;
+      row.className = 'bt-row' + (d.nano ? ' nano' : '') + (d.notNano ? ' not-nano' : '') + (d.name ? '' : ' unnamed');
+      const tag = d.notNano ? 'Not a Nano Cortex' : d.remembered ? 'Last used' : d.nano ? 'Looks like a Nano Cortex' : '';
+      row.title = d.name ? d.name : 'This device doesn’t broadcast a name. On Windows the Nano Cortex often shows up like this.';
+      row.replaceChildren(...[el('span', { class: 'name', text: d.name || unnamedLabel(d.id) }), tag ? el('span', { class: 'tag', text: tag }) : null].filter(Boolean));
+      return row;
+    });
+    const empty = !n ? el('div', { class: 'bt-empty', dataset: { fk: 'bt-empty' } }, nanoScan
+      ? 'Nothing yet. Only devices that offer the Nano Cortex’s Bluetooth service appear here, and the pedal is picked as soon as it does.'
+      : 'No Bluetooth devices yet.') : null;
+    c.list.replaceChildren(...rows, ...(empty ? [empty] : []));
+    c.list.scrollTop = scroll;
+    if (!c.bg.contains(document.activeElement)) (rows[0] || c.bg.querySelector('[data-fk="bt-cancel"]')).focus({ preventScroll: true });
+  }
+  window.__bleChooser = { show: showBleChooser, close: closeBleChooser, action: bleChooserAction };
+  if (shellBridge && shellBridge.onBluetoothChooser) shellBridge.onBluetoothChooser(showBleChooser);
 
   // ------------------------------------------------------------------ captures from Cortex Cloud
   // The shell hands over { cns: base64, meta } when "Send to Nano Cortex" is clicked on
@@ -2495,7 +2651,8 @@
       ui.lastTxLabel = label;
     }
     if (rec.on) rec.lines.push({ t: Date.now() - rec.started, text });
-    if (/^Connect failed:/.test(text)) { ui.connectError = friendlyConnectError(text.replace(/^Connect failed:\s*/, '')); ui.connectHelp = /show(ed)? up|Bluetooth is off/.test(ui.connectError); }
+    bleTrack(text);
+    if (/^Connect failed:/.test(text) && !ble.restart) { ui.connectError = friendlyConnectError(text.replace(/^Connect failed:\s*/, '')); ui.connectHelp = /show(ed)? up|Bluetooth is off/.test(ui.connectError); }
     if (ui.drawerOpen) renderLog();
     renderStatusSoon();
     console.log(text);
@@ -2505,6 +2662,7 @@
     ui.connText = text;
     if (connected) {
       tapC304();
+      if (!ui.demo) bleResult('ok');   // C304/C305 found: the shell remembers this device
       ui.cabIRLoadPaused = false;
       ui.cabIRLoadTimedOut = null;
       const d = window.__dev;
@@ -4319,6 +4477,116 @@
   }
   window.__devTools = { get on() { return devTools; }, set: setDevTools };
 
+  // ------------------------------------------------------------------ updates (desktop app)
+  // The shell (src/updates.js) checks GitHub Releases and sends events here; this draws the modal and sends the
+  // answers back. Without the shell (the UX test) __updates.event() drives it and the answers collect in
+  // __updates.actions.
+  //   events: checking | none | error {message} | available {version, notes, url, mode: 'install' | 'notify'}
+  //           | progress {percent} | downloaded {version}
+  const upd = { box: null, stage: '', version: '', actions: [] };
+  function updAnswer(what) {
+    upd.actions.push(what);
+    if (shellBridge && shellBridge.updateAction) shellBridge.updateAction(what, upd.version).catch(() => {});
+  }
+  function closeUpdate() {
+    const b = upd.box;
+    if (!b) return;
+    upd.box = null; upd.stage = '';
+    b.bg.remove();
+    document.removeEventListener('keydown', b.onKey, true);
+  }
+  // Esc and a click outside mean "not now": Remind me later, or Later once downloaded. Nothing while downloading.
+  function updDismiss() {
+    if (upd.stage === 'available') { updAnswer('later'); closeUpdate(); }
+    else if (upd.stage === 'downloaded') { updAnswer('later'); closeUpdate(); toast('The update installs when you quit.'); }
+  }
+  function updateModal() {
+    if (upd.box) return upd.box;
+    const title = el('h2', { dataset: { fk: 'upd-title' } });
+    const notes = el('p', { class: 'upd-notes', dataset: { fk: 'upd-notes' } });
+    const more = el('p', { class: 'upd-more' });
+    const bar = el('div', { class: 'upd-bar' }, el('span'));
+    const pct = el('span', { class: 'upd-pct', dataset: { fk: 'upd-pct' } });
+    const progress = el('div', { class: 'upd-progress', dataset: { fk: 'upd-progress' }, hidden: true }, bar, pct);
+    const row = el('div', { class: 'row' });
+    const dialog = el('div', { class: 'modal upd-modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'updTitle', dataset: { fk: 'upd-modal' } }, title, notes, more, progress, row);
+    title.id = 'updTitle';
+    const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) updDismiss(); } }, dialog);
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); updDismiss(); return; }
+      if (e.key === 'Tab') {
+        const f = [...bg.querySelectorAll('button:not(:disabled), a[href]')];
+        const i = f.indexOf(document.activeElement);
+        e.preventDefault();
+        if (f.length) f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+      }
+      e.stopPropagation();
+    };
+    document.addEventListener('keydown', onKey, true);
+    document.body.append(bg);
+    upd.box = { bg, title, notes, more, progress, bar, pct, row, onKey };
+    return upd.box;
+  }
+  const updButtons = (b, list) => {
+    b.row.replaceChildren(...list.map(([id, label, primary]) => el('button', { class: 'btn' + (primary ? ' primary' : ''), dataset: { fk: 'upd-' + id }, onclick: () => updClick(id) }, label)));
+    const p = b.row.querySelector('.primary');
+    if (p) p.focus();
+  };
+  function updClick(id) {
+    if (id === 'download') {
+      updAnswer('download');
+      if (upd.mode === 'install') { upd.stage = 'downloading'; updateEvent({ type: 'progress', percent: 0 }); }
+      else closeUpdate();   // the release page opens in the browser
+    } else if (id === 'skip') { updAnswer('skip'); closeUpdate(); }
+    else if (id === 'later') updDismiss();
+    else if (id === 'restart') { updAnswer('restart'); upd.stage = 'restarting'; upd.box.row.replaceChildren(); }
+  }
+  function updateEvent(ev) {
+    if (!ev || !ev.type) return;
+    if (ev.type === 'checking') { toast('Checking for updates\u2026'); return; }
+    if (ev.type === 'none') { toast('You\u2019re up to date.'); return; }
+    if (ev.type === 'error') {
+      closeUpdate();
+      toast((ev.during === 'download' ? 'The update couldn\u2019t be downloaded: ' : ev.during === 'install' ? 'The update couldn\u2019t be installed: '
+        : 'Couldn\u2019t check for updates: ') + ev.message);
+      return;
+    }
+    if (ev.type === 'available') {
+      Object.assign(upd, { stage: 'available', version: String(ev.version), mode: ev.mode === 'install' ? 'install' : 'notify' });
+      const b = updateModal();
+      b.title.textContent = 'Version ' + upd.version + ' is available';
+      b.notes.textContent = ev.notes || '';
+      b.notes.hidden = !ev.notes;
+      b.more.replaceChildren(linkEl(ev.url || LINKS.releases, 'Full release notes', 'upd-notes-link'));
+      b.more.hidden = false;
+      b.progress.hidden = true;
+      updButtons(b, [['skip', 'Skip this version'], ['later', 'Remind me later'],
+        upd.mode === 'install' ? ['download', 'Download and install', true] : ['download', 'Download', true]]);
+      return;
+    }
+    if (ev.type === 'progress') {
+      if (!upd.box) return;
+      upd.stage = 'downloading';
+      const p = Math.max(0, Math.min(100, Math.round(ev.percent || 0)));
+      upd.box.progress.hidden = false;
+      upd.box.bar.firstChild.style.width = p + '%';
+      upd.box.pct.textContent = 'Downloading\u2026 ' + p + '\u202f%';
+      upd.box.row.replaceChildren();
+      return;
+    }
+    if (ev.type === 'downloaded') {
+      Object.assign(upd, { stage: 'downloaded', version: String(ev.version) });
+      const b = updateModal();
+      b.title.textContent = 'Version ' + upd.version + ' is ready';
+      b.notes.hidden = !b.notes.textContent;
+      b.more.hidden = !b.more.textContent;
+      b.progress.hidden = true;
+      updButtons(b, [['later', 'Later'], ['restart', 'Restart to update', true]]);
+    }
+  }
+  window.__updates = { event: updateEvent, close: closeUpdate, get stage() { return upd.stage; }, actions: upd.actions };
+  if (shellBridge && shellBridge.onUpdate) shellBridge.onUpdate(updateEvent);
+
   // ------------------------------------------------------------------ toast + modal
   let toastTimer;
   function toast(msg) {
@@ -4849,6 +5117,8 @@
     const auto = toggleSwitch('set-autoconnect', 'Reconnect to the last pedal at launch', shellBridge && pref.get('autoConnect', false), (v) => pref.set('autoConnect', v), !shellBridge);
 
     // Advanced
+    const updSwitch = toggleSwitch('set-autoupdate', 'Check for updates automatically', shellInfo ? shellInfo.autoUpdate !== false : false,
+      (v) => { if (shellBridge && shellBridge.setAutoUpdate) shellBridge.setAutoUpdate(v).catch(() => {}); }, !shellBridge);
     const devSwitch = toggleSwitch('set-devtools', 'Developer tools', devTools, setDevTools);
     const drawerAtLaunch = toggleSwitch('set-drawer', 'Show the Activity drawer at launch', pref.get('drawerAtLaunch', false), (v) => pref.set('drawerAtLaunch', v));
     const reveal = el('button', { class: 'btn small', dataset: { fk: 'set-reveal' }, disabled: !shellBridge ? 'true' : null,
@@ -4875,6 +5145,8 @@
         setRow('', auto),
         setRow('', pedalLine, shellBridge ? forget : null)),
       el('section', {}, el('h3', { text: 'Advanced' }),
+        setRow('', updSwitch),
+        setNote(shellBridge ? 'Checks GitHub for new versions.' : desktopOnly, 'set-autoupdate-note'),
         setRow('', devSwitch),
         setNote('Shows the Activity log, session recording and protocol details. For troubleshooting and development.', 'set-devtools-note'),
         devOnly(setRow('', drawerAtLaunch)),
@@ -5527,7 +5799,7 @@
   window.onC305 = NanoLive.withExactBytes(window.onC305);
   const startDemo = !navigator.bluetooth || window.__FORCE_DEMO || /[?&]demo\b/.test(location.search);
   // Reconnect at launch: the shell grants the user gesture requestDevice() needs and picks the remembered pedal.
-  window.__autoConnect = () => { window.__autoConnect = null; return doConnect(); };
+  window.__autoConnect = () => { window.__autoConnect = null; ble.next = { auto: true }; return doConnect(); };
   if (startDemo) demo.start();
   else if (shellBridge && pref.get('autoConnect', false)) shellBridge.autoConnect().catch(() => {});
 })();

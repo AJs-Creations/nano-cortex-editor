@@ -2416,6 +2416,302 @@ async function run() {
   await js('localStorage.removeItem("settings.firmwareWarned")');
   await loadDemo('');
 
+  // ---------------------------------------------------------------- Bluetooth chooser (issue #15)
+  // The shell's picker (src/bt-picker.js) with fake devices, its chooser drawn by this page and answered with real
+  // clicks. The test carries the messages between them, as the shell's IPC does: views to __bleChooser.show(),
+  // the page's choices (__ble.choices) and connect results (__ble.results) back to the picker.
+  {
+    const { createBluetoothPicker, sortDevices, realName } = require('../src/bt-picker');
+    const dev = (deviceId, deviceName = '') => ({ deviceId, deviceName });
+    const OTHERS = [dev('AA:01', 'JBL Flip 5'), dev('AA:02', 'Razer Nomv2X LE'), dev('AA:03', 'Bose QC45'), dev('AA:04'),
+      dev('AA:05', 'Logitech MX Keys'), dev('AA:06', 'Nanoleaf Shapes'), dev('AA:07', 'Unknown or Unsupported Device (AA:07)'),
+      dev('AA:08', 'Galaxy Buds2'), dev('AA:09', 'Sonos Roam'), dev('AA:0A', 'Cortex Speaker'), dev('AA:0B', 'Apple Watch'), dev('AA:0C')];
+    const NANO = dev('NN:01', 'Neural DSP Nano Cortex');
+    let saved = null;
+    let pageQueue = Promise.resolve();
+    const makePicker = () => {
+      const p = { again: [], hints: [], picked: [] };
+      p.picker = createBluetoothPicker({
+        store: { get: () => saved, set: (v) => { saved = v; } },
+        show: (view) => { pageQueue = pageQueue.then(() => js('__bleChooser.show(' + JSON.stringify(view) + ')')); },
+        hint: async (h) => { p.hints.push(h); }, connectAgain: (o) => p.again.push(o), chooserMs: 40, autoMs: 150,
+      });
+      p.cb = (id) => p.picked.push(id);
+      return p;
+    };
+    const synced = async () => { await pageQueue; await frame(); };
+    const toShell = async (p) => {   // the page's answers, as the preload bridge would carry them
+      for (const c of await js('__ble.choices.splice(0)')) p.picker.choose(c);
+      for (const k of await js('__ble.results.splice(0)')) p.picker.result(k);
+    };
+    const chooserUp = () => js('!!document.querySelector(".bt-chooser")');
+    const rowsText = () => js('[...document.querySelectorAll(".bt-row")].map(r => r.querySelector(".name").textContent + (r.querySelector(".tag") ? " [" + r.querySelector(".tag").textContent + "]" : "") + (r.textContent === r.querySelector(".name").textContent + (r.querySelector(".tag")?.textContent || "") ? "" : " <stray text>"))');
+    // The core's log lines when the picked device has no A002/A003 (from the issue's log).
+    const failNoService = () => js(`(() => { for (const u of ['0000a002', '0000a003']) log('Service unavailable ' + u + '-0000-1000-8000-00805f9b34fb: No Services matching UUID ' + u + '-0000-1000-8000-00805f9b34fb found in Device.');
+      log('Connect failed: C304/C305 not found under A002/A003'); })()`);
+    await js('__ble.choices.length = 0; __ble.results.length = 0');
+
+    // Order and names
+    const order = sortDevices(OTHERS.map(d => ({ id: d.deviceId, name: realName(d.deviceName, d.deviceId) })), { notNano: new Set(['AA:02']) }).map(d => d.id);
+    check('chooser order: Nano-like names, then unnamed devices, then the rest, then devices that failed the service check',
+      order.join() === 'AA:06,AA:0A,AA:04,AA:07,AA:0C,AA:01,AA:03,AA:05,AA:08,AA:09,AA:0B,AA:02', order.join());
+    check('a name made from the address ("Unknown or Unsupported Device (…)") counts as unnamed', realName('Unknown or Unsupported Device (AA:07)', 'AA:07') === '' && realName('Neural DSP Nano Cortex', 'NN:01') === 'Neural DSP Nano Cortex');
+
+    // A fresh install scans for the Nano's service; a pedal found that way is taken at once, even without a name.
+    let p = makePicker();
+    check('with nothing remembered, Connect scans for the Nano Cortex service only ("nano" scan)', p.picker.beginRequest({}) === 'nano');
+    p.picker.onSelect([dev('NN:02')], p.cb);
+    check('"nano" scan: the first device offering the service is picked without a chooser, even unnamed', p.picked.join() === 'NN:02' && !(await chooserUp()));
+    check('picking it does not remember it yet', saved === null);
+    await js('__ui.demo = false; setStatus("Connected", true); __ui.demo = true'); await toShell(p);
+    check('remembered once the editor found C304/C305 on it (the page reports "ok")', saved && saved.id === 'NN:02' && saved.via === 'nano' && saved.name === 'Nano Cortex', JSON.stringify(saved));
+    saved = null;
+
+    // Nothing found yet: the chooser waits, with the pairing hint and the way to every device.
+    p = makePicker();
+    p.picker.beginRequest({});
+    p.picker.onSelect([], p.cb);
+    await waitFor(chooserUp); await synced();
+    check('"nano" scan, nothing yet: "Looking for your Nano Cortex" with the pairing hint',
+      (await js('document.querySelector("[data-fk=bt-title]").textContent')) === 'Looking for your Nano Cortex'
+      && /^Put the Nano Cortex in pairing mode: hold EXIT \+ CAPTURE for about a second, until the Gain ring lights up\./.test(await js('document.querySelector("[data-fk=bt-hint]").textContent')),
+      await js('document.querySelector("[data-fk=bt-hint]").textContent'));
+    check('"nano" scan: an empty list explains itself and offers Show all Bluetooth devices', await js('!!document.querySelector("[data-fk=bt-empty]") && !document.querySelector("[data-fk=bt-all]").hidden'));
+    await shot('bt-chooser-waiting');
+    await click('[data-fk="bt-all"]');
+    check('Show all Bluetooth devices closes the chooser and asks for an "all" scan', !(await chooserUp()) && JSON.stringify(await js('__ble.choices')) === '["all"]');
+    await toShell(p);
+    check('… which cancels the filtered request (the page starts the next one)', p.picked.join() === '' && p.picked.length === 1);
+
+    // Every device nearby: all listed, sorted, live, nothing remembered by picking.
+    p = makePicker();
+    check('the fallback list is an "all" scan', p.picker.beginRequest({ want: 'all' }) === 'all');
+    p.picker.onSelect(OTHERS.slice(0, 3), p.cb);
+    await waitFor(chooserUp); await synced();
+    check('"all" scan: no Nano-like name, so the chooser opens', (await js('document.querySelector("[data-fk=bt-title]").textContent')) === 'Choose your Nano Cortex' && (await js('document.querySelector("[data-fk=bt-all]").hidden')));
+    p.picker.onSelect(OTHERS, p.cb);
+    await synced();
+    const listed = await rowsText();
+    check('more than 8 devices: all 12 are listed (no cap)', listed.length === 12, listed.length + ': ' + listed.join(' | '));
+    check('the list updates while the chooser stays open', await chooserUp() && /Scanning… 12 devices nearby\./.test(await js('document.querySelector("[data-fk=bt-status]").textContent')));
+    check('in the chooser: Nano-like names first, then unnamed devices, then the rest',
+      listed.slice(0, 5).join(' | ') === 'Nanoleaf Shapes [Looks like a Nano Cortex] | Cortex Speaker [Looks like a Nano Cortex] | Unnamed device · …AA04 | Unnamed device · …AA07 | Unnamed device · …AA0C'
+      && listed[5] === 'JBL Flip 5', listed.join(' | '));
+    check('the list scrolls instead of growing past the window', await js('(() => { const l = document.querySelector(".bt-list"); return l.scrollHeight > l.clientHeight + 20 && document.querySelector(".bt-chooser").getBoundingClientRect().bottom <= innerHeight; })()'));
+    await shot('bt-chooser-all');
+    const razer = await js('[...document.querySelectorAll(".bt-row")].findIndex(r => r.dataset.id === "AA:02")');
+    await click('[data-fk="bt-dev-' + razer + '"]');   // scrolled into view, then a real click
+    await toShell(p);
+    check('clicking a row picks that device', p.picked.join() === 'AA:02' && !(await chooserUp()));
+    await failNoService(); await toShell(p);
+    check('a non-Nano pick is not remembered (its services were not found)', saved === null && p.picker.notNano.has('AA:02'));
+    check('… and the chooser is asked for again, with a notice', JSON.stringify(p.again) === '[{"want":"all","choose":true,"notice":"not-nano"}]', JSON.stringify(p.again));
+    p.picker.beginRequest(p.again[0]);
+    p.picker.onSelect(OTHERS, p.cb);
+    await waitFor(chooserUp); await synced();
+    const again = await rowsText();
+    check('the device that failed sorts last, marked "Not a Nano Cortex", and the notice says why',
+      again[again.length - 1] === 'Razer Nomv2X LE [Not a Nano Cortex]' && /isn’t a Nano Cortex/.test(await js('document.querySelector("[data-fk=bt-notice]").textContent')), again.join(' | '));
+    p.picker.onSelect([...OTHERS, NANO], p.cb);
+    await synced();
+    check('the Nano Cortex turning up while the chooser is open is picked by its name, and the chooser closes', p.picked.join() === 'AA:02,NN:01' && !(await chooserUp()));
+    await js('__ui.demo = false; setStatus("Connected", true); __ui.demo = true'); await toShell(p);
+    check('found via the full list: remembered with via "all", so the next scan starts there', saved && saved.id === 'NN:01' && saved.name === 'Neural DSP Nano Cortex' && saved.via === 'all' && p.picker.beginRequest({}) === 'all', JSON.stringify(saved));
+    p.picker.onSelect([NANO], p.cb);
+    check('the remembered pedal is picked at once', p.picked.slice(-1)[0] === 'NN:01');
+    await js('__ui.connectError = ""; render()');
+
+    // 1.0.0 remembered a Razer headset: the service failure forgets it and the chooser opens again.
+    saved = { id: 'AA:02', name: 'Razer Nomv2X LE', at: '2026-10-17T13:47:35.739Z' };
+    p = makePicker();
+    p.picker.beginRequest({ want: 'all' });
+    p.picker.onSelect(OTHERS, p.cb);
+    check('a remembered device is picked without asking', p.picked.join() === 'AA:02');
+    await failNoService(); await toShell(p);
+    check('a service failure (No Services matching A002/A003) clears the remembered device', saved === null);
+    check('… and asks for the chooser again', p.again.length === 1 && p.again[0].choose === true);
+    p.picker.beginRequest(p.again[0]);
+    p.picker.onSelect(OTHERS, p.cb);
+    await waitFor(chooserUp); await synced();
+    check('the forgotten device is not picked again; the chooser opens at once', p.picked.join() === 'AA:02' && await chooserUp());
+    await key('Escape'); await toShell(p);
+    check('Esc cancels the chooser', !(await chooserUp()) && p.picked.join() === 'AA:02,');
+    await js('__ui.connectError = ""; render()');
+
+    // A dropped link while looking for the services proves nothing: the remembered pedal stays.
+    saved = { id: 'NN:01', name: 'Neural DSP Nano Cortex', at: '2026-10-20T10:00:00.000Z', via: 'nano' };
+    p = makePicker();
+    p.picker.beginRequest({});
+    p.picker.onSelect([NANO], p.cb);
+    await js(`(() => { log('Requesting Nano Cortex...'); log('Service unavailable 0000a002-0000-1000-8000-00805f9b34fb: GATT Server is disconnected. Cannot retrieve services.'); log('Connect failed: C304/C305 not found under A002/A003'); })()`);
+    await toShell(p);
+    check('a dropped link during service discovery keeps the remembered pedal', saved && saved.id === 'NN:01' && p.again.length === 0);
+    await js('__ui.connectError = ""; render()');
+
+    // Scan again, and reconnect at launch.
+    p = makePicker();
+    p.picker.beginRequest({ want: 'all' });
+    p.picker.onSelect([dev('AA:01', 'JBL Flip 5')], p.cb);
+    await waitFor(chooserUp); await synced();
+    await click('[data-fk="bt-rescan"]');
+    check('Scan again closes the chooser and asks for a new scan', !(await chooserUp()) && (await js('__ble.choices.slice(-1)[0]')) === 'rescan');
+    await toShell(p);
+    check('… cancelling the running request first', p.picked.join() === '');
+    p = makePicker();
+    p.picker.beginRequest({ auto: true });
+    p.picker.onSelect([dev('NN:03', 'Neural DSP Nano Cortex'), ...OTHERS], p.cb);
+    await waitFor(() => p.picked.length > 0, { timeout: 2000 });
+    check('reconnect at launch takes only the remembered pedal: another Nano is not picked, no chooser', p.picked.join() === '' && p.hints.join() === 'auto-none' && !(await chooserUp()));
+    saved = null;
+    await js('__ble.choices.length = 0; __ble.results.length = 0; __ui.connectError = ""; render()');
+  }
+
+  // ---------------------------------------------------------------- update notifications
+  // src/updates.js (the shell's side) with a fake electron-updater and fake timers; its events drive the page's modal
+  // (__updates.event, as the preload bridge does) and the modal's answers (__updates.actions) go back to it.
+  {
+    const { createUpdates, installMode, notesExcerpt, FIRST_MS, DAY_MS } = require('../src/updates');
+    const { EventEmitter } = require('events');
+    check('updates: the macOS zip, the NSIS installer and the AppImage install themselves; the portable exe and the deb only link to the release',
+      installMode('darwin', {}) === 'install' && installMode('win32', {}) === 'install' && installMode('win32', { PORTABLE_EXECUTABLE_FILE: 'C:\\x\\nce.exe' }) === 'notify'
+      && installMode('linux', { APPIMAGE: '/home/x/nce.AppImage' }) === 'install' && installMode('linux', {}) === 'notify');
+    const HTML = '<h3>Fixed</h3>\n<ul>\n<li>Connecting on a computer with many Bluetooth devices (<a href="https://github.com/x">#15</a>).</li>\n<li>Only a real Nano Cortex is remembered &amp; reused.</li>\n</ul>\n<hr>\n<p>macOS builds are signed with a Developer ID.</p>';
+    check('release notes become plain text: headings, bullets, entities; the footer after the rule is left out',
+      notesExcerpt(HTML) === 'Fixed\n• Connecting on a computer with many Bluetooth devices (#15).\n• Only a real Nano Cortex is remembered & reused.', JSON.stringify(notesExcerpt(HTML)));
+    const long = notesExcerpt('word '.repeat(200), 100);
+    check('long release notes are cut at a word with an ellipsis', long.length <= 100 && long.endsWith('…') && !/wor…$/.test(long), JSON.stringify(long));
+
+    let settings = { auto: true, skipped: null };
+    let pageQueue = Promise.resolve();
+    const make = (mode) => {
+      const u = new EventEmitter();
+      u.calls = []; u.onCheck = null;
+      u.checkForUpdates = async () => { u.calls.push('check'); if (u.onCheck) return u.onCheck(); return {}; };
+      u.downloadUpdate = async () => { u.calls.push('download'); };
+      u.quitAndInstall = (...a) => u.calls.push('quitAndInstall ' + a.join(','));
+      const t = { timers: [], setTimeout: (fn, ms) => t.timers.push({ fn, ms, every: false, on: true }), setInterval: (fn, ms) => t.timers.push({ fn, ms, every: true, on: true }) };
+      t.clearTimeout = t.clearInterval = (id) => { if (t.timers[id - 1]) t.timers[id - 1].on = false; };
+      const r = { u, t, opened: [], events: [] };
+      r.up = createUpdates({
+        updater: u, store: { get: () => settings, set: (patch) => Object.assign(settings, patch) },
+        send: (ev) => { r.events.push(ev); pageQueue = pageQueue.then(() => js('__updates.event(' + JSON.stringify(ev) + ')')); },
+        openExternal: (url) => r.opened.push(url), currentVersion: '1.0.1', mode, releaseUrl: (v) => LINKS.releases + '/tag/v' + v, timers: t,
+      });
+      return r;
+    };
+    const synced = async () => { await pageQueue; await frame(); };
+    const answer = async (r) => { for (const a of await js('__updates.actions.splice(0)')) r.up.action(a); };   // the page's answers, as the bridge carries them
+    const modalUp = () => js('!!document.querySelector(".upd-modal")');
+    const buttons = () => js('[...document.querySelectorAll(".upd-modal .row button")].map(b => b.textContent).join("|")');
+    const toastText = () => js('document.getElementById("toast").classList.contains("show") ? document.getElementById("toast").textContent : ""');
+    const offer = async (r, version, notes = HTML) => { r.u.emit('update-available', { version, releaseNotes: notes }); await synced(); };
+
+    let r = make('install');
+    check('updates: nothing downloads by itself; a download the user started installs on quit', r.u.autoDownload === false && r.u.autoInstallOnAppQuit === true);
+    r.up.start();
+    check('updates: the first check ' + FIRST_MS / 1000 + ' s after launch, then every 24 hours', r.t.timers.length === 2 && r.t.timers[0].ms === FIRST_MS && !r.t.timers[0].every && r.t.timers[1].ms === DAY_MS && r.t.timers[1].every && DAY_MS === 86400000);
+    r.t.timers[0].fn();
+    check('the scheduled check asks the updater', r.u.calls.join() === 'check');
+
+    await offer(r, '1.0.2');
+    check('an update opens the modal: the new version, a notes excerpt and a link to the full notes',
+      await modalUp() && (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.2 is available'
+      && (await js('document.querySelector("[data-fk=upd-notes]").textContent')).startsWith('Fixed\n• Connecting on a computer')
+      && (await js('document.querySelector("[data-fk=upd-notes-link]").href')) === LINKS.releases + '/tag/v1.0.2');
+    check('the three choices: Skip this version, Remind me later, Download and install', (await buttons()) === 'Skip this version|Remind me later|Download and install', await buttons());
+    await shot('update-available');
+    await click('[data-fk="upd-later"]'); await answer(r);
+    check('Remind me later closes the modal and stores nothing', !(await modalUp()) && settings.skipped === null);
+    r.t.timers[1].fn(); await offer(r, '1.0.2');
+    check('… and the next scheduled check offers it again', await modalUp());
+    await click('[data-fk="upd-skip"]'); await answer(r);
+    check('Skip this version closes the modal and stores the version', !(await modalUp()) && settings.skipped === '1.0.2');
+    const n0 = r.events.length;
+    r.t.timers[1].fn(); await offer(r, '1.0.2');
+    check('a skipped version is never offered by the automatic checks', r.events.length === n0 && !(await modalUp()));
+    await offer(r, '1.0.3');
+    check('a newer version is offered again', await modalUp() && (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.3 is available');
+    await key('Escape'); await answer(r);
+    check('Esc means Remind me later', !(await modalUp()) && settings.skipped === '1.0.2');
+
+    // Download and install: progress, then Restart to update / Later.
+    await offer(r, '1.0.3');
+    await click('[data-fk="upd-download"]'); await answer(r);
+    check('Download and install starts the download and shows progress', r.u.calls.includes('download') && await js('!document.querySelector("[data-fk=upd-progress]").hidden') && (await buttons()) === '');
+    r.u.emit('download-progress', { percent: 42.4 }); await synced();
+    check('the progress bar follows the download', (await js('document.querySelector("[data-fk=upd-pct]").textContent')) === 'Downloading… 42\u202f%' && (await js('document.querySelector(".upd-bar > span").style.width')) === '42%');
+    await key('Escape');
+    check('Esc does nothing while downloading', await modalUp());
+    await shot('update-downloading');
+    r.u.emit('update-downloaded', { version: '1.0.3' }); await synced();
+    check('downloaded: "Version 1.0.3 is ready" with Later and Restart to update', (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.3 is ready' && (await buttons()) === 'Later|Restart to update', await buttons());
+    await click('[data-fk="upd-later"]'); await answer(r);
+    check('Later closes it and says the update installs on quit', !(await modalUp()) && (await toastText()) === 'The update installs when you quit.' && !r.u.calls.some(c => c.startsWith('quitAndInstall')));
+    const c0 = r.u.calls.length;
+    await r.up.check(true); await synced();
+    check('Check for Updates… after a download offers the restart again, without checking', (await buttons()) === 'Later|Restart to update' && r.u.calls.length === c0, (await buttons()) + ' ' + r.u.calls.join());
+    await click('[data-fk="upd-restart"]'); await answer(r);
+    check('Restart to update quits and installs (and relaunches)', r.u.calls.includes('quitAndInstall false,true'));
+    await js('__updates.close()');
+
+    // Manual checks answer; automatic ones stay quiet unless there is something to offer.
+    r = make('install');
+    r.u.onCheck = () => { r.u.emit('update-not-available', { version: '1.0.1' }); return {}; };
+    await r.up.check(true); await synced();
+    check('Check for Updates…: "You’re up to date."', (await toastText()) === 'You’re up to date.' && r.events.map(e => e.type).join() === 'checking,none');
+    r.u.onCheck = () => { r.u.emit('error', new Error('Cannot find latest-mac.yml in the latest release artifacts\nstack…')); throw new Error('x'); };
+    await r.up.check(true); await synced();
+    check('Check for Updates…: an error shows as a toast', (await toastText()) === 'Couldn’t check for updates: Cannot find latest-mac.yml in the latest release artifacts', await toastText());
+    const e0 = r.events.length;
+    await r.up.check(false); await synced();
+    check('an automatic check that fails says nothing', r.events.length === e0);
+    r.u.onCheck = () => { r.u.emit('update-available', { version: '1.0.2', releaseNotes: HTML }); return {}; };   // the updater emits during the check
+    await r.up.check(true); await synced();
+    r.u.onCheck = null;
+    check('Check for Updates… offers a skipped version (it was asked for)', await modalUp() && (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.2 is available');
+    await click('[data-fk="upd-download"]'); await answer(r);
+    r.u.emit('error', new Error('net::ERR_INTERNET_DISCONNECTED')); await synced();
+    check('a failed download closes the modal with a toast', !(await modalUp()) && (await toastText()) === 'The update couldn’t be downloaded: net::ERR_INTERNET_DISCONNECTED', await toastText());
+    // macOS: the zip is in ('update-downloaded'), then Squirrel.Mac refuses its signature (seen with ad-hoc builds).
+    r.u.onCheck = () => { r.u.emit('update-available', { version: '1.0.3', releaseNotes: '' }); return {}; };
+    await r.up.check(true); await synced(); r.u.onCheck = null;
+    await click('[data-fk="upd-download"]'); await answer(r);
+    r.u.emit('update-downloaded', { version: '1.0.3' }); await synced();
+    r.u.emit('error', new Error('Error: Code signature at URL file:///x/Nano%20Cortex%20Editor.app/ did not pass validation: code failed to satisfy specified code requirement(s)')); await synced();
+    check('an install refused after the download (Squirrel.Mac) closes the modal: nothing to restart', !(await modalUp()) && /^The update couldn’t be installed: Error: Code signature/.test(await toastText()) && r.up.state.downloaded === null, await toastText());
+    await r.up.check(true); await synced();
+    check('… and the next Check for Updates… checks again', r.u.calls.filter(c => c === 'check').length >= 3);
+
+    // Notify only (the portable exe, the deb): Download opens the release page.
+    r = make('notify');
+    check('notify-only builds never install on quit', r.u.autoInstallOnAppQuit === false);
+    await offer(r, '1.0.3');
+    check('notify-only: Skip this version, Remind me later, Download', (await buttons()) === 'Skip this version|Remind me later|Download', await buttons());
+    await click('[data-fk="upd-download"]'); await answer(r);
+    check('notify-only: Download opens the release page and downloads nothing', !(await modalUp()) && r.opened.join() === LINKS.releases + '/tag/v1.0.3' && !r.u.calls.includes('download'));
+
+    // The setting: off stops the schedule, on starts it again.
+    r = make('install');
+    r.up.start();
+    r.up.setAuto(false);
+    check('turning automatic checks off stores it and cancels the schedule', settings.auto === false && r.t.timers.every(x => !x.on));
+    const r2 = make('install'); r2.up.start();
+    check('with automatic checks off, nothing is scheduled at launch', r2.t.timers.length === 0);
+    r2.up.setAuto(true);
+    check('turning them on schedules them again', settings.auto === true && r2.t.timers.filter(x => x.on).length === 2);
+    settings = { auto: true, skipped: null };
+
+    // Settings → General → Advanced, and the Help menu.
+    await key(',', [MOD]);
+    await waitFor('!!document.querySelector(\'[data-fk="set-autoupdate"]\')');
+    check('Settings → Advanced: "Check for updates automatically", disabled outside the desktop app',
+      (await js('document.querySelector(\'[data-fk="set-autoupdate"]\').textContent')) === 'Check for updates automatically' && await js('document.querySelector(\'[data-fk="set-autoupdate"]\').disabled')
+      && (await js('document.querySelector(\'[data-fk="set-autoupdate-note"]\').textContent')) === 'Only in the desktop app.');
+    await key('Escape'); await waitFor('!document.querySelector(".modal")');
+    const help = menuFor(false).join(',');
+    check('Help → Check for Updates…', /Show Log File,-,Check for Updates…,Support the Project…/.test(help), help);
+  }
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }
 
