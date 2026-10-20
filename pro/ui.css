@@ -768,6 +768,9 @@ body:not(.dev-tools) .dev-only { display: none !important; }
 .set-ctl input[type=range] { width: 200px; }
 .set-unit { color: var(--faint); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .modal .set-note, .set-note { margin: 0; color: var(--faint); font-size: 12px; flex: 1 1 260px; }
+.settings h4.set-sub { margin: 10px 0 2px; font-size: 12px; font-weight: 600; color: var(--dim); }
+.set-ctl .snd-play { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; }
+.set-ctl .snd-file { max-width: 200px; }
 .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
 .swatch { width: 26px; height: 26px; border-radius: 50%; border: 0; padding: 0; background: var(--sw); cursor: pointer; box-shadow: inset 0 0 0 1px #ffffff22; }
 .swatch:hover { transform: scale(1.08); }

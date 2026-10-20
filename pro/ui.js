@@ -677,6 +677,11 @@
     gap: { on: false, play: 3, mute: 1 },
   });
   const levelDefaults = () => ({ accent: 1, main: 1, sub: 1 });
+  // The click sounds per role (Settings → Metronome → Sounds): a built-in voice each, and optionally the user's own
+  // sample, which replaces it (metro.samples[role] = { name }; the copy lives in the shell, src/metro-samples.js).
+  const SOUND_ROLES = [['accent', 'Accent'], ['main', 'Main beat'], ['sub', 'Subdivision']];
+  const soundDefaults = (v = 'click') => ({ accent: v, main: v, sub: v });
+  const VOICE_IDS = ['click', 'woodblock', 'tick', 'beep', 'cowbell'];   // the built-in voices (VOICES below), in menu order
 
   // Off-beat position inside a beat. Swing 0 % is straight; 100 % moves the off-beat to the
   // triplet position (2/3 for eighths; each sixteenth pair likewise inside its half beat).
@@ -730,7 +735,7 @@
 
   const metro = {
     open: false, running: false, mode: 'simple', opensIn: 'simple',
-    bpm: 100, beats: 4, volume: 0.6, output: '', sound: 'click',
+    bpm: 100, beats: 4, volume: 0.6, output: '', sounds: soundDefaults(), samples: {},
     adv: advDefaults(), levels: levelDefaults(),
     // Tempo source. Later: follow the preset's tempo (two-way) once the pedal's tempo message is decoded.
     tempoFollowsPreset: false, presetTempo: null,
@@ -743,9 +748,18 @@
   metro.adv = normSetup(metro.adv);
   metro.levels = Object.assign(levelDefaults(), metro.levels);
   for (const k of Object.keys(levelDefaults())) { const v = Number(metro.levels[k]); metro.levels[k] = Number.isFinite(v) ? clamp(v, 0, 1) : 1; }
+  // One "sound" for every role before per-role sounds: it becomes each role's sound.
+  metro.sounds = Object.assign(soundDefaults(typeof metro.sound === 'string' ? metro.sound : 'click'), metro.sounds);
+  delete metro.sound;
+  metro.samples = metro.samples && typeof metro.samples === 'object' ? metro.samples : {};
+  for (const [k] of SOUND_ROLES) {
+    if (!VOICE_IDS.includes(metro.sounds[k])) metro.sounds[k] = 'click';
+    if (metro.samples[k] && typeof metro.samples[k].name !== 'string') delete metro.samples[k];
+  }
+  for (const k of Object.keys(metro.samples)) if (!SOUND_ROLES.some(([r]) => r === k)) delete metro.samples[k];
   if (metro.opensIn !== 'advanced') metro.opensIn = 'simple';
   metro.mode = metro.opensIn;
-  const saveMetro = () => { try { localStorage.setItem('metronome', JSON.stringify({ bpm: metro.bpm, beats: metro.beats, volume: metro.volume, output: metro.output, sound: metro.sound, opensIn: metro.opensIn, adv: metro.adv, levels: metro.levels })); } catch { /* fine */ } };
+  const saveMetro = () => { try { localStorage.setItem('metronome', JSON.stringify({ bpm: metro.bpm, beats: metro.beats, volume: metro.volume, output: metro.output, sounds: metro.sounds, samples: metro.samples, opensIn: metro.opensIn, adv: metro.adv, levels: metro.levels })); } catch { /* fine */ } };
   // The one tempo the scheduler reads.
   const effectiveBpm = () => (metro.tempoFollowsPreset && Number(metro.presetTempo) > 0 ? clamp(Number(metro.presetTempo), 30, 300) : metro.bpm);
   // What the scheduler plays: one pattern per layer. Today a single layer; a polyrhythm adds a
@@ -838,29 +852,160 @@
       tone(at, 'square', 560 * k, bp, 0.11); tone(at, 'square', 845 * k, bp, 0.11);
     } },
   };
-  // Per role: which Levels slider scales it, a fixed trim, and how the chosen synth voice renders it.
+  // Per role: which Levels slider scales it, a fixed trim, which sound plays it (Settings → Metronome → Sounds), and how
+  // a built-in voice renders it. Soft beats play the main sound, quieter.
   const ROLE_MIX = {
-    accent: { level: 'accent', trim: 1, accent: true, pitch: 1 },
-    normal: { level: 'main', trim: 1, accent: false, pitch: 1 },
-    soft: { level: 'main', trim: 0.45, accent: false, pitch: 1 },
-    sub: { level: 'sub', trim: 0.5, accent: false, pitch: 1.5 },
+    accent: { level: 'accent', sound: 'accent', trim: 1, accent: true, pitch: 1 },
+    normal: { level: 'main', sound: 'main', trim: 1, accent: false, pitch: 1 },
+    soft: { level: 'main', sound: 'main', trim: 0.45, accent: false, pitch: 1 },
+    sub: { level: 'sub', sound: 'sub', trim: 0.5, accent: false, pitch: 1.5 },
   };
   const roleGain = (role) => { const m = ROLE_MIX[role]; return m ? metro.volume * metro.levels[m.level] * m.trim : 0; };
-  // The sound source for a role: { play(at, gain) }. Today the synth voice picked in Settings;
-  // a decoded user sample per role can be returned here later.
+
+  // Custom samples. The shell does the file dialog, the checks, the copy into its data folder and the reads
+  // (src/metro-samples.js, IPC 'metro-sample'); this page names only the operation and the role, decodes the bytes
+  // once into an AudioBuffer (the first 2 s) and plays it through the same graph as the built-ins. The UX test swaps
+  // the bridge for its own (__metro.samples.setBridge), which also runs the launch-time load again.
+  const SAMPLE_MAX_S = 2;
+  const sampleBufs = {};   // role (accent | main | sub) → AudioBuffer
+  const samples = { bridge: shellBridge && shellBridge.metroSample ? (op, role) => shellBridge.metroSample(op, role) : null };
+  // Chromium decodes WAV, MP3, AAC/M4A, FLAC and Ogg (Vorbis, Opus) on every platform, but not AIFF: uncompressed
+  // AIFF and AIFF-C (what Logic and GarageBand export) are read here. Big-endian PCM unless AIFF-C says 'sowt'
+  // (little-endian) or 'fl32'/'fl64' (float); the sample rate is an 80-bit float. Returns null for anything else.
+  function readAiff(bytes) {
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const tag = (o) => (o + 4 <= bytes.length ? String.fromCharCode(bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]) : '');
+    if (tag(0) !== 'FORM' || (tag(8) !== 'AIFF' && tag(8) !== 'AIFC')) return null;
+    let ch = 0, frames = 0, bits = 0, rate = 0, comp = 'NONE', data = -1;
+    for (let o = 12; o + 8 <= bytes.length;) {
+      const id = tag(o), size = v.getUint32(o + 4), body = o + 8;
+      if (id === 'COMM' && body + 18 <= bytes.length) {
+        ch = v.getUint16(body); frames = v.getUint32(body + 2); bits = v.getUint16(body + 6);
+        const exp = v.getUint16(body + 8) & 0x7fff;
+        rate = (v.getUint32(body + 10) * 2 ** 32 + v.getUint32(body + 14)) * 2 ** (exp - 16383 - 63);
+        if (tag(8) === 'AIFC' && size >= 22) comp = tag(body + 18);
+      } else if (id === 'SSND' && body + 8 <= bytes.length) data = body + 8 + v.getUint32(body);
+      o = body + size + (size & 1);
+    }
+    const float = comp === 'fl32' || comp === 'FL32' || comp === 'fl64' || comp === 'FL64';
+    if (!['NONE', 'twos', 'sowt'].includes(comp) && !float) return null;
+    const bps = float ? (comp.endsWith('64') ? 8 : 4) : Math.ceil(bits / 8);
+    if (!ch || !rate || data < 0 || bps < 1 || bps > 8 || (!float && bps > 4)) return null;
+    frames = Math.min(frames, Math.floor((bytes.length - data) / (bps * ch)), Math.ceil(rate * SAMPLE_MAX_S) + 1);
+    if (frames < 1) return null;
+    const buf = new AudioBuffer({ numberOfChannels: ch, length: frames, sampleRate: rate });
+    const le = comp === 'sowt', scale = 2 ** (bps * 8 - 1);
+    for (let c = 0; c < ch; c++) {
+      const out = buf.getChannelData(c);
+      for (let i = 0, o = data + c * bps; i < frames; i++, o += bps * ch) {
+        if (float) { out[i] = bps === 8 ? v.getFloat64(o) : v.getFloat32(o); continue; }
+        let x = 0;
+        for (let b = 0; b < bps; b++) x = x * 256 + bytes[le ? o + bps - 1 - b : o + b];
+        out[i] = (x >= scale ? x - 2 * scale : x) / scale;
+      }
+    }
+    return buf;
+  }
+  // Bytes → AudioBuffer (throws when it isn't audio). An offline context: no output device needed at launch.
+  async function decodeSample(bytes) {
+    bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    let buf = null;
+    try { buf = await new OfflineAudioContext(1, 1, 48000).decodeAudioData(bytes.slice().buffer); }
+    catch { try { buf = readAiff(bytes); } catch { buf = null; } }
+    if (!buf || !buf.length) throw new Error('not audio');
+    return buf;
+  }
+  // The first 2 s, with a 5 ms fade so a cut doesn't click.
+  function trimSample(buf) {
+    const max = Math.round(buf.sampleRate * SAMPLE_MAX_S);
+    if (buf.length <= max) return buf;
+    const out = new AudioBuffer({ numberOfChannels: buf.numberOfChannels, length: max, sampleRate: buf.sampleRate });
+    const fade = Math.min(max, Math.round(buf.sampleRate * 0.005));
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c).slice(0, max);
+      for (let i = 0; i < fade; i++) d[max - 1 - i] *= i / fade;
+      out.copyToChannel(d, c);
+    }
+    return out;
+  }
+  const sampleLabel = (role) => (SOUND_ROLES.find(([r]) => r === role) || [])[1] || role;
+  // Settings → "Custom sample…": the shell's dialog, then decode, then the shell copies it. Resolves true when set.
+  async function pickSample(role) {
+    if (!samples.bridge) return false;
+    const r = await samples.bridge('pick', role).catch(() => null);
+    if (!r || r.canceled) return false;
+    if (r.error === 'size') { toast('“' + r.name + '” is larger than 5 MB.'); return false; }
+    if (r.error || !r.bytes) { toast('Couldn’t read “' + (r.name || 'the file') + '”.'); return false; }
+    let buf;
+    try { buf = await decodeSample(r.bytes); }
+    catch {
+      samples.bridge('discard', role).catch(() => null);
+      toast('“' + r.name + '” isn’t audio the metronome can play.');
+      log('Metronome: ' + r.name + ' could not be decoded.');
+      return false;
+    }
+    const saved = await samples.bridge('save', role).catch(() => null);
+    if (!saved || !saved.ok) { toast('Couldn’t copy “' + r.name + '”.'); return false; }
+    sampleBufs[role] = trimSample(buf);
+    metro.samples[role] = { name: r.name };
+    saveMetro();
+    log('Metronome: ' + sampleLabel(role) + ' plays ' + r.name + (buf.duration > SAMPLE_MAX_S ? ' (first 2 s)' : '') + '.');
+    if (buf.duration > SAMPLE_MAX_S) toast('“' + r.name + '” is trimmed to its first 2 seconds.');
+    return true;
+  }
+  // Back to the built-in sound (Reset, or a built-in picked from the menu): the shell deletes its copy.
+  async function resetSample(role) {
+    const had = !!metro.samples[role];
+    delete metro.samples[role]; delete sampleBufs[role];
+    saveMetro();
+    if (had && samples.bridge) await samples.bridge('reset', role).catch(() => null);
+  }
+  // At launch: decode every stored sample once. A missing or unreadable one falls back to the built-in sound (the
+  // setting goes back too, so the notice doesn't repeat) with one toast for all of them.
+  async function loadSamples() {
+    const lost = [];
+    for (const [role] of SOUND_ROLES) {
+      if (!metro.samples[role]) { delete sampleBufs[role]; continue; }
+      try {
+        const r = samples.bridge ? await samples.bridge('load', role) : null;
+        if (!r || !r.bytes) throw new Error(r && r.error === 'size' ? 'too large' : 'missing');
+        sampleBufs[role] = trimSample(await decodeSample(r.bytes));
+      } catch (err) {
+        log('Metronome: the custom ' + sampleLabel(role).toLowerCase() + ' sound (' + metro.samples[role].name + ') is ' + (err.message === 'not audio' ? 'unreadable' : err.message) + '; using ' + VOICES[metro.sounds[role]].name + '.');
+        lost.push(role);
+        await resetSample(role);
+      }
+    }
+    if (lost.length) {
+      const names = lost.map(sampleLabel);
+      toast('Couldn\u2019t load the custom metronome sound' + (lost.length > 1 ? 's for ' + names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1] + '; using the built-in ones.' : ' for ' + names[0] + '; using the built-in one.'));
+    }
+    return lost;
+  }
+  function playSample(buf, at, gain) {
+    const src = audio.createBufferSource(); src.buffer = buf;
+    const g = audio.createGain(); g.gain.value = gain;
+    g.connect(audio.destination);
+    src.connect(g); src.start(at);
+  }
+  // The sound source for a role: { id, play(at, gain) }. The role's custom sample when there is one, otherwise its
+  // built-in voice; both through the same context, so the output device and the scheduling are the same.
   function soundFor(role) {
     const m = ROLE_MIX[role];
     if (!m) return null;
-    const v = VOICES[metro.sound] || VOICES.click;
-    return { play: (at, gain) => v.play(at, m.accent, gain, m.pitch) };
+    const buf = sampleBufs[m.sound];
+    if (buf) return { id: 'sample', buffer: buf, play: (at, gain) => playSample(buf, at, gain) };
+    const id = VOICES[metro.sounds[m.sound]] ? metro.sounds[m.sound] : 'click';
+    return { id, play: (at, gain) => VOICES[id].play(at, m.accent, gain, m.pitch) };
   }
   function click(at, role) {
-    metro.lastVoice = VOICES[metro.sound] ? metro.sound : 'click';
     const src = soundFor(role), gain = roleGain(role);
+    if (src) metro.lastVoice = src.id;
     if (src && gain > 0) src.play(at, gain);
-    return gain;
+    return { gain, sound: src ? src.id : null };
   }
-  function previewSound() { ensureAudio(); click(audio.currentTime + 0.03, ROLE.ACCENT); click(audio.currentTime + 0.33, ROLE.NORMAL); }
+  // Settings ▶: one click of that sound (accent | main | sub) at its level.
+  function previewSound(role) { ensureAudio(); click(audio.currentTime + 0.03, role === 'accent' ? ROLE.ACCENT : role === 'sub' ? ROLE.SUB : ROLE.NORMAL); }
 
   // Scheduler state: the current bar's events (all layers merged, sorted) and a cursor (the time
   // and beat offset of the last scheduled point), so a tempo change applies from the next event.
@@ -898,8 +1043,8 @@
       const at = cursorAt + (ev.offsetBeats - cursorOff) * spb;
       if (at >= horizon) return;
       cursorAt = at; cursorOff = ev.offsetBeats; evI++;
-      const gain = click(at, ev.role);
-      const info = { bar: barIdx, countIn: metro.countingIn, offsetBeats: ev.offsetBeats, role: ev.role, layer: ev.layer, bpm: effectiveBpm(), gain: r6(gain) };
+      const { gain, sound } = click(at, ev.role);
+      const info = { bar: barIdx, countIn: metro.countingIn, offsetBeats: ev.offsetBeats, role: ev.role, layer: ev.layer, bpm: effectiveBpm(), gain: r6(gain), sound, at };
       metro.scheduled.push(info);
       if (metro.scheduled.length > 512) metro.scheduled.shift();
       if (ev.layer) continue;   // the indicator follows the first layer
@@ -1199,7 +1344,10 @@
   window.__metro = {
     state: metro, start: startMetro, stop: stopMetro, tap: tapTempo, setBpm, setMode: setMetroMode, listOutputs, VOICES,
     ROLE, PATTERNS: METRO_PATTERNS, patternCells, barEvents: metroBarEvents, rampBpm: metroRampBpm, normSetup, effectiveBpm, soundFor, roleGain,
+    // Custom samples: the decoded buffers, the AIFF reader, and the test's bridge (setting it runs the launch-time load).
+    samples: { buffers: sampleBufs, decode: decodeSample, readAiff, setBridge: (b) => { samples.bridge = b; return loadSamples(); } },
   };
+  if (samples.bridge) loadSamples();
   ui.metroBarEvents = metroBarEvents;   // the pure event generator, for tests (window.__ui)
 
   // ------------------------------------------------------------------ preset tempo
@@ -5068,10 +5216,36 @@
     }, !shellBridge);
 
     // Metronome (same "metronome" key as the overlay)
-    const sound = el('select', { class: 'select', 'aria-label': 'Click sound', dataset: { fk: 'set-sound' },
-      onchange: (e) => { metro.sound = e.target.value; saveMetro(); } },
-      Object.entries(VOICES).map(([id, v]) => el('option', { value: id, selected: id === metro.sound }, v.name)));
-    const preview = el('button', { class: 'btn small', dataset: { fk: 'set-preview' }, onclick: previewSound }, 'Preview');
+    // Sounds: per role a menu (the built-in voices, the custom sample when set, "Custom sample…"), ▶, and with a custom
+    // sample its file name and Reset. Picking a built-in while a sample is set also drops the sample.
+    const playIcon = () => { const i = sv('svg', { width: '10', height: '10', viewBox: '0 0 10 10', 'aria-hidden': 'true' }); i.append(sv('path', { d: 'M2.2 1.3v7.4L8.6 5z', fill: 'currentColor' })); return i; };
+    const soundRow = (role, label) => {
+      const ctl = el('div', { class: 'set-ctl' });
+      const draw = (focus) => {
+        const custom = metro.samples[role];
+        const sel = el('select', { class: 'select', 'aria-label': label + ' sound', dataset: { fk: 'set-sound-' + role } },
+          VOICE_IDS.map(id => el('option', { value: id, selected: !custom && id === metro.sounds[role] }, VOICES[id].name)),
+          custom ? el('option', { value: 'custom', selected: true }, 'Custom') : null,
+          el('hr'),
+          el('option', { value: 'pick', disabled: samples.bridge ? null : 'true' }, 'Custom sample\u2026'));
+        sel.addEventListener('change', async () => {
+          const v = sel.value;
+          sel.disabled = true;
+          if (v === 'pick') await pickSample(role);
+          else if (VOICE_IDS.includes(v)) { await resetSample(role); metro.sounds[role] = v; saveMetro(); }
+          draw(true);
+        });
+        ctl.replaceChildren(sel,
+          el('button', { class: 'btn small snd-play', title: 'Play', 'aria-label': 'Play ' + label, dataset: { fk: 'set-play-' + role }, onclick: () => previewSound(role) }, playIcon()),
+          ...(custom ? [
+            el('span', { class: 'set-unit snd-file', text: custom.name, title: custom.name, dataset: { fk: 'set-file-' + role } }),
+            el('button', { class: 'btn small', dataset: { fk: 'set-reset-' + role }, onclick: async () => { await resetSample(role); draw(true); } }, 'Reset'),
+          ] : []));
+        if (focus) sel.focus();
+      };
+      draw(false);
+      return el('div', { class: 'set-row', dataset: { fk: 'set-snd-' + role } }, el('span', { class: 'set-label', text: label }), ctl);
+    };
     const out = el('select', { class: 'select', 'aria-label': 'Audio output', dataset: { fk: 'set-output' } });
     const drawOut = () => {
       out.replaceChildren(...[{ id: '', label: 'System default' }, ...metro.outputs].map(o => el('option', { value: o.id, text: o.label })));
@@ -5129,7 +5303,6 @@
         setRow('Accent colour', swatches),
         setRow('', dock), !shellBridge ? setNote(iconWord + ': ' + desktopOnly.toLowerCase()) : null),
       el('section', {}, el('h3', { text: 'Metronome' }),
-        setRow('Click sound', sound, preview),
         setRow('Output', out),
         setRow('Volume', vol),
         setRow('Default tempo', bpm, el('span', { class: 'set-unit', text: 'BPM' })),
@@ -5140,7 +5313,9 @@
         setRow('Pattern', patSel, el('span', { class: 'set-unit', text: 'Advanced mode' })),
         setRow('Subdivision', subSel),
         setRow('Count-in', ciSel),
-        ...lvls.map(x => setRow(x.label + ' level', x.r, x.val))),
+        ...lvls.map(x => setRow(x.label + ' level', x.r, x.val)),
+        el('h4', { class: 'set-sub', text: 'Sounds' }),
+        ...SOUND_ROLES.map(([role, label]) => soundRow(role, label))),
       el('section', {}, el('h3', { text: 'Connection' }),
         setRow('', auto),
         setRow('', pedalLine, shellBridge ? forget : null)),
