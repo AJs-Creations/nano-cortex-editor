@@ -372,8 +372,8 @@ for microphone permission; that is only how browsers reveal output names. Nothin
 ![The Levels popover with Accent, Main ticks and Subdivisions sliders](images/metronome-levels.png)
 
 **Your own sounds** ([Settings](#12-settings) → Metronome → Sounds): the accent, the main beat and the subdivisions
-can each play a built-in sound or **Custom sample…**, a WAV, AIFF, MP3, M4A/AAC, FLAC or Ogg file up to 5 MB (the
-first 2 seconds play). The app keeps its own copy of the file; **Reset** goes back to the built-in sound.
+can each play a built-in sound or **Custom sample…**, a WAV, AIFF, MP3, M4A/AAC, FLAC or Ogg file up to 5 MB, played
+in mono and cut to its first 2 seconds. The app keeps its own copy of the file; **Reset** goes back to the built-in sound.
 
 **Follow the preset tempo** ([Settings](#12-settings) → Metronome): when on and connected, the metronome plays the
 current preset's tempo and follows preset changes, and changing the metronome's tempo writes it to the preset (Save

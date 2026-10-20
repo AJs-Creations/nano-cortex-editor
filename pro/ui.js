@@ -796,13 +796,15 @@
     return audio;
   }
   // Click sounds, synthesized from Web Audio nodes (no sample files). `p` scales the pitch
-  // (subdivision ticks use a higher variant of the same sound).
+  // (subdivision ticks use a higher variant of the same sound). Each click's nodes end in `voiceOut`, the click's own
+  // gain node (see click()), so the next click can cut it.
+  let voiceOut = null;
   const envelope = (at, peak, attack, decay) => {
     const g = audio.createGain();
     g.gain.setValueAtTime(0.0001, at);
     g.gain.linearRampToValueAtTime(Math.max(0.0002, peak), at + attack);
     g.gain.exponentialRampToValueAtTime(0.0001, at + attack + decay);
-    g.connect(audio.destination);
+    g.connect(voiceOut || audio.destination);
     return g;
   };
   const tone = (at, type, freq, dest, len) => {
@@ -842,7 +844,7 @@
       g.gain.linearRampToValueAtTime(vol * (accent ? 0.9 : 0.7), at + 0.005);
       g.gain.setValueAtTime(vol * (accent ? 0.9 : 0.7), at + 0.09);
       g.gain.exponentialRampToValueAtTime(0.0001, at + 0.13);
-      g.connect(audio.destination);
+      g.connect(voiceOut || audio.destination);
       tone(at, 'sine', (accent ? 1760 : 880) * p, g, 0.14);
     } },
     cowbell: { name: 'Cowbell', play(at, accent, vol, p = 1) {   // two detuned square partials ~560/845 Hz through a band-pass, short
@@ -915,43 +917,40 @@
     if (!buf || !buf.length) throw new Error('not audio');
     return buf;
   }
-  // The first 2 s, with a 5 ms fade so a cut doesn't click.
-  function trimSample(buf) {
-    const max = Math.round(buf.sampleRate * SAMPLE_MAX_S);
-    if (buf.length <= max) return buf;
-    const out = new AudioBuffer({ numberOfChannels: buf.numberOfChannels, length: max, sampleRate: buf.sampleRate });
-    const fade = Math.min(max, Math.round(buf.sampleRate * 0.005));
-    for (let c = 0; c < buf.numberOfChannels; c++) {
-      const d = buf.getChannelData(c).slice(0, max);
-      for (let i = 0; i < fade; i++) d[max - 1 - i] *= i / fade;
-      out.copyToChannel(d, c);
-    }
+  // What plays: mono (the channels averaged, not normalised), the first 2 s, with a 5 ms fade where it was cut.
+  function prepSample(buf) {
+    const max = Math.round(buf.sampleRate * SAMPLE_MAX_S), len = Math.min(buf.length, max), n = buf.numberOfChannels;
+    const d = new Float32Array(len);
+    for (let c = 0; c < n; c++) { const x = buf.getChannelData(c); for (let i = 0; i < len; i++) d[i] += x[i] / n; }
+    if (buf.length > max) { const fade = Math.min(len, Math.round(buf.sampleRate * 0.005)); for (let i = 0; i < fade; i++) d[len - 1 - i] *= i / fade; }
+    const out = new AudioBuffer({ numberOfChannels: 1, length: len, sampleRate: buf.sampleRate });
+    out.copyToChannel(d, 0);
     return out;
   }
   const sampleLabel = (role) => (SOUND_ROLES.find(([r]) => r === role) || [])[1] || role;
-  // Settings → "Custom sample…": the shell's dialog, then decode, then the shell copies it. Resolves true when set.
+  // Settings → "Custom sample…": the shell's dialog, then decode, then the shell copies it. Resolves { ok } when set,
+  // { canceled }, or { error } with the reason Settings shows under the rows (a refused file changes nothing).
   async function pickSample(role) {
-    if (!samples.bridge) return false;
+    if (!samples.bridge) return { canceled: true };
     const r = await samples.bridge('pick', role).catch(() => null);
-    if (!r || r.canceled) return false;
-    if (r.error === 'size') { toast('“' + r.name + '” is larger than 5 MB.'); return false; }
-    if (r.error || !r.bytes) { toast('Couldn’t read “' + (r.name || 'the file') + '”.'); return false; }
+    if (!r || r.canceled) return { canceled: true };
+    const refuse = (error) => { log('Metronome: ' + sampleLabel(role) + ': ' + error); return { error }; };
+    if (r.error === 'size') return refuse('“' + r.name + '” is larger than 5 MB.');
+    if (r.error || !r.bytes) return refuse('Couldn’t read “' + (r.name || 'the file') + '”.');
     let buf;
     try { buf = await decodeSample(r.bytes); }
     catch {
       samples.bridge('discard', role).catch(() => null);
-      toast('“' + r.name + '” isn’t audio the metronome can play.');
-      log('Metronome: ' + r.name + ' could not be decoded.');
-      return false;
+      return refuse('“' + r.name + '” isn’t audio the metronome can play.');
     }
     const saved = await samples.bridge('save', role).catch(() => null);
-    if (!saved || !saved.ok) { toast('Couldn’t copy “' + r.name + '”.'); return false; }
-    sampleBufs[role] = trimSample(buf);
+    if (!saved || !saved.ok) return refuse('Couldn’t copy “' + r.name + '”.');
+    sampleBufs[role] = prepSample(buf);
     metro.samples[role] = { name: r.name };
     saveMetro();
     log('Metronome: ' + sampleLabel(role) + ' plays ' + r.name + (buf.duration > SAMPLE_MAX_S ? ' (first 2 s)' : '') + '.');
     if (buf.duration > SAMPLE_MAX_S) toast('“' + r.name + '” is trimmed to its first 2 seconds.');
-    return true;
+    return { ok: true };
   }
   // Back to the built-in sound (Reset, or a built-in picked from the menu): the shell deletes its copy.
   async function resetSample(role) {
@@ -969,7 +968,7 @@
       try {
         const r = samples.bridge ? await samples.bridge('load', role) : null;
         if (!r || !r.bytes) throw new Error(r && r.error === 'size' ? 'too large' : 'missing');
-        sampleBufs[role] = trimSample(await decodeSample(r.bytes));
+        sampleBufs[role] = prepSample(await decodeSample(r.bytes));
       } catch (err) {
         log('Metronome: the custom ' + sampleLabel(role).toLowerCase() + ' sound (' + metro.samples[role].name + ') is ' + (err.message === 'not audio' ? 'unreadable' : err.message) + '; using ' + VOICES[metro.sounds[role]].name + '.');
         lost.push(role);
@@ -985,8 +984,9 @@
   function playSample(buf, at, gain) {
     const src = audio.createBufferSource(); src.buffer = buf;
     const g = audio.createGain(); g.gain.value = gain;
-    g.connect(audio.destination);
+    g.connect(voiceOut || audio.destination);
     src.connect(g); src.start(at);
+    return src;
   }
   // The sound source for a role: { id, play(at, gain) }. The role's custom sample when there is one, otherwise its
   // built-in voice; both through the same context, so the output device and the scheduling are the same.
@@ -998,11 +998,28 @@
     const id = VOICES[metro.sounds[m.sound]] ? metro.sounds[m.sound] : 'click';
     return { id, play: (at, gain) => VOICES[id].play(at, m.accent, gain, m.pitch) };
   }
+  // One click at `at`. Clicks don't overlap: the one still sounding is cut where this one starts (its own gain node
+  // fades to 0 over 5 ms, a sample's source stops there), so long sounds never ring over each other. A muted or
+  // silent event cuts nothing. Returns the gain, the sound id and the click (the scheduler hangs its info on it).
+  const CUT_S = 0.005;
+  let sounding = null;   // { out, node, at, info }
   function click(at, role) {
     const src = soundFor(role), gain = roleGain(role);
     if (src) metro.lastVoice = src.id;
-    if (src && gain > 0) src.play(at, gain);
-    return { gain, sound: src ? src.id : null };
+    if (!src || gain <= 0) return { gain, sound: src ? src.id : null, handle: null };
+    if (sounding && at > sounding.at) {
+      sounding.out.gain.setValueAtTime(1, at);
+      sounding.out.gain.linearRampToValueAtTime(0, at + CUT_S);
+      if (sounding.node) sounding.node.stop(at + CUT_S);
+      if (sounding.info) sounding.info.cut = at + CUT_S;
+    }
+    const out = audio.createGain();
+    out.connect(audio.destination);
+    voiceOut = out;
+    let node = null;
+    try { node = src.play(at, gain) || null; } finally { voiceOut = null; }
+    sounding = { out, node, at, info: null };
+    return { gain, sound: src.id, handle: sounding };
   }
   // Settings ▶: one click of that sound (accent | main | sub) at its level.
   function previewSound(role) { ensureAudio(); click(audio.currentTime + 0.03, role === 'accent' ? ROLE.ACCENT : role === 'sub' ? ROLE.SUB : ROLE.NORMAL); }
@@ -1043,8 +1060,9 @@
       const at = cursorAt + (ev.offsetBeats - cursorOff) * spb;
       if (at >= horizon) return;
       cursorAt = at; cursorOff = ev.offsetBeats; evI++;
-      const { gain, sound } = click(at, ev.role);
+      const { gain, sound, handle } = click(at, ev.role);
       const info = { bar: barIdx, countIn: metro.countingIn, offsetBeats: ev.offsetBeats, role: ev.role, layer: ev.layer, bpm: effectiveBpm(), gain: r6(gain), sound, at };
+      if (handle) handle.info = info;
       metro.scheduled.push(info);
       if (metro.scheduled.length > 512) metro.scheduled.shift();
       if (ev.layer) continue;   // the indicator follows the first layer
@@ -1064,7 +1082,7 @@
   function startMetro() {
     if (metro.running) return;
     ensureAudio();
-    metro.running = true; metro.beat = -1; metro.sub = -1; metro.count = 0; metro.bar = 0; metro.scheduled = [];
+    metro.running = true; metro.beat = -1; metro.sub = -1; metro.count = 0; metro.bar = 0; metro.scheduled = []; sounding = null;
     metro.rampFrom = effectiveBpm();
     barIdx = 0; cursorAt = audio.currentTime + 0.05;
     planBar();
@@ -5219,6 +5237,8 @@
     // Sounds: per role a menu (the built-in voices, the custom sample when set, "Custom sample…"), ▶, and with a custom
     // sample its file name and Reset. Picking a built-in while a sample is set also drops the sample.
     const playIcon = () => { const i = sv('svg', { width: '10', height: '10', viewBox: '0 0 10 10', 'aria-hidden': 'true' }); i.append(sv('path', { d: 'M2.2 1.3v7.4L8.6 5z', fill: 'currentColor' })); return i; };
+    const soundMsg = el('p', { class: 'set-note snd-msg', hidden: true, dataset: { fk: 'set-sound-msg' } });
+    const showSoundMsg = (text) => { soundMsg.textContent = text || ''; soundMsg.hidden = !text; };
     const soundRow = (role, label) => {
       const ctl = el('div', { class: 'set-ctl' });
       const draw = (focus) => {
@@ -5231,15 +5251,15 @@
         sel.addEventListener('change', async () => {
           const v = sel.value;
           sel.disabled = true;
-          if (v === 'pick') await pickSample(role);
-          else if (VOICE_IDS.includes(v)) { await resetSample(role); metro.sounds[role] = v; saveMetro(); }
+          if (v === 'pick') { const r = await pickSample(role); if (!r.canceled) showSoundMsg(r.error); }
+          else if (VOICE_IDS.includes(v)) { await resetSample(role); metro.sounds[role] = v; saveMetro(); showSoundMsg(''); }
           draw(true);
         });
         ctl.replaceChildren(sel,
           el('button', { class: 'btn small snd-play', title: 'Play', 'aria-label': 'Play ' + label, dataset: { fk: 'set-play-' + role }, onclick: () => previewSound(role) }, playIcon()),
           ...(custom ? [
             el('span', { class: 'set-unit snd-file', text: custom.name, title: custom.name, dataset: { fk: 'set-file-' + role } }),
-            el('button', { class: 'btn small', dataset: { fk: 'set-reset-' + role }, onclick: async () => { await resetSample(role); draw(true); } }, 'Reset'),
+            el('button', { class: 'btn small', dataset: { fk: 'set-reset-' + role }, onclick: async () => { await resetSample(role); showSoundMsg(''); draw(true); } }, 'Reset'),
           ] : []));
         if (focus) sel.focus();
       };
@@ -5315,7 +5335,8 @@
         setRow('Count-in', ciSel),
         ...lvls.map(x => setRow(x.label + ' level', x.r, x.val)),
         el('h4', { class: 'set-sub', text: 'Sounds' }),
-        ...SOUND_ROLES.map(([role, label]) => soundRow(role, label))),
+        ...SOUND_ROLES.map(([role, label]) => soundRow(role, label)),
+        soundMsg),
       el('section', {}, el('h3', { text: 'Connection' }),
         setRow('', auto),
         setRow('', pedalLine, shellBridge ? forget : null)),

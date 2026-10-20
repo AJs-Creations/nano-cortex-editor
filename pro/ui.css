@@ -771,6 +771,8 @@ body:not(.dev-tools) .dev-only { display: none !important; }
 .settings h4.set-sub { margin: 10px 0 2px; font-size: 12px; font-weight: 600; color: var(--dim); }
 .set-ctl .snd-play { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; }
 .set-ctl .snd-file { max-width: 200px; }
+.settings .snd-msg { margin: 4px 0 0 142px; color: var(--warn); }
+@media (max-width: 600px) { .settings .snd-msg { margin-left: 0; } }
 .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
 .swatch { width: 26px; height: 26px; border-radius: 50%; border: 0; padding: 0; background: var(--sw); cursor: pointer; box-shadow: inset 0 0 0 1px #ffffff22; }
 .swatch:hover { transform: scale(1.08); }

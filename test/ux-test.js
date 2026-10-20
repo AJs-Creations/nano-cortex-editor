@@ -1866,10 +1866,11 @@ async function run() {
     const sdir = path.join(OUT, 'metronome-sounds'), srcDir = path.join(OUT, 'sample-sources');
     for (const d of [sdir, srcDir]) fs.rmSync(d, { recursive: true, force: true });
     fs.mkdirSync(srcDir, { recursive: true });
-    // Test files, generated here: 16-bit PCM WAV (a decaying 1 kHz tone) and 16-bit AIFF (a known ramp).
-    const wavBytes = (seconds, channels = 1, rate = 44100) => {
+    // Test files, generated here: 16-bit PCM WAV (by default a decaying 1 kHz tone) and 16-bit AIFF (a known ramp).
+    const tone = (i, _c, rate) => Math.round(12000 * Math.sin(2 * Math.PI * 1000 * i / rate) * Math.exp(-8 * i / rate));
+    const wavBytes = (seconds, channels = 1, rate = 44100, value = tone) => {
       const n = Math.round(seconds * rate), data = Buffer.alloc(n * channels * 2);
-      for (let i = 0; i < n; i++) for (let c = 0; c < channels; c++) data.writeInt16LE(Math.round(12000 * Math.sin(2 * Math.PI * 1000 * i / rate) * Math.exp(-8 * i / rate)), (i * channels + c) * 2);
+      for (let i = 0; i < n; i++) for (let c = 0; c < channels; c++) data.writeInt16LE(value(i, c, rate), (i * channels + c) * 2);
       const h = Buffer.alloc(44);
       h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(channels, 22);
       h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * channels * 2, 28); h.writeUInt16LE(channels * 2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(data.length, 40);
@@ -1911,7 +1912,7 @@ async function run() {
     })()`);
     // Every buffer the page starts, with the gain it goes through, and every toast.
     const instrument = () => js(`(() => {
-      window.__plays = []; window.__toasts = [];
+      window.__plays = []; window.__toasts = []; window.__cuts = [];
       new MutationObserver(() => __toasts.push(document.getElementById('toast').textContent)).observe(document.getElementById('toast'), { childList: true, characterData: true, subtree: true });
       const P = AudioContext.prototype, make = P.createBufferSource;
       if (P.__wrapped) return; P.__wrapped = true;
@@ -1919,11 +1920,16 @@ async function run() {
         const n = make.call(this), connect = n.connect.bind(n), start = n.start.bind(n);
         let gain = null;
         n.connect = (d, ...a) => { if (d instanceof GainNode) gain = d.gain.value; return connect(d, ...a); };
-        n.start = (at, ...a) => { __plays.push({ buffer: n.buffer, at, gain }); if (__plays.length > 1000) __plays.shift(); return start(at, ...a); };
+        const stop = n.stop.bind(n), play = { buffer: null, at: 0, gain: null, stop: null };
+        n.start = (at, ...a) => { Object.assign(play, { buffer: n.buffer, at, gain }); __plays.push(play); if (__plays.length > 1000) __plays.shift(); return start(at, ...a); };
+        n.stop = (t) => { play.stop = t; return stop(t); };
         return n;
       };
+      const ramp = AudioParam.prototype.linearRampToValueAtTime;   // a cut is the only ramp to exactly 0
+      AudioParam.prototype.linearRampToValueAtTime = function (v, t) { if (v === 0) __cuts.push(t); return ramp.call(this, v, t); };
     })()`);
     const toastNow = () => js('document.getElementById("toast").classList.contains("show") ? document.getElementById("toast").textContent : ""');
+    const refusal = () => js('(() => { const m = document.querySelector(\'[data-fk="set-sound-msg"]\'); return m && !m.hidden && m.getClientRects().length ? m.textContent : ""; })()');
     const metroStore = () => js('JSON.parse(localStorage.getItem("metronome") || "{}")');
     const openSet = async () => { await click('#settingsBtn'); await waitFor(settingsOpen); };
     const closeSet = async () => { await key('Escape'); await waitFor(async () => !(await settingsOpen())); };
@@ -1956,11 +1962,15 @@ async function run() {
     await click('[data-fk="set-play-main"]');
     await checkSoon('samples: ▶ plays the sample at the main level and the volume', () => js('__plays.some(p => p.buffer === __metro.samples.buffers.main && Math.abs(p.gain - __metro.state.volume * __metro.state.levels.main) < 1e-6)'), () => js('JSON.stringify(__plays.map(p => p.gain))'));
 
-    // Subdivision too; a long stereo file for the accent is cut to its first 2 s, with a toast.
+    // Subdivision too; a long stereo file for the accent is cut to its first 2 s, with a toast, and mixed to mono.
     await choose('sub', source('Sub Tick.wav', wavBytes(0.1)));
-    await choose('accent', source('Long Hit.wav', wavBytes(3, 2)));
+    const longHit = wavBytes(3, 2, 48000, (_i, c) => (c ? -8192 : 16384));   // left +0.5, right −0.25
+    await choose('accent', source('Long Hit.wav', longHit));
     await checkSoon('samples: a 3 s file is trimmed to 2 s, and says so', async () => (await toastNow()) === '“Long Hit.wav” is trimmed to its first 2 seconds.', toastNow);
-    check('samples: stereo is fine (2 channels kept), the copy is the whole file', await js('(() => { const b = __metro.samples.buffers.accent; return Math.abs(b.duration - 2) < 0.001 && b.numberOfChannels === 2; })()') && fs.statSync(path.join(sdir, 'accent.wav')).size === wavBytes(3, 2).length, stored());
+    check('samples: stereo is mixed to mono by averaging, not normalised (+0.5 and −0.25 → +0.125), faded out where cut',
+      await js('(() => { const b = __metro.samples.buffers.accent, d = b.getChannelData(0); return b.numberOfChannels === 1 && b.length === 96000 && Math.abs(d[1000] - 0.125) < 1e-3 && Math.abs(d[95999]) < 1e-3 && d[95700] > 0.12; })()'),
+      await js('(() => { const b = __metro.samples.buffers.accent, d = b.getChannelData(0); return b.numberOfChannels + " ch, " + b.length + ", " + d[1000] + " … " + d[95999]; })()'));
+    check('samples: the copy is the whole file', fs.readFileSync(path.join(sdir, 'accent.wav')).equals(longHit), stored());
     await js('document.querySelector(\'[data-fk="set-snd-sub"]\').scrollIntoView({ block: "center" })');
     await shot('metro-samples-settings');
     // Picking a built-in sound while a sample is set drops the sample (and its copy).
@@ -1974,7 +1984,7 @@ async function run() {
     await js('document.activeElement.blur()');
     await key('n'); await waitFor('__metro.state.open');
     await click('[data-fk="metro-mode-advanced"]');
-    await js('__plays.length = 0');
+    await js('__plays.length = 0; __cuts.length = 0');
     await key(' ');
     await waitFor(() => M('s.scheduled.filter(e => e.role === "soft").length >= 2 && s.scheduled.filter(e => e.role === "sub").length >= 8'));
     await key(' '); await waitFor('!__metro.state.running');
@@ -1991,6 +2001,18 @@ async function run() {
       return { n: ev.length, bad };
     })()`);
     check('samples: every main, soft and sub event starts its sample exactly at the scheduled time, at level × volume (soft quieter)', run.n >= 12 && run.bad.length === 0, JSON.stringify(run).slice(0, 300));
+    const cuts = await js(`(() => {
+      const ev = __metro.state.scheduled.filter(e => e.gain > 0), plays = __plays.slice(), bad = [];
+      ev.slice(0, -1).forEach((e, i) => {
+        const want = ev[i + 1].at + 0.005;
+        if (Math.abs((e.cut || 0) - want) > 1e-9) bad.push(e.role + '@' + e.at + ' cut ' + e.cut);
+        if (!__cuts.some(t => Math.abs(t - want) < 1e-9)) bad.push('no fade to 0 at ' + want);
+        const p = plays.find(p => Math.abs(p.at - e.at) < 1e-9 && p.buffer && p.buffer.length > 4000);
+        if (e.sound === 'sample' && (!p || Math.abs(p.stop - want) > 1e-9)) bad.push(e.role + '@' + e.at + ' stop ' + (p && p.stop));
+      });
+      return { n: ev.length, bad };
+    })()`);
+    check('samples: each click, sample or built-in, is cut where the next one starts (5 ms fade; a sample stops there)', cuts.n >= 12 && cuts.bad.length === 0, JSON.stringify(cuts).slice(0, 300));
     await js('Object.assign(__metro.state.levels, { accent: 1, main: 1, sub: 1 }); __metro.state.adv = __metro.normSetup({}); __metro.setBpm(100)');
     await click('[data-fk="metro-mode-simple"]');
     await key('Escape'); await waitFor('!__metro.state.open');
@@ -2003,19 +2025,21 @@ async function run() {
       await js('(() => { const b = __metro.samples.buffers.main; return b && b.sampleRate + " " + b.length + " " + b.getChannelData(0)[0]; })()'));
     // Rejected files change nothing.
     const unchanged = async () => stored() === 'main.aiff,sub.wav' && await js('__metro.state.samples.main.name === "Clave.aiff" && __metro.samples.buffers.main.length === 8820 && document.querySelector(\'[data-fk="set-sound-main"]\').value === "custom"');
+    await js('__toasts.length = 0');
     await choose('main', source('not-audio.mp3', Buffer.from('these are notes, not audio\n'.repeat(40))));
-    await checkSoon('samples: a file that isn\'t audio is rejected with a message', async () => (await toastNow()) === '“not-audio.mp3” isn’t audio the metronome can play.', toastNow);
-    check('samples: … and the current sample stays', await unchanged(), stored());
+    await checkSoon('samples: a file that isn\'t audio is refused, the reason in a line under the rows', async () => (await refusal()) === '“not-audio.mp3” isn’t audio the metronome can play.', refusal);
+    check('samples: … not as a toast, and the current sample stays', await unchanged() && (await js('__toasts.length')) === 0, stored());
+    await js('document.querySelector(\'[data-fk="set-sound-msg"]\').scrollIntoView({ block: "center" })');
+    await shot('metro-samples-refused');
     const huge = source('huge.wav', Buffer.concat([wavBytes(0.1), Buffer.alloc(MAX_BYTES)]));
     await choose('main', huge);
-    await checkSoon('samples: a file over 5 MB is rejected with a message', async () => (await toastNow()) === '“huge.wav” is larger than 5 MB.', toastNow);
-    check('samples: … before it is read, and the current sample stays', MAX_BYTES === 5 * 1024 * 1024 && fs.statSync(huge).size > MAX_BYTES && await unchanged(), stored());
-    await js('__toasts.length = 0');
+    await checkSoon('samples: a file over 5 MB is refused with its reason', async () => (await refusal()) === '“huge.wav” is larger than 5 MB.', refusal);
+    check('samples: … before it is read, and the current sample stays', MAX_BYTES === 5 * 1024 * 1024 && fs.statSync(huge).size > MAX_BYTES && await unchanged() && (await js('__toasts.length')) === 0, stored());
     await choose('main', null);
     check('samples: cancelling the dialog changes nothing, quietly', await unchanged() && (await js('__toasts.length')) === 0);
     // Reset: back to the built-in sound, the copy deleted.
     await click('[data-fk="set-reset-main"]');
-    await checkSoon('samples: Reset returns Main beat to its built-in sound and deletes the copy', async () => stored() === 'sub.wav' && await M('!s.samples.main && !m.samples.buffers.main && m.soundFor("normal").id === "click"')
+    await checkSoon('samples: Reset returns Main beat to its built-in sound and deletes the copy (and clears the refusal line)', async () => stored() === 'sub.wav' && await M('!s.samples.main && !m.samples.buffers.main && m.soundFor("normal").id === "click"') && !(await refusal())
       && await js('document.querySelector(\'[data-fk="set-sound-main"]\').value === "click" && !document.querySelector(\'[data-fk="set-file-main"]\')'), stored);
 
     // The shell side only takes a known role and operation; the page never names a path.
