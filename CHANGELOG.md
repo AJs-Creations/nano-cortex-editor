@@ -20,6 +20,7 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 - **Monitoring** in Settings → Device: Mute Input and Mute Outputs 1L/2R; a header **Mute** button for the input,
   read from the pedal at connect.
 - Knob drags, the mouse wheel and arrow keys send while you turn, not only when you let go.
+- Metronome sounds per click, including your own samples: the accent, main beat and subdivisions each play a built-in sound or a WAV, AIFF, MP3, M4A/AAC, FLAC or Ogg file (Settings → Metronome → Sounds).
 
 ### Fixed
 
