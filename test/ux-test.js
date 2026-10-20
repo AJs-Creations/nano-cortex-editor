@@ -1806,18 +1806,23 @@ async function run() {
   // metronome
   await click('#settingsBtn'); await waitFor(settingsOpen);
   check('Connection: reconnect at launch is shown disabled, with the reason, outside the desktop app', await js('document.querySelector(\'[data-fk="set-autoconnect"]\').disabled && /Web Bluetooth/.test(document.querySelector(\'[data-fk="set-pedal"]\').textContent)'));
-  check('Metronome offers Click, Woodblock, Tick, Beep and Cowbell', (await js('[...document.querySelectorAll(\'[data-fk="set-sound"] option\')].map(o => o.textContent).join(",")')) === 'Click,Woodblock,Tick,Beep,Cowbell');
-  await js('{ const s = document.querySelector(\'[data-fk="set-sound"]\'); s.value = "tick"; s.dispatchEvent(new Event("change")); }');
-  await click('[data-fk="set-preview"]');
-  await checkSoon('Preview plays the chosen sound', async () => (await js('__metro.state.lastVoice')) === 'tick');
-  await js('{ const s = document.querySelector(\'[data-fk="set-sound"]\'); s.value = "woodblock"; s.dispatchEvent(new Event("change")); }');
-  check('the sound choice is stored with the metronome settings', (await js('JSON.parse(localStorage.getItem("metronome")).sound')) === 'woodblock');
+  const soundRows = () => js('[...document.querySelectorAll(\'[data-fk^="set-snd-"]\')].map(r => r.querySelector(".set-label").textContent + ": " + [...r.querySelector("select").options].map(o => o.textContent).join(",")).join(" | ")');
+  check('Metronome → Sounds: Accent, Main beat and Subdivision, each with Click, Woodblock, Tick, Beep, Cowbell and Custom sample…',
+    (await soundRows()) === ['Accent', 'Main beat', 'Subdivision'].map(l => l + ': Click,Woodblock,Tick,Beep,Cowbell,Custom sample…').join(' | ') && (await js('document.querySelector(".set-sub").textContent')) === 'Sounds', await soundRows());
+  check('a sound row without a custom sample is just its menu and ▶ (no stray text)', await js('[...document.querySelectorAll(\'[data-fk^="set-snd-"] .set-ctl\')].every(c => c.childNodes.length === 2 && c.children.length === 2 && c.textContent === c.querySelector("select").textContent)'));
+  check('outside the desktop app "Custom sample…" is disabled', await js('[...document.querySelectorAll(\'[data-fk^="set-sound-"] option[value=pick]\')].every(o => o.disabled)'));
+  await setSel('set-sound-main', 'tick');
+  await click('[data-fk="set-play-main"]');
+  await checkSoon('▶ plays that role\'s sound', async () => (await js('__metro.state.lastVoice')) === 'tick');
+  await setSel('set-sound-main', 'woodblock');
+  check('each role\'s sound is stored with the metronome settings', await js('(() => { const m = JSON.parse(localStorage.getItem("metronome")); return m.sounds.main === "woodblock" && m.sounds.accent === "click" && m.sounds.sub === "click" && !("sound" in m); })()'));
   await js('{ const b = document.querySelector(\'[data-fk="set-bpm"]\'); b.value = "200"; b.dispatchEvent(new Event("change")); const v = document.querySelector(\'[data-fk="set-volume"]\'); v.value = "0.4"; v.dispatchEvent(new Event("input")); }');
   check('default tempo and volume land in the overlay\'s stored keys', await js('(() => { const m = JSON.parse(localStorage.getItem("metronome")); return m.bpm === 200 && m.volume === 0.4; })()'));
   await click('[data-fk="set-drawer"]');
   check('"Show the Activity drawer at launch" is stored', (await js('JSON.parse(localStorage.getItem("settings.drawerAtLaunch"))')) === true);
   // advanced metronome defaults
-  check('Settings → Metronome adds Opens in, Pattern, Subdivision, Count-in and the three levels', (await js('[...document.querySelectorAll(".settings section")].find(x => x.querySelector("h3").textContent === "Metronome").textContent')).match(/Opens in|Pattern|Subdivision|Count-in|Accent level|Main ticks level|Subdivisions level/g).length === 7);
+  const metroLabels = await js('[...[...document.querySelectorAll(".settings section")].find(x => x.querySelector("h3").textContent === "Metronome").querySelectorAll(".set-label")].map(l => l.textContent)');
+  check('Settings → Metronome adds Opens in, Pattern, Subdivision, Count-in and the three levels', ['Opens in', 'Pattern', 'Subdivision', 'Count-in', 'Accent level', 'Main ticks level', 'Subdivisions level'].every(l => metroLabels.includes(l)), metroLabels.join('|'));
   check('Settings shows the levels set in the popover', await js('document.querySelector(\'[data-fk="set-lvl-accent"]\').value === "0.5" && document.querySelector(\'[data-fk="set-lvl-sub"]\').value === "0.25"'));
   check('Opens in defaults to Simple', (await js('document.querySelector(\'[data-fk="set-opens"]\').value')) === 'simple');
   for (const [fk, v] of [['set-opens', 'advanced'], ['set-pattern', '7/8'], ['set-subdiv', '3'], ['set-countin', '2']]) await js(`{ const s = document.querySelector('[data-fk="${fk}"]'); s.value = "${v}"; s.dispatchEvent(new Event("change")); }`);
@@ -1830,7 +1835,9 @@ async function run() {
   check('the metronome overlay shows the settings (200 BPM, volume 0.4)', await js('document.getElementById("metroBpm").value === "200" && document.getElementById("metroVol").value === "0.4"'));
   check('Settings "Opens in: Advanced" is honoured', await js('__metro.state.mode === "advanced" && !document.getElementById("metroAdv").hidden && document.querySelectorAll(".metro-cell").length === 7'));
   await key(' ');
-  await checkSoon('the metronome schedules the chosen sound and still runs', '__metro.state.running && __metro.state.count >= 1 && __metro.state.lastVoice === "woodblock"', () => js('JSON.stringify({ r: __metro.state.running, c: __metro.state.count, v: __metro.state.lastVoice })'));
+  await checkSoon('the metronome schedules each role\'s sound (main beats: Woodblock, accents: Click) and still runs',
+    '__metro.state.running && __metro.state.count >= 1 && __metro.state.scheduled.some(e => e.role === "accent") && __metro.state.scheduled.some(e => e.role === "normal") && __metro.state.scheduled.every(e => e.sound === ({ accent: "click", normal: "woodblock", soft: "woodblock", sub: "click", mute: null })[e.role])',
+    () => js('JSON.stringify({ r: __metro.state.running, c: __metro.state.count, ev: __metro.state.scheduled.slice(0, 8).map(e => e.role + ":" + e.sound) })'));
   await key(' ');
   await checkSoon('and still stops', '!__metro.state.running');
   await key('Escape'); await waitFor('!__metro.state.open');
@@ -1838,7 +1845,7 @@ async function run() {
   // persistence across a reload
   await reloadPage();
   check('the accent survives a reload', (await js('getComputedStyle(document.documentElement).getPropertyValue("--accent").trim()')) === '#ff7000' && (await js('getComputedStyle(document.querySelector(".preset-row.active")).boxShadow')).includes('rgb(255, 112, 0)'));
-  check('the sound and tempo survive a reload', await js('__metro.state.sound === "woodblock" && __metro.state.bpm === 200'));
+  check('the sounds and tempo survive a reload', await js('__metro.state.sounds.main === "woodblock" && __metro.state.sounds.accent === "click" && __metro.state.bpm === 200'));
   check('the Activity drawer opens at launch when set', await js('document.getElementById("drawer").classList.contains("open")'));
   check('the advanced setup, levels and Opens in survive a reload', await js('(() => { const s = __metro.state; return s.opensIn === "advanced" && s.adv.pattern.join() === "accent,soft,normal,soft,normal,soft,soft" && s.adv.note === 8 && s.adv.sub === 3 && s.adv.countIn === 2 && s.levels.accent === 0.5 && s.levels.main === 0.8 && s.levels.sub === 0.25; })()'));
   await js('document.activeElement.blur()');
@@ -1846,9 +1853,224 @@ async function run() {
   await checkSoon('after a reload the overlay opens in Advanced with the remembered pattern', () => js('__metro.state.mode === "advanced" && document.querySelector(\'[data-fk="metro-pattern"]\').value === "7/8" && document.querySelector(\'[data-fk="metro-sub-3"]\').classList.contains("on")'));
   await key('Escape'); await waitFor('!__metro.state.open');
   // back to the defaults for the rest of the run (and the next one)
-  await js('__accent.set("#6954ff"); localStorage.removeItem("settings.drawerAtLaunch"); __metro.state.sound = "click"; __metro.state.volume = 0.6; __metro.state.opensIn = "simple"; __metro.state.mode = "simple"; __metro.state.adv = __metro.normSetup({}); Object.assign(__metro.state.levels, { accent: 1, main: 1, sub: 1 }); __metro.setBpm(100)');
+  await js('__accent.set("#6954ff"); localStorage.removeItem("settings.drawerAtLaunch"); __metro.state.sounds = { accent: "click", main: "click", sub: "click" }; __metro.state.volume = 0.6; __metro.state.opensIn = "simple"; __metro.state.mode = "simple"; __metro.state.adv = __metro.normSetup({}); Object.assign(__metro.state.levels, { accent: 1, main: 1, sub: 1 }); __metro.setBpm(100)');
   await key('l', [MOD]);
   check('Purple restores the original colours', (await js('getComputedStyle(document.documentElement).getPropertyValue("--accent-hi").trim()')) === '#7b68ff' && (await js('getComputedStyle(document.documentElement).getPropertyValue("--on-accent").trim()')) === '#ffffff');
+
+  // ---------------------------------------------------------------- custom metronome samples
+  // The shell's side (src/metro-samples.js) with a temporary folder and a stub file dialog. The test carries the page's
+  // requests to it as the IPC does: the page's bridge (set through __metro.samples.setBridge, which also runs the
+  // launch-time load) queues { op, role }, the pump below answers with the real module, bytes as base64.
+  {
+    const { createMetroSamples, EXTS, MAX_BYTES } = require('../src/metro-samples');
+    const sdir = path.join(OUT, 'metronome-sounds'), srcDir = path.join(OUT, 'sample-sources');
+    for (const d of [sdir, srcDir]) fs.rmSync(d, { recursive: true, force: true });
+    fs.mkdirSync(srcDir, { recursive: true });
+    // Test files, generated here: 16-bit PCM WAV (by default a decaying 1 kHz tone) and 16-bit AIFF (a known ramp).
+    const tone = (i, _c, rate) => Math.round(12000 * Math.sin(2 * Math.PI * 1000 * i / rate) * Math.exp(-8 * i / rate));
+    const wavBytes = (seconds, channels = 1, rate = 44100, value = tone) => {
+      const n = Math.round(seconds * rate), data = Buffer.alloc(n * channels * 2);
+      for (let i = 0; i < n; i++) for (let c = 0; c < channels; c++) data.writeInt16LE(value(i, c, rate), (i * channels + c) * 2);
+      const h = Buffer.alloc(44);
+      h.write('RIFF', 0); h.writeUInt32LE(36 + data.length, 4); h.write('WAVEfmt ', 8); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(channels, 22);
+      h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * channels * 2, 28); h.writeUInt16LE(channels * 2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(data.length, 40);
+      return Buffer.concat([h, data]);
+    };
+    const aiffBytes = (seconds, rate = 44100) => {
+      const n = Math.round(seconds * rate), data = Buffer.alloc(n * 2);
+      for (let i = 0; i < n; i++) data.writeInt16BE(-16000 + (i % 100) * 10, i * 2);
+      const comm = Buffer.alloc(26), e = Math.floor(Math.log2(rate));
+      comm.write('COMM', 0); comm.writeUInt32BE(18, 4); comm.writeUInt16BE(1, 8); comm.writeUInt32BE(n, 10); comm.writeUInt16BE(16, 14);
+      comm.writeUInt16BE(16383 + e, 16); comm.writeBigUInt64BE(BigInt(rate) << BigInt(63 - e), 18);   // the rate as an 80-bit float
+      const ssnd = Buffer.alloc(16); ssnd.write('SSND', 0); ssnd.writeUInt32BE(8 + data.length, 4);
+      const body = Buffer.concat([Buffer.from('AIFF'), comm, ssnd, data]), form = Buffer.alloc(8);
+      form.write('FORM', 0); form.writeUInt32BE(body.length, 4);
+      return Buffer.concat([form, body]);
+    };
+    const source = (name, bytes) => { const f = path.join(srcDir, name); fs.writeFileSync(f, bytes); return f; };
+    const stored = () => fs.existsSync(sdir) ? fs.readdirSync(sdir).sort().join(',') : '';
+    let nextPick = null;
+    const dialogs = [];
+    const shell = createMetroSamples({ dir: sdir, choose: async (role, opts) => { dialogs.push({ role, ...opts }); return nextPick; } });
+    let pumping = true;
+    const pump = (async () => {
+      while (pumping) {
+        let q = [];
+        try { q = await js('typeof __sb === "undefined" ? [] : __sb.q.splice(0)'); } catch { /* reloading */ }
+        for (const c of q) {
+          const r = await shell.handle(c.op, c.role);
+          const out = r && r.bytes ? { ...r, bytes: Buffer.from(r.bytes).toString('base64') } : r;
+          try { await js(`__sb.done(${c.id}, ${JSON.stringify(out)})`); } catch { /* reloading */ }
+        }
+        await sleep(15);
+      }
+    })();
+    // The bridge, as the preload's nanoShell.metroSample would be; resolves to the roles the launch-time load gave up on.
+    const connectShell = () => js(`(() => {
+      window.__sb = { n: 0, q: [], wait: {}, done(id, r) { if (r && r.bytes) r.bytes = Uint8Array.from(atob(r.bytes), c => c.charCodeAt(0)); this.wait[id](r); delete this.wait[id]; } };
+      return __metro.samples.setBridge((op, role) => new Promise((res) => { const id = ++__sb.n; __sb.wait[id] = res; __sb.q.push({ id, op, role }); }));
+    })()`);
+    // Every buffer the page starts, with the gain it goes through, and every toast.
+    const instrument = () => js(`(() => {
+      window.__plays = []; window.__toasts = []; window.__cuts = [];
+      new MutationObserver(() => __toasts.push(document.getElementById('toast').textContent)).observe(document.getElementById('toast'), { childList: true, characterData: true, subtree: true });
+      const P = AudioContext.prototype, make = P.createBufferSource;
+      if (P.__wrapped) return; P.__wrapped = true;
+      P.createBufferSource = function () {
+        const n = make.call(this), connect = n.connect.bind(n), start = n.start.bind(n);
+        let gain = null;
+        n.connect = (d, ...a) => { if (d instanceof GainNode) gain = d.gain.value; return connect(d, ...a); };
+        const stop = n.stop.bind(n), play = { buffer: null, at: 0, gain: null, stop: null };
+        n.start = (at, ...a) => { Object.assign(play, { buffer: n.buffer, at, gain }); __plays.push(play); if (__plays.length > 1000) __plays.shift(); return start(at, ...a); };
+        n.stop = (t) => { play.stop = t; return stop(t); };
+        return n;
+      };
+      const ramp = AudioParam.prototype.linearRampToValueAtTime;   // a cut is the only ramp to exactly 0
+      AudioParam.prototype.linearRampToValueAtTime = function (v, t) { if (v === 0) __cuts.push(t); return ramp.call(this, v, t); };
+    })()`);
+    const toastNow = () => js('document.getElementById("toast").classList.contains("show") ? document.getElementById("toast").textContent : ""');
+    const refusal = () => js('(() => { const m = document.querySelector(\'[data-fk="set-sound-msg"]\'); return m && !m.hidden && m.getClientRects().length ? m.textContent : ""; })()');
+    const metroStore = () => js('JSON.parse(localStorage.getItem("metronome") || "{}")');
+    const openSet = async () => { await click('#settingsBtn'); await waitFor(settingsOpen); };
+    const closeSet = async () => { await key('Escape'); await waitFor(async () => !(await settingsOpen())); };
+    const choose = async (role, file) => {   // "Custom sample…" in the role's menu, with the stub dialog answering `file`
+      nextPick = file;
+      const before = dialogs.length;
+      await setSel('set-sound-' + role, 'pick');
+      await waitFor(async () => dialogs.length > before && await js(`!document.querySelector('[data-fk="set-sound-${role}"]').disabled`));
+      await frame();
+    };
+
+    await instrument();
+    check('samples: the launch-time load has nothing to do on a fresh install', (await connectShell()).length === 0 && (await js('__toasts.length')) === 0);
+    await openSet();
+    check('samples: in the desktop app "Custom sample…" is enabled', await js('[...document.querySelectorAll(\'[data-fk^="set-sound-"] option[value=pick]\')].every(o => !o.disabled)'));
+
+    // Pick a WAV for the main beat: copied into the data folder, stored, shown, decoded once and used.
+    const clickWav = wavBytes(0.25);
+    const clickSrc = source('My Click.wav', clickWav);
+    await choose('main', clickSrc);
+    await checkSoon('samples: picking a WAV for Main beat copies it to metronome-sounds/main.wav', async () => stored() === 'main.wav' && fs.readFileSync(path.join(sdir, 'main.wav')).equals(clickWav), stored);
+    check('samples: the dialog is the shell\'s, for that role, filtered to the audio types', dialogs.length === 1 && dialogs[0].role === 'main' && dialogs[0].title === 'Custom sample: Main beat'
+      && JSON.stringify(dialogs[0].filters) === JSON.stringify([{ name: 'Audio', extensions: EXTS }]) && ['wav', 'aif', 'aiff', 'mp3', 'm4a', 'aac', 'flac', 'ogg', 'opus'].every(x => EXTS.includes(x)), JSON.stringify(dialogs[0]));
+    check('samples: the choice is stored with the metronome settings (file name only)', JSON.stringify((await metroStore()).samples) === '{"main":{"name":"My Click.wav"}}', JSON.stringify((await metroStore()).samples));
+    check('samples: the row shows "Custom", the file name and Reset', await js('(() => { const r = document.querySelector(\'[data-fk="set-snd-main"]\'); return r.querySelector("select").value === "custom" && r.querySelector(\'[data-fk="set-file-main"]\').textContent === "My Click.wav" && r.querySelector(\'[data-fk="set-reset-main"]\').textContent === "Reset"; })()'));
+    check('samples: no toast for a sample under 2 s', !/trimmed/.test(await toastNow()), await toastNow());
+    check('samples: decoded once into an AudioBuffer (0.25 s, mono)', await js('(() => { const b = __metro.samples.buffers.main; return b instanceof AudioBuffer && Math.abs(b.duration - 0.25) < 0.002 && b.numberOfChannels === 1; })()'));
+    check('samples: main and soft beats use it, accents and subdivisions keep their built-in sound', await M('m.soundFor("normal").buffer === m.samples.buffers.main && m.soundFor("soft").buffer === m.samples.buffers.main && m.soundFor("normal").id === "sample" && m.soundFor("accent").id === "click" && m.soundFor("sub").id === "click"'));
+    await js('__plays.length = 0');
+    await click('[data-fk="set-play-main"]');
+    await checkSoon('samples: ▶ plays the sample at the main level and the volume', () => js('__plays.some(p => p.buffer === __metro.samples.buffers.main && Math.abs(p.gain - __metro.state.volume * __metro.state.levels.main) < 1e-6)'), () => js('JSON.stringify(__plays.map(p => p.gain))'));
+
+    // Subdivision too; a long stereo file for the accent is cut to its first 2 s, with a toast, and mixed to mono.
+    await choose('sub', source('Sub Tick.wav', wavBytes(0.1)));
+    const longHit = wavBytes(3, 2, 48000, (_i, c) => (c ? -8192 : 16384));   // left +0.5, right −0.25
+    await choose('accent', source('Long Hit.wav', longHit));
+    await checkSoon('samples: a 3 s file is trimmed to 2 s, and says so', async () => (await toastNow()) === '“Long Hit.wav” is trimmed to its first 2 seconds.', toastNow);
+    check('samples: stereo is mixed to mono by averaging, not normalised (+0.5 and −0.25 → +0.125), faded out where cut',
+      await js('(() => { const b = __metro.samples.buffers.accent, d = b.getChannelData(0); return b.numberOfChannels === 1 && b.length === 96000 && Math.abs(d[1000] - 0.125) < 1e-3 && Math.abs(d[95999]) < 1e-3 && d[95700] > 0.12; })()'),
+      await js('(() => { const b = __metro.samples.buffers.accent, d = b.getChannelData(0); return b.numberOfChannels + " ch, " + b.length + ", " + d[1000] + " … " + d[95999]; })()'));
+    check('samples: the copy is the whole file', fs.readFileSync(path.join(sdir, 'accent.wav')).equals(longHit), stored());
+    await js('document.querySelector(\'[data-fk="set-snd-sub"]\').scrollIntoView({ block: "center" })');
+    await shot('metro-samples-settings');
+    // Picking a built-in sound while a sample is set drops the sample (and its copy).
+    await setSel('set-sound-accent', 'beep');
+    await checkSoon('samples: choosing a built-in sound instead deletes the copy', async () => stored() === 'main.wav,sub.wav' && await js('!__metro.samples.buffers.accent && __metro.state.sounds.accent === "beep" && !__metro.state.samples.accent && !document.querySelector(\'[data-fk="set-reset-accent"]\')'), stored);
+    await setSel('set-sound-accent', 'click');
+    await closeSet();
+
+    // The scheduler plays the samples like the built-ins: same times, the role's level times the volume.
+    await js('Object.assign(__metro.state.levels, { accent: 1, main: 0.5, sub: 0.25 }); __metro.state.adv = __metro.normSetup({ beats: 4, pattern: ["accent", "normal", "soft", "normal"], sub: 2 }); __metro.setBpm(240)');
+    await js('document.activeElement.blur()');
+    await key('n'); await waitFor('__metro.state.open');
+    await click('[data-fk="metro-mode-advanced"]');
+    await js('__plays.length = 0; __cuts.length = 0');
+    await key(' ');
+    await waitFor(() => M('s.scheduled.filter(e => e.role === "soft").length >= 2 && s.scheduled.filter(e => e.role === "sub").length >= 8'));
+    await key(' '); await waitFor('!__metro.state.running');
+    const run = await js(`(() => {
+      const B = __metro.samples.buffers, v = __metro.state.volume, ev = __metro.state.scheduled.slice(), plays = __plays.slice();
+      const want = { normal: [B.main, v * 0.5], soft: [B.main, v * 0.5 * 0.45], sub: [B.sub, v * 0.25 * 0.5] };
+      const bad = [];
+      for (const e of ev) {
+        if (e.role === 'accent') { if (e.sound !== 'click') bad.push('accent ' + e.sound); continue; }
+        const [buf, gain] = want[e.role];
+        const p = plays.filter(p => p.buffer === buf && Math.abs(p.at - e.at) < 1e-6);
+        if (e.sound !== 'sample' || p.length !== 1 || Math.abs(p[0].gain - gain) > 1e-6) bad.push(e.role + '@' + e.at + ' ' + e.sound + ' ' + p.map(x => x.gain));
+      }
+      return { n: ev.length, bad };
+    })()`);
+    check('samples: every main, soft and sub event starts its sample exactly at the scheduled time, at level × volume (soft quieter)', run.n >= 12 && run.bad.length === 0, JSON.stringify(run).slice(0, 300));
+    const cuts = await js(`(() => {
+      const ev = __metro.state.scheduled.filter(e => e.gain > 0), plays = __plays.slice(), bad = [];
+      ev.slice(0, -1).forEach((e, i) => {
+        const want = ev[i + 1].at + 0.005;
+        if (Math.abs((e.cut || 0) - want) > 1e-9) bad.push(e.role + '@' + e.at + ' cut ' + e.cut);
+        if (!__cuts.some(t => Math.abs(t - want) < 1e-9)) bad.push('no fade to 0 at ' + want);
+        const p = plays.find(p => Math.abs(p.at - e.at) < 1e-9 && p.buffer && p.buffer.length > 4000);
+        if (e.sound === 'sample' && (!p || Math.abs(p.stop - want) > 1e-9)) bad.push(e.role + '@' + e.at + ' stop ' + (p && p.stop));
+      });
+      return { n: ev.length, bad };
+    })()`);
+    check('samples: each click, sample or built-in, is cut where the next one starts (5 ms fade; a sample stops there)', cuts.n >= 12 && cuts.bad.length === 0, JSON.stringify(cuts).slice(0, 300));
+    await js('Object.assign(__metro.state.levels, { accent: 1, main: 1, sub: 1 }); __metro.state.adv = __metro.normSetup({}); __metro.setBpm(100)');
+    await click('[data-fk="metro-mode-simple"]');
+    await key('Escape'); await waitFor('!__metro.state.open');
+
+    // Re-picking replaces the copy (an AIFF now: Chromium can't decode it, the page reads it itself).
+    await openSet();
+    await choose('main', source('Clave.aiff', aiffBytes(0.2)));
+    await checkSoon('samples: re-picking overwrites the role\'s copy (main.wav → main.aiff)', async () => stored() === 'main.aiff,sub.wav' && (await js('__metro.state.samples.main.name')) === 'Clave.aiff', stored);
+    check('samples: uncompressed AIFF is read (0.2 s at 44.1 kHz, first samples exact)', await js('(() => { const b = __metro.samples.buffers.main, d = b.getChannelData(0); return b.sampleRate === 44100 && b.length === 8820 && Math.abs(d[0] + 16000 / 32768) < 1e-6 && Math.abs(d[1] + 15990 / 32768) < 1e-6; })()'),
+      await js('(() => { const b = __metro.samples.buffers.main; return b && b.sampleRate + " " + b.length + " " + b.getChannelData(0)[0]; })()'));
+    // Rejected files change nothing.
+    const unchanged = async () => stored() === 'main.aiff,sub.wav' && await js('__metro.state.samples.main.name === "Clave.aiff" && __metro.samples.buffers.main.length === 8820 && document.querySelector(\'[data-fk="set-sound-main"]\').value === "custom"');
+    await js('__toasts.length = 0');
+    await choose('main', source('not-audio.mp3', Buffer.from('these are notes, not audio\n'.repeat(40))));
+    await checkSoon('samples: a file that isn\'t audio is refused, the reason in a line under the rows', async () => (await refusal()) === '“not-audio.mp3” isn’t audio the metronome can play.', refusal);
+    check('samples: … not as a toast, and the current sample stays', await unchanged() && (await js('__toasts.length')) === 0, stored());
+    await js('document.querySelector(\'[data-fk="set-sound-msg"]\').scrollIntoView({ block: "center" })');
+    await shot('metro-samples-refused');
+    const huge = source('huge.wav', Buffer.concat([wavBytes(0.1), Buffer.alloc(MAX_BYTES)]));
+    await choose('main', huge);
+    await checkSoon('samples: a file over 5 MB is refused with its reason', async () => (await refusal()) === '“huge.wav” is larger than 5 MB.', refusal);
+    check('samples: … before it is read, and the current sample stays', MAX_BYTES === 5 * 1024 * 1024 && fs.statSync(huge).size > MAX_BYTES && await unchanged() && (await js('__toasts.length')) === 0, stored());
+    await choose('main', null);
+    check('samples: cancelling the dialog changes nothing, quietly', await unchanged() && (await js('__toasts.length')) === 0);
+    // Reset: back to the built-in sound, the copy deleted.
+    await click('[data-fk="set-reset-main"]');
+    await checkSoon('samples: Reset returns Main beat to its built-in sound and deletes the copy (and clears the refusal line)', async () => stored() === 'sub.wav' && await M('!s.samples.main && !m.samples.buffers.main && m.soundFor("normal").id === "click"') && !(await refusal())
+      && await js('document.querySelector(\'[data-fk="set-sound-main"]\').value === "click" && !document.querySelector(\'[data-fk="set-file-main"]\')'), stored);
+
+    // The shell side only takes a known role and operation; the page never names a path.
+    const guards = [await shell.handle('pick', '../../etc/passwd'), await shell.handle('load', 'main/../../x'), await shell.handle('read', 'main'), await shell.handle('save', 'main')];
+    check('samples: the shell refuses unknown roles and operations, and a save without a pick', guards.map(g => g.error).join() === 'role,role,op,nothing' && dialogs.every(d => ['accent', 'main', 'sub'].includes(d.role)), JSON.stringify(guards));
+
+    // The copy survives the original moving away.
+    await choose('main', clickSrc);
+    await waitFor(async () => stored() === 'main.wav,sub.wav');
+    await closeSet();
+    fs.rmSync(srcDir, { recursive: true, force: true });
+    await reloadPage(); await instrument();
+    const lost0 = await connectShell();
+    check('samples: at launch the copies are decoded (the originals are gone), no toast', lost0.length === 0 && (await js('__toasts.length')) === 0 && await M('m.samples.buffers.main.length === 12000 && m.samples.buffers.sub instanceof AudioBuffer && m.soundFor("normal").id === "sample"'), JSON.stringify(lost0));
+
+    // Missing or broken copies at launch: the built-in sound, one quiet toast, and the setting goes back.
+    fs.rmSync(path.join(sdir, 'main.wav'));
+    fs.writeFileSync(path.join(sdir, 'sub.wav'), 'not a wave');
+    await reloadPage(); await instrument();
+    const lost = await connectShell();
+    check('samples: a missing and an unreadable copy at launch fall back to the built-in sounds', lost.join() === 'main,sub' && await M('m.soundFor("normal").id === "click" && m.soundFor("sub").id === "click" && Object.keys(s.samples).length === 0') && JSON.stringify((await metroStore()).samples) === '{}', JSON.stringify(lost));
+    await waitFor('__toasts.length > 0');
+    check('samples: … with one toast', (await js('__toasts.length')) === 1 && (await js('__toasts[0]')) === 'Couldn’t load the custom metronome sounds for Main beat and Subdivision; using the built-in ones.', await js('JSON.stringify(__toasts)'));
+    check('samples: … and the broken copy is deleted', stored() === '', stored());
+    await reloadPage(); await instrument();
+    check('samples: the next launch is quiet', (await connectShell()).length === 0 && (await js('__toasts.length')) === 0);
+
+    pumping = false; await Promise.race([pump, sleep(3000)]);
+    await js('delete window.__sb');
+    for (const d of [sdir, srcDir]) fs.rmSync(d, { recursive: true, force: true });
+  }
 
   // the Dock / window icon, rendered the way the shell does it
   const { renderAccentIcon } = require('../src/accent-icon');

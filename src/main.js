@@ -518,6 +518,24 @@ ipcMain.on('bt-request', (e, opts) => {
 ipcMain.handle('bt-choose', (e, choice) => (fromEditor(e) && btPicker ? btPicker.choose(String(choice)) : false));
 // How connecting to the picked device went: only 'ok' (the Nano's services and characteristics found) remembers it.
 ipcMain.handle('bt-result', (e, kind) => (fromEditor(e) && btPicker ? btPicker.result(String(kind)) : null));
+// Custom metronome samples (src/metro-samples.js): the dialog, the size check, the reads and the copy into
+// userData/metronome-sounds/<role>.<ext> happen here; the page names only the operation and the role.
+const { createMetroSamples } = require('./metro-samples');
+let metroSamples = null;
+ipcMain.handle('metro-sample', (e, op, role) => {
+  if (!fromEditor(e)) return null;
+  if (!metroSamples) {
+    metroSamples = createMetroSamples({
+      dir: path.join(app.getPath('userData'), 'metronome-sounds'),
+      choose: async (_role, { title, filters }) => {
+        const r = await dialog.showOpenDialog(win, { title, message: title, properties: ['openFile'], filters });
+        return r.canceled || !r.filePaths.length ? null : r.filePaths[0];
+      },
+      log: (m) => activityLog().write('[metronome] ' + m),
+    });
+  }
+  return metroSamples.handle(String(op), String(role));
+});
 function openSettings() {
   show('editor');
   if (editorFlavor === 'pro') editor.webContents.send('open-settings');

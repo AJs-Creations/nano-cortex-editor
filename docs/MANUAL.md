@@ -371,6 +371,10 @@ for microphone permission; that is only how browsers reveal output names. Nothin
 
 ![The Levels popover with Accent, Main ticks and Subdivisions sliders](images/metronome-levels.png)
 
+**Your own sounds** ([Settings](#12-settings) → Metronome → Sounds): the accent, the main beat and the subdivisions
+can each play a built-in sound or **Custom sample…**, a WAV, AIFF, MP3, M4A/AAC, FLAC or Ogg file up to 5 MB, played
+in mono and cut to its first 2 seconds. The app keeps its own copy of the file; **Reset** goes back to the built-in sound.
+
 **Follow the preset tempo** ([Settings](#12-settings) → Metronome): when on and connected, the metronome plays the
 current preset's tempo and follows preset changes, and changing the metronome's tempo writes it to the preset (Save
 keeps it). The panel then says "♩ follows preset".
@@ -423,9 +427,10 @@ Open Settings with ⌘, (Ctrl+, on Windows), from the app menu, or with **Settin
 
 - **Appearance**: seven accent colours for highlights, buttons and the app icon. **Dock icon follows the accent**
   recolours the app icon too.
-- **Metronome**: click sound (Click, Woodblock, Tick, Beep, Cowbell) with **Preview**, output, volume, default tempo,
-  **Follow the preset tempo**, beats per bar, which mode the panel **Opens in**, and the Advanced defaults (pattern,
-  subdivision, count-in and the three levels).
+- **Metronome**: output, volume, default tempo, **Follow the preset tempo**, beats per bar, which mode the panel
+  **Opens in**, the Advanced defaults (pattern, subdivision, count-in and the three levels), and **Sounds**: for the
+  accent, the main beat and the subdivisions, a built-in sound (Click, Woodblock, Tick, Beep, Cowbell) or your own
+  sample ([section 10](#10-metronome)), with ▶ to hear it.
 - **Connection**: **Reconnect to the last pedal at launch** and **Forget pedal**.
 - **Advanced**: **Check for updates automatically** (on by default; see Updates in
   [section 1](#1-install-and-first-launch)) and **Developer tools** (below). With it on, also **Show the Activity drawer at launch** and **Show

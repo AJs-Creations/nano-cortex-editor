@@ -36,4 +36,7 @@ contextBridge.exposeInMainWorld('nanoShell', {
   onUpdate: (fn) => ipcRenderer.on('update-event', (_e, ev) => fn(ev)),
   updateAction: (what, version) => ipcRenderer.invoke('update-action', String(what), String(version || '')),
   setAutoUpdate: (on) => ipcRenderer.invoke('set-auto-update', !!on),
+  // Custom metronome samples (src/metro-samples.js): op is pick | save | load | reset | discard, role accent | main | sub.
+  // The shell shows the file dialog and answers with that role's bytes; the page never passes a path.
+  metroSample: (op, role) => ipcRenderer.invoke('metro-sample', String(op), String(role)),
 });
