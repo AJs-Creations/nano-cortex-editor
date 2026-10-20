@@ -38,7 +38,7 @@ pedal by us) / observed (seen in a trace, layout not understood) / unknown.
 | Delete | Context menu DELETE PRESET [M][GP] | done | decoded (50/31/51) | no | Used for clean-up only |
 | Discard edits | Not in the app (edits are dropped on preset change) | done (ours) | decoded (re-select) | no | — |
 | Assign to footswitch | ASSIGN TO FOOTSWITCH → IA/IB/IIA/IIB; one preset may sit on several switches [M][GP] | missing (native PLAN row 17; neither UI shows the assignments) | upstream: state fields 14/15/38/39 read; type 29 fields 5–8 are sent as −1 ("unchanged"), real values never sent | **yes** | Assign preset 63 to IIB, then put the original back |
-| Rearrange (drag and drop) | Tap-and-hold, drag to another slot; "MIDI CC unchanged", PC follows the slot [M]; new in 2.2.0 [N220] | missing (native row 22) | unknown | **yes** | Drag 64 onto empty 62, then back |
+| Rearrange (drag and drop) | Tap-and-hold, drag to another slot; "MIDI CC unchanged", PC follows the slot [M]; new in 2.2.0 [N220] | implemented (#14): drag a preset row; list and state read back after | decoded (143/144, insertion; INVESTIGATION §12) | done | Verify on hardware, with footswitches |
 | Show all presets / PC-CC view | Single-screen list; PC/CC button shows PC numbers per slot [M] | done (our sidebar lists all 64; PC = slot − 1) | n/a | no | — |
 | Copy / duplicate | No explicit command in [M]/[GP]; Save as is the route. Duplicated names link slots together [F-NAME] | partial (Save as) | decoded | no | — |
 | Scenes / stomp mode | **None.** [M] documents only 4-Preset Mode (IA/IB/IIA/IIB) and 2-Preset Mode (Footswitch II = global bypass). Scene/stomp forum threads are about Quad Cortex | n/a | — | no | — |
@@ -109,7 +109,7 @@ separates these pedal settings from preset settings.
 | Library → slot (captures and IRs) | Swap / IR LIBRARY [M] | done | decoded (76–81) | no | — |
 | Download a capture from Cortex Cloud | Download button [M][GA] | done (Send to Nano) | decoded (13/14) | no | — |
 | Download a user IR from Cortex Cloud | Profile → Impulse Responses → Download [M] | implemented: per-row Send to Nano action; refreshes “IRs on pedal” after type 16 | Cloud list/download API verified; BLE decoded (15/16, 76/77) | **yes** | Needs an end-to-end check with a connected pedal |
-| Audition a capture / IR before downloading | Play button; slots pulse; EXIT or Stop ends it; pedal caches several [M][N220] | missing | unknown | **yes** | Play one capture 5 s, Stop; play one IR 5 s, Stop |
+| Audition a capture / IR before downloading | Play button; slots pulse; EXIT or Stop ends it; pedal caches several [M][N220] | implemented (#14): Live Preview in the Cloud toolbar, ▶ on library IRs; stopped before any save or preset change | decoded (150/151, 158/159, 148/149, keep-alive 91/92; INVESTIGATION §12) | done | Verify on hardware |
 | Delete a capture / IR from the pedal | Capture details → ⋯ → DELETE [M][GA] | implemented for user IRs: right-click a library item → Delete; capture deletion remains open | IR: decoded (82/83, then 76/77); capture: unknown | **yes** | Verify IR deletion on hardware; capture deletion still needs a trace |
 | Edit capture details (name, type, description, instrument) | EDIT, own captures only [M] | missing | unknown | optional | Only if Anup has a capture of his own |
 | Upload capture to Cloud, visibility, send to a friend | Capture details [M] | n/a (Cloud-side, our Cloud tab has the website) | — | no | — |
@@ -204,8 +204,8 @@ off the repository.
    the preset.
 6. **Capture library deletion.** IR deletion is type 82/83 (decoded in Investigation §6a); capture deletion remains unknown (step 24).
 7. **IR download path.** Resolved: raw WAV uses type 15/16 and library refresh uses 76/77 (Investigation §6a).
-8. **Audition.** [M] says the pedal "can cache multiple Captures or IRs at once" and slots pulse; unknown whether
-   this is a full type-13 upload into a cache or something else (step 21).
+8. **Audition.** Resolved (#14): a capture is streamed as type 150 (not 13), a library IR is played with 158, both
+   stop with 148 → 149 and need the 91 keep-alive (Investigation §12).
 9. **Footswitch fields.** Type 29 fields 5–8 are the assignment fields per DrD85, and the state dump reports them
    in 14/15/38/39; the order (IA/IB/IIA/IIB vs A1/B1/A2/B2) and whether 2-Preset mode reuses them are unverified
    (step 14).

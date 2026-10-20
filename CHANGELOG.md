@@ -4,14 +4,31 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 
 ## Unreleased
 
+Contributed by @itsbreaded in #14, integrated with maintainer changes. Not yet verified on a pedal.
+
 ### Added
 
-- Add a header Mute button beside Tuner, synchronized with the pedal's global Guitar Input mute setting.
-- Read device settings on connection so the header Mute button reflects the pedal's current state at startup.
+- **Live sync with the pedal**: knobs, effect parameters, footswitch bypasses and the expression pedal update the
+  editor as they change on the pedal; the unsaved-changes mark follows the pedal's own report.
+- **Cortex Cloud IRs to the pedal**: **Send to Nano** on each IR in your Cloud profile's Impulse Responses list (and
+  **IRs** in the toolbar). WAV files up to 1 MB, PCM or float, mono or stereo.
+- **Auditions**: **Live Preview** plays a Cloud capture on the pedal without storing it (with **IR: On / Off**), and
+  ▶ on a library IR in the Cab / IR inspector plays it without loading it into a slot. Saving or changing the preset
+  stops an audition first; if the pedal doesn't confirm the stop, the action doesn't happen.
+- **From the library** in the Cab / IR inspector: factory cabs and your IRs with search, audition and **Delete…** for
+  your own IRs.
+- **Reorder presets** by dragging a row onto another (works with the filter on); the order is read back from the pedal.
+- **Monitoring** in Settings → Device: Mute Input and Mute Outputs 1L/2R; a header **Mute** button for the input,
+  read from the pedal at connect.
+- Knob drags, the mouse wheel and arrow keys send while you turn, not only when you let go.
 
 ### Fixed
 
-- Preserve input mute when closing the tuner by reapplying it after tuner shutdown settles.
+- Closing the tuner keeps the guitar input muted if it was (the pedal needs the mute re-applied).
+- A click or right-click on the signal chain is no longer lost when the pedal's report redraws it at that moment.
+- Context menus stay inside small windows.
+- The window's footer is laid out when the content area settles after the window opens (Windows).
+- `npm start` and the other scripts run on Windows too (a Node launcher clears `ELECTRON_RUN_AS_NODE`).
 
 ## 1.0.0 — 2026-10-10
 

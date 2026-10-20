@@ -182,11 +182,12 @@ base64-encoded raw RIFF/WAVE bytes (not a gzip/tar bundle). The verified sample 
 IEEE float32, matching the IR in the Bluetooth trace. The pedal expects an MD5 of the decoded WAV, so the editor
 computes it locally instead of passing through Cloud's `payload_hash`.
 
-The app now injects a **Send to Nano** action on each IR row on the account page, fetches the WAV through the
-embedded Cloud session, confirms the transfer in the Pro Editor, sends type 15, waits for type 16, and refreshes
-type 76/77 so the new IR appears in “IRs on pedal.” The implementation is present in `src/main.js`,
-`src/cloud-preload.js`, `src/editor-preload.js`, `pro/transfer.js`, and `pro/ui.js`; the end-to-end UI still needs
-verification with a connected pedal.
+The app injects a **Send to Nano** action on each IR row of the account page (only on a Cortex Cloud host and that
+path), fetches the WAV through the embedded Cloud session, checks it (`src/cloud-ir.js`: at most 1 MB decoded; a
+`fmt ` chunk with PCM 16/24/32-bit or float 32/64-bit, 1–2 channels, 8–192 kHz; a non-empty `data` chunk), confirms
+the transfer in the Pro Editor, sends type 15, waits for type 16 and reads the library again (76/77). Code:
+`src/main.js`, `src/cloud-preload.js`, `src/editor-preload.js`, `pro/transfer.js`, `pro/ui.js`. Not yet verified end
+to end with a pedal.
 
 ### Deleting an IR from the pedal
 
@@ -422,7 +423,8 @@ fields; the trace shows field 3 for a factory cab, field 4 for user IRs is the m
 
 For example, factory cab 0 "412 V30": `13 C0 1A 0B 08 00 12 07 34 31 32 20 56 33 30 40 01 9E 00 00 00`.
 
-The transaction is the app's millisecond clock (a varint past 2³²). While anything is auditioned, the app sends
+The transaction is the app's millisecond clock (a varint past 2³²); the pedal echoes it in both 149s seen (capture and
+IR), and the editor only takes a stop as confirmed when it does. While anything is auditioned, the app sends
 **91** `{1: 3}` about every 20 s and the pedal answers **92** `{1: 3, 3: 1, …}`; without it the pedal ends the
 audition after about a minute. After a stop the app reads the current state, and the pedal may then report the
 preset dirty (115) even though nothing was edited.

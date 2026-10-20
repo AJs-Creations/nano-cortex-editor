@@ -110,8 +110,9 @@ remembered pedal.
 
 ![The header: logo, preset number and name, then Tuner, Metronome, Rename, Save as…, Refresh, Exit demo and Save](images/header.png)
 
-From left to right: the current preset's number and name; **Tuner**; **Metronome**; **Rename**; **Save as…**;
-**Refresh** (re-reads everything from the pedal); **Connect** / **Exit demo**; and **Save**. When you have unsaved
+From left to right: the current preset's number and name; **Tuner**; **Mute** (the pedal's guitar input, see
+[Monitoring](#monitoring); red while muted); **Metronome**; **Rename**; **Save as…**; **Refresh** (re-reads everything
+from the pedal); **Connect** / **Exit demo**; and **Save**. When you have unsaved
 edits, an orange **Unsaved changes** label appears, **Save** lights up and an outlined **Discard** button appears:
 
 ![The header with unsaved edits: an orange Unsaved changes label, a Discard button and a highlighted Save button](images/header-dirty.png)
@@ -181,6 +182,17 @@ the pedal, after you confirm.
 
 ![The Discard confirmation](images/discard.png)
 
+**Reordering.** Drag a preset onto another row to move it there; the presets in between shift by one place (an
+insert, not a swap). It works with the filter on, too. With unsaved edits the editor asks first, as for a switch. After
+the move it reads the preset list and the current preset back from the pedal, so what you see is the pedal's order. If
+that read fails, the header shows **Preset ?** and Save, Save as, Rename and Discard stay off until a read succeeds
+(**Refresh**, or pick a preset). Check your footswitch assignments after moving presets. Reordering is off while a
+slot usage scan (**Usage…** in the Capture inspector) runs.
+
+**Changes on the pedal itself** show up as you make them: turning a knob, switching an effect with a footswitch, or
+moving the expression pedal updates the knobs and lights in the editor. Effect amounts the expression pedal controls
+are read back from the pedal while it moves.
+
 ## 5. Editing blocks
 
 Select a stage by clicking its node, pressing **1**–**8**, or **←** / **→**. Press **B** to bypass or turn on the
@@ -241,11 +253,15 @@ When a preset plays a capture straight from the library rather than from a slot,
 "From the library: *name*".
 
 **Cab / IR.** **Level**, **High pass** and **Low pass**, then the **Microphone** (mic and position, for factory cabs),
-then the **Cabs and IRs on the pedal**: five slots. The **From the library** section lists the pedal's factory cabs
-and user IRs. Click an item to choose a slot; click its play button to audition it without changing a slot. Right-click
-a library item for **Preview** and **Load into slot…**; user IRs also have **Delete…**. Deleting a user IR from the
-pedal cannot be undone. The microphone and position are stored in the cab slot, so changing them affects every preset
-that uses that slot.
+then the **Cabs and IRs on the pedal**: five slots. The microphone and position are stored in the cab slot, so
+changing them affects every preset that uses that slot.
+
+**From the library** lists the pedal's factory cabs and your IRs, with a search box. Click an item to choose a slot
+for it. Its **▶** button auditions it: the pedal plays that IR without loading it into a slot (the row lights up and
+the button turns into **■**, which stops it). While an IR is auditioned the microphone and position are locked.
+Right-click an item for **Preview** and **Load into slot…**; your own IRs also have **Delete…**, which removes the IR
+from the pedal after you confirm (there is no undo; the dialog says if one of the five slots holds that IR).
+
 
 ![The Cab / IR inspector: tone knobs, mic choices and positions 1–6, and the five cab slots](images/inspector-cab.png)
 
@@ -309,7 +325,8 @@ Press **T** or click **Tuner** in the header.
 
 The tuner shows the note and how many cents sharp or flat you are; the needle centres when you are in tune. The pedal
 only reports pitch while a string is sounding. Set the **Reference** (400–480 Hz, default 440) and click **Mute** to
-silence the pedal's output while you tune. **Esc** or **Close** ends the tuner.
+silence the pedal's output while you tune. **Esc** or **Close** ends the tuner. If the guitar input was muted
+(header **Mute**) when you opened the tuner, it is muted again when the tuner closes.
 
 ## 10. Metronome
 
@@ -369,10 +386,20 @@ confirm:
 preset changes. The editor then offers to load it into a slot right away (**Choose a slot**) or **Later** (it is in
 **Load from library…** whenever you want it). The pedal must be connected; the phone app must not be.
 
-**Sending an IR to the pedal.** Open your profile's **Impulse Responses** list. The app adds **Send to Nano** beside
-each IR. Click it, confirm in the Editor, and the app sends the WAV to the pedal's IR library over Bluetooth. It does
-not change a preset slot. After the pedal accepts the IR, the Editor refreshes **IRs on pedal** automatically. The
-pedal must be connected; preset downloads from Cortex Cloud still go through the official app.
+**Live Preview.** On a capture's page, **Live Preview** plays the capture on the pedal without storing it anywhere:
+no slot or library item changes. **Stop Preview** ends it. **IR: On / Off** next to it switches the cab / IR of the
+current preset, to hear the capture with or without it. A preview keeps running while you browse; anything that saves
+or changes the preset (Save, switching presets, Discard, Rename, …) stops it first, and if the pedal doesn't confirm
+the stop, that action doesn't happen.
+
+**Sending an IR to the pedal.** Open your profile's **Impulse Responses** list (**IRs** in the toolbar). The app adds
+**Send to Nano** beside each IR. Click it, confirm in the Editor, and the app sends the WAV to the pedal's IR library
+over Bluetooth. It does not change a preset slot. After the pedal accepts the IR, the editor reads the library again,
+so it appears under **From the library**. An IR that is already on the pedal (same name) isn't sent again. Only WAV
+files up to 1 MB in PCM or float format, mono or stereo, are sent. The pedal must be connected; preset downloads from
+Cortex Cloud still go through the official app.
+
+Only one transfer to the pedal runs at a time (a capture, an IR or a preview); the others wait their turn.
 
 ## 12. Settings
 
@@ -413,6 +440,9 @@ closes the Activity drawer. The log file (**Help → Show Log File**) is written
 - **About**: the pedal's name, firmware and serial number (and, with Developer tools on, the device hash).
 - **LED brightness** (the manual's default is 60 %) and **USB playback volume** (audio from the computer over USB,
   default −6.0 dB). These are global settings: they apply on the pedal right away, not per preset.
+- <a id="monitoring"></a>**Monitoring**: **Mute Input** mutes the guitar input (USB audio still plays) and **Mute
+  Outputs 1L/2R** mutes the processed sound at the outputs. Also global, and nothing to save. The header's **Mute**
+  button is the same switch as **Mute Input**.
 - **Raw settings** (Developer tools only) lists the other values the pedal reports, read-only.
 - **Read again** refreshes everything.
 
