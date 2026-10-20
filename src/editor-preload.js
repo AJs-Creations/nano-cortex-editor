@@ -26,4 +26,8 @@ contextBridge.exposeInMainWorld('nanoShell', {
   bluetoothChoose: (choice) => ipcRenderer.invoke('bt-choose', String(choice)),
   bluetoothResult: (kind) => ipcRenderer.invoke('bt-result', String(kind)),
   onBluetoothChooser: (fn) => ipcRenderer.on('bt-chooser', (_e, view) => fn(view)),
+  // Updates (src/updates.js): events for the modal, its answers, and Settings → Check for updates automatically.
+  onUpdate: (fn) => ipcRenderer.on('update-event', (_e, ev) => fn(ev)),
+  updateAction: (what, version) => ipcRenderer.invoke('update-action', String(what), String(version || '')),
+  setAutoUpdate: (on) => ipcRenderer.invoke('set-auto-update', !!on),
 });

@@ -69,6 +69,10 @@ The macOS app is signed by "Anup Sebastian" (Developer ID) and notarised by Appl
 - Bluetooth goes through BlueZ, the standard Linux Bluetooth stack: your adapter has to be on and the `bluetooth`
   service running (see [Troubleshooting](#15-troubleshooting)).
 
+**Updates.** The app checks GitHub for new versions and lets you install one, skip it or be reminded later; turn
+this off in [Settings](#12-settings) → General → Advanced. The portable `.exe` and the deb only link to the download.
+Version 1.0.0 doesn't check, so get the next version from the Releases page once.
+
 **Before you save anything**, back up your presets with the official Cortex Cloud app. Edits from this editor are live
 on the pedal, and saves are permanent.
 
@@ -148,7 +152,7 @@ message sent and the **Record** and **Activity** buttons.
 ![The status bar: demo-mode indicator and the Settings, Shortcuts and Support buttons](images/status-bar.png)
 
 **Help menu**: **Manual** (this page), **GitHub Repository**, **Report an Issue**, **Show Log File** (see
-[Troubleshooting](#15-troubleshooting)) and **Support the Project…**. The links open in your default browser.
+[Troubleshooting](#15-troubleshooting)), **Check for Updates…** and **Support the Project…**. The links open in your default browser.
 
 ## 4. Presets
 
@@ -390,7 +394,8 @@ Open Settings with ⌘, (Ctrl+, on Windows), from the app menu, or with **Settin
   **Follow the preset tempo**, beats per bar, which mode the panel **Opens in**, and the Advanced defaults (pattern,
   subdivision, count-in and the three levels).
 - **Connection**: **Reconnect to the last pedal at launch** and **Forget pedal**.
-- **Advanced**: **Developer tools** (below). With it on, also **Show the Activity drawer at launch** and **Show
+- **Advanced**: **Check for updates automatically** (on by default; see Updates in
+  [section 1](#1-install-and-first-launch)) and **Developer tools** (below). With it on, also **Show the Activity drawer at launch** and **Show
   recordings folder**.
 
 <a id="developer-tools"></a>

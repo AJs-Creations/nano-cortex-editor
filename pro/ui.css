@@ -800,3 +800,14 @@ body:not(.dev-tools) .dev-only { display: none !important; }
 .bt-row.not-nano .name, .bt-row.not-nano .tag { color: var(--faint); background: none; }
 .bt-empty { padding: 22px 12px; color: var(--faint); text-align: center; font-size: 12.5px; }
 .bt-chooser .row .grow { flex: 1; }
+/* ---- update modal (desktop app; src/updates.js) */
+.modal.upd-modal { width: min(460px, calc(100% - 32px)); }
+.upd-modal p.upd-notes { max-height: 168px; overflow-y: auto; margin: 0 0 8px; white-space: pre-line; font-size: 12.5px; }
+.upd-modal p.upd-more { margin: 0 0 18px; font-size: 12.5px; }
+.upd-progress { display: flex; align-items: center; gap: 10px; margin: 0 0 18px; }
+.upd-progress[hidden] { display: none; }
+.upd-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--raised); overflow: hidden; }
+.upd-bar > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.upd-pct { color: var(--dim); font-size: 12px; white-space: nowrap; min-width: 112px; text-align: right; }
+.upd-modal .row:empty { display: none; }
+.upd-modal .upd-progress:has(+ .row:empty) { margin-bottom: 0; }
