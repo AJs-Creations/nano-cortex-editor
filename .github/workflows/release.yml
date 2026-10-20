@@ -17,9 +17,9 @@
 # "Apple Signing"), the macOS job fetches the Developer ID certificate and the App Store Connect API key, and
 # electron-builder signs with "Developer ID Application: Anup Sebastian (272K9YT73Z)" under the hardened runtime
 # (entitlements in build/entitlements.mac*.plist), notarises and staples the app; the dmg is signed, notarised and
-# stapled here. Without the secret (forks, or anyone building from source) the build uses the ad-hoc signature in
-# package.json (mac.identity "-", no notarisation). This fallback is published too; macOS may show a security
-# warning. The macOS job checks the app inside each zip (and each dmg) the way a download sees it.
+# stapled here. Without the secret (forks, or anyone building from source) the build falls back to the ad-hoc
+# signature in package.json (mac.identity "-", no notarisation); a tag push or a release_tag run refuses to ship
+# that. The macOS job then checks the app inside each zip (and each dmg) the way a download sees it.
 # Windows and Linux builds are unsigned and never see the Apple credentials. Windows: SmartScreen → More info → Run
 # anyway.
 name: Release
@@ -91,13 +91,17 @@ jobs:
         if: runner.os == 'macOS'
         env:
           HAS_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}
+          SHIPS: ${{ github.event_name == 'push' || inputs.release_tag != '' }}
         run: |
           if [ "$HAS_TOKEN" = true ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"
             echo "Developer ID signing and notarisation"
+          elif [ "$SHIPS" = true ]; then
+            echo "::error::OP_SERVICE_ACCOUNT_TOKEN is not set: refusing to publish an ad-hoc signed macOS build"
+            exit 1
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "No signing credentials: ad-hoc signature only; the build may show macOS security warnings"
+            echo "No signing credentials: ad-hoc signature only (dry run)"
           fi
       - name: Install the 1Password CLI
         if: steps.mode.outputs.signed == 'true'
@@ -242,7 +246,7 @@ jobs:
           {
             echo
             echo "---"
-            echo "macOS builds are Developer ID signed and notarised when Apple signing credentials are configured; otherwise they use an ad-hoc signature and may show a macOS security warning. Windows builds are unsigned: SmartScreen → More info → Run anyway. Linux: make the AppImage executable (chmod +x; some distros also need libfuse2), or install the deb with sudo apt install ./file.deb."
+            echo "macOS builds are signed with a Developer ID and notarised by Apple: drag the app to Applications and open it. Windows builds are unsigned: SmartScreen → More info → Run anyway. Linux: make the AppImage executable (chmod +x; some distros also need libfuse2), or install the deb with sudo apt install ./file.deb."
             echo
             echo "Unofficial. Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or endorsed by Neural DSP."
             echo

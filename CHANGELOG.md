@@ -2,7 +2,7 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
-## 1.0.1 — 2026-10-17
+## Unreleased
 
 ### Added
 
@@ -12,7 +12,6 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 ### Fixed
 
 - Preserve input mute when closing the tuner by reapplying it after tuner shutdown settles.
-- Allow release builds without Apple signing credentials; macOS builds use an ad-hoc signature and are not notarized when the secret is unavailable.
 
 ## 1.0.0 — 2026-10-10
 
