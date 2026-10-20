@@ -4,6 +4,10 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 
 ## Unreleased
 
+### Added
+
+- Update notifications: install a new version from the app, skip it or be reminded later (Help → Check for Updates…).
+
 ### Fixed
 
 - Connecting on a computer with many Bluetooth devices ([#15](https://github.com/AJs-Creations/nano-cortex-editor/issues/15)).

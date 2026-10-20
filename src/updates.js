@@ -27,7 +27,8 @@ function installMode(platform, env) {
 function notesExcerpt(notes, max = 360) {
   if (Array.isArray(notes)) notes = notes.map(n => (n && n.note) || '').join('\n');
   const text = String(notes || '')
-    .replace(/<\s*(br|\/p|\/li|\/h\d|\/ul|\/ol|hr)\b[^>]*>/gi, '\n')
+    .replace(/<\s*hr\b[^>]*>/gi, '\n---\n')
+    .replace(/<\s*(br|\/p|\/li|\/h\d|\/ul|\/ol)\b[^>]*>/gi, '\n')
     .replace(/<\s*li\b[^>]*>/gi, '• ')
     .replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, '\'')
@@ -69,11 +70,15 @@ function createUpdates({ updater, store, send, openExternal, currentVersion, mod
     log('update ' + st.downloaded + ' downloaded');
     send({ type: 'downloaded', version: st.downloaded });
   });
+  // On macOS 'update-downloaded' comes when the zip is in; Squirrel.Mac checks its signature after that and can still
+  // refuse it. So an error after the download means the update can't be installed: say so and offer nothing to restart.
   updater.on('error', (err) => {
     const message = String((err && err.message) || err).split('\n')[0];
-    log('update error: ' + message);
-    if (st.manual || st.downloading) send({ type: 'error', message });
+    const during = st.downloading ? 'download' : st.downloaded ? 'install' : 'check';
+    log('update error (' + during + '): ' + message);
+    if (st.manual || during !== 'check') send({ type: 'error', message, during });
     st.downloading = false;
+    st.downloaded = null;
   });
 
   async function check(manual = false) {

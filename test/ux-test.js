@@ -1937,6 +1937,152 @@ async function run() {
     await js('__ble.choices.length = 0; __ble.results.length = 0; __ui.connectError = ""; render()');
   }
 
+  // ---------------------------------------------------------------- update notifications
+  // src/updates.js (the shell's side) with a fake electron-updater and fake timers; its events drive the page's modal
+  // (__updates.event, as the preload bridge does) and the modal's answers (__updates.actions) go back to it.
+  {
+    const { createUpdates, installMode, notesExcerpt, FIRST_MS, DAY_MS } = require('../src/updates');
+    const { EventEmitter } = require('events');
+    check('updates: the macOS zip, the NSIS installer and the AppImage install themselves; the portable exe and the deb only link to the release',
+      installMode('darwin', {}) === 'install' && installMode('win32', {}) === 'install' && installMode('win32', { PORTABLE_EXECUTABLE_FILE: 'C:\\x\\nce.exe' }) === 'notify'
+      && installMode('linux', { APPIMAGE: '/home/x/nce.AppImage' }) === 'install' && installMode('linux', {}) === 'notify');
+    const HTML = '<h3>Fixed</h3>\n<ul>\n<li>Connecting on a computer with many Bluetooth devices (<a href="https://github.com/x">#15</a>).</li>\n<li>Only a real Nano Cortex is remembered &amp; reused.</li>\n</ul>\n<hr>\n<p>macOS builds are signed with a Developer ID.</p>';
+    check('release notes become plain text: headings, bullets, entities; the footer after the rule is left out',
+      notesExcerpt(HTML) === 'Fixed\n• Connecting on a computer with many Bluetooth devices (#15).\n• Only a real Nano Cortex is remembered & reused.', JSON.stringify(notesExcerpt(HTML)));
+    const long = notesExcerpt('word '.repeat(200), 100);
+    check('long release notes are cut at a word with an ellipsis', long.length <= 100 && long.endsWith('…') && !/wor…$/.test(long), JSON.stringify(long));
+
+    let settings = { auto: true, skipped: null };
+    let pageQueue = Promise.resolve();
+    const make = (mode) => {
+      const u = new EventEmitter();
+      u.calls = []; u.onCheck = null;
+      u.checkForUpdates = async () => { u.calls.push('check'); if (u.onCheck) return u.onCheck(); return {}; };
+      u.downloadUpdate = async () => { u.calls.push('download'); };
+      u.quitAndInstall = (...a) => u.calls.push('quitAndInstall ' + a.join(','));
+      const t = { timers: [], setTimeout: (fn, ms) => t.timers.push({ fn, ms, every: false, on: true }), setInterval: (fn, ms) => t.timers.push({ fn, ms, every: true, on: true }) };
+      t.clearTimeout = t.clearInterval = (id) => { if (t.timers[id - 1]) t.timers[id - 1].on = false; };
+      const r = { u, t, opened: [], events: [] };
+      r.up = createUpdates({
+        updater: u, store: { get: () => settings, set: (patch) => Object.assign(settings, patch) },
+        send: (ev) => { r.events.push(ev); pageQueue = pageQueue.then(() => js('__updates.event(' + JSON.stringify(ev) + ')')); },
+        openExternal: (url) => r.opened.push(url), currentVersion: '1.0.1', mode, releaseUrl: (v) => LINKS.releases + '/tag/v' + v, timers: t,
+      });
+      return r;
+    };
+    const synced = async () => { await pageQueue; await frame(); };
+    const answer = async (r) => { for (const a of await js('__updates.actions.splice(0)')) r.up.action(a); };   // the page's answers, as the bridge carries them
+    const modalUp = () => js('!!document.querySelector(".upd-modal")');
+    const buttons = () => js('[...document.querySelectorAll(".upd-modal .row button")].map(b => b.textContent).join("|")');
+    const toastText = () => js('document.getElementById("toast").classList.contains("show") ? document.getElementById("toast").textContent : ""');
+    const offer = async (r, version, notes = HTML) => { r.u.emit('update-available', { version, releaseNotes: notes }); await synced(); };
+
+    let r = make('install');
+    check('updates: nothing downloads by itself; a download the user started installs on quit', r.u.autoDownload === false && r.u.autoInstallOnAppQuit === true);
+    r.up.start();
+    check('updates: the first check ' + FIRST_MS / 1000 + ' s after launch, then every 24 hours', r.t.timers.length === 2 && r.t.timers[0].ms === FIRST_MS && !r.t.timers[0].every && r.t.timers[1].ms === DAY_MS && r.t.timers[1].every && DAY_MS === 86400000);
+    r.t.timers[0].fn();
+    check('the scheduled check asks the updater', r.u.calls.join() === 'check');
+
+    await offer(r, '1.0.2');
+    check('an update opens the modal: the new version, a notes excerpt and a link to the full notes',
+      await modalUp() && (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.2 is available'
+      && (await js('document.querySelector("[data-fk=upd-notes]").textContent')).startsWith('Fixed\n• Connecting on a computer')
+      && (await js('document.querySelector("[data-fk=upd-notes-link]").href')) === LINKS.releases + '/tag/v1.0.2');
+    check('the three choices: Skip this version, Remind me later, Download and install', (await buttons()) === 'Skip this version|Remind me later|Download and install', await buttons());
+    await shot('update-available');
+    await click('[data-fk="upd-later"]'); await answer(r);
+    check('Remind me later closes the modal and stores nothing', !(await modalUp()) && settings.skipped === null);
+    r.t.timers[1].fn(); await offer(r, '1.0.2');
+    check('… and the next scheduled check offers it again', await modalUp());
+    await click('[data-fk="upd-skip"]'); await answer(r);
+    check('Skip this version closes the modal and stores the version', !(await modalUp()) && settings.skipped === '1.0.2');
+    const n0 = r.events.length;
+    r.t.timers[1].fn(); await offer(r, '1.0.2');
+    check('a skipped version is never offered by the automatic checks', r.events.length === n0 && !(await modalUp()));
+    await offer(r, '1.0.3');
+    check('a newer version is offered again', await modalUp() && (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.3 is available');
+    await key('Escape'); await answer(r);
+    check('Esc means Remind me later', !(await modalUp()) && settings.skipped === '1.0.2');
+
+    // Download and install: progress, then Restart to update / Later.
+    await offer(r, '1.0.3');
+    await click('[data-fk="upd-download"]'); await answer(r);
+    check('Download and install starts the download and shows progress', r.u.calls.includes('download') && await js('!document.querySelector("[data-fk=upd-progress]").hidden') && (await buttons()) === '');
+    r.u.emit('download-progress', { percent: 42.4 }); await synced();
+    check('the progress bar follows the download', (await js('document.querySelector("[data-fk=upd-pct]").textContent')) === 'Downloading… 42\u202f%' && (await js('document.querySelector(".upd-bar > span").style.width')) === '42%');
+    await key('Escape');
+    check('Esc does nothing while downloading', await modalUp());
+    await shot('update-downloading');
+    r.u.emit('update-downloaded', { version: '1.0.3' }); await synced();
+    check('downloaded: "Version 1.0.3 is ready" with Later and Restart to update', (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.3 is ready' && (await buttons()) === 'Later|Restart to update', await buttons());
+    await click('[data-fk="upd-later"]'); await answer(r);
+    check('Later closes it and says the update installs on quit', !(await modalUp()) && (await toastText()) === 'The update installs when you quit.' && !r.u.calls.some(c => c.startsWith('quitAndInstall')));
+    const c0 = r.u.calls.length;
+    await r.up.check(true); await synced();
+    check('Check for Updates… after a download offers the restart again, without checking', (await buttons()) === 'Later|Restart to update' && r.u.calls.length === c0, (await buttons()) + ' ' + r.u.calls.join());
+    await click('[data-fk="upd-restart"]'); await answer(r);
+    check('Restart to update quits and installs (and relaunches)', r.u.calls.includes('quitAndInstall false,true'));
+    await js('__updates.close()');
+
+    // Manual checks answer; automatic ones stay quiet unless there is something to offer.
+    r = make('install');
+    r.u.onCheck = () => { r.u.emit('update-not-available', { version: '1.0.1' }); return {}; };
+    await r.up.check(true); await synced();
+    check('Check for Updates…: "You’re up to date."', (await toastText()) === 'You’re up to date.' && r.events.map(e => e.type).join() === 'checking,none');
+    r.u.onCheck = () => { r.u.emit('error', new Error('Cannot find latest-mac.yml in the latest release artifacts\nstack…')); throw new Error('x'); };
+    await r.up.check(true); await synced();
+    check('Check for Updates…: an error shows as a toast', (await toastText()) === 'Couldn’t check for updates: Cannot find latest-mac.yml in the latest release artifacts', await toastText());
+    const e0 = r.events.length;
+    await r.up.check(false); await synced();
+    check('an automatic check that fails says nothing', r.events.length === e0);
+    r.u.onCheck = () => { r.u.emit('update-available', { version: '1.0.2', releaseNotes: HTML }); return {}; };   // the updater emits during the check
+    await r.up.check(true); await synced();
+    r.u.onCheck = null;
+    check('Check for Updates… offers a skipped version (it was asked for)', await modalUp() && (await js('document.querySelector("[data-fk=upd-title]").textContent')) === 'Version 1.0.2 is available');
+    await click('[data-fk="upd-download"]'); await answer(r);
+    r.u.emit('error', new Error('net::ERR_INTERNET_DISCONNECTED')); await synced();
+    check('a failed download closes the modal with a toast', !(await modalUp()) && (await toastText()) === 'The update couldn’t be downloaded: net::ERR_INTERNET_DISCONNECTED', await toastText());
+    // macOS: the zip is in ('update-downloaded'), then Squirrel.Mac refuses its signature (seen with ad-hoc builds).
+    r.u.onCheck = () => { r.u.emit('update-available', { version: '1.0.3', releaseNotes: '' }); return {}; };
+    await r.up.check(true); await synced(); r.u.onCheck = null;
+    await click('[data-fk="upd-download"]'); await answer(r);
+    r.u.emit('update-downloaded', { version: '1.0.3' }); await synced();
+    r.u.emit('error', new Error('Error: Code signature at URL file:///x/Nano%20Cortex%20Editor.app/ did not pass validation: code failed to satisfy specified code requirement(s)')); await synced();
+    check('an install refused after the download (Squirrel.Mac) closes the modal: nothing to restart', !(await modalUp()) && /^The update couldn’t be installed: Error: Code signature/.test(await toastText()) && r.up.state.downloaded === null, await toastText());
+    await r.up.check(true); await synced();
+    check('… and the next Check for Updates… checks again', r.u.calls.filter(c => c === 'check').length >= 3);
+
+    // Notify only (the portable exe, the deb): Download opens the release page.
+    r = make('notify');
+    check('notify-only builds never install on quit', r.u.autoInstallOnAppQuit === false);
+    await offer(r, '1.0.3');
+    check('notify-only: Skip this version, Remind me later, Download', (await buttons()) === 'Skip this version|Remind me later|Download', await buttons());
+    await click('[data-fk="upd-download"]'); await answer(r);
+    check('notify-only: Download opens the release page and downloads nothing', !(await modalUp()) && r.opened.join() === LINKS.releases + '/tag/v1.0.3' && !r.u.calls.includes('download'));
+
+    // The setting: off stops the schedule, on starts it again.
+    r = make('install');
+    r.up.start();
+    r.up.setAuto(false);
+    check('turning automatic checks off stores it and cancels the schedule', settings.auto === false && r.t.timers.every(x => !x.on));
+    const r2 = make('install'); r2.up.start();
+    check('with automatic checks off, nothing is scheduled at launch', r2.t.timers.length === 0);
+    r2.up.setAuto(true);
+    check('turning them on schedules them again', settings.auto === true && r2.t.timers.filter(x => x.on).length === 2);
+    settings = { auto: true, skipped: null };
+
+    // Settings → General → Advanced, and the Help menu.
+    await key(',', [MOD]);
+    await waitFor('!!document.querySelector(\'[data-fk="set-autoupdate"]\')');
+    check('Settings → Advanced: "Check for updates automatically", disabled outside the desktop app',
+      (await js('document.querySelector(\'[data-fk="set-autoupdate"]\').textContent')) === 'Check for updates automatically' && await js('document.querySelector(\'[data-fk="set-autoupdate"]\').disabled')
+      && (await js('document.querySelector(\'[data-fk="set-autoupdate-note"]\').textContent')) === 'Only in the desktop app.');
+    await key('Escape'); await waitFor('!document.querySelector(".modal")');
+    const help = menuFor(false).join(',');
+    check('Help → Check for Updates…', /Show Log File,-,Check for Updates…,Support the Project…/.test(help), help);
+  }
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }
 

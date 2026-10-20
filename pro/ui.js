@@ -3107,9 +3107,9 @@
     if (ev.type === 'checking') { toast('Checking for updates\u2026'); return; }
     if (ev.type === 'none') { toast('You\u2019re up to date.'); return; }
     if (ev.type === 'error') {
-      const downloading = upd.stage === 'downloading';
       closeUpdate();
-      toast((downloading ? 'The update couldn\u2019t be downloaded: ' : 'Couldn\u2019t check for updates: ') + ev.message);
+      toast((ev.during === 'download' ? 'The update couldn\u2019t be downloaded: ' : ev.during === 'install' ? 'The update couldn\u2019t be installed: '
+        : 'Couldn\u2019t check for updates: ') + ev.message);
       return;
     }
     if (ev.type === 'available') {
