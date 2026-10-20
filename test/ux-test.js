@@ -546,9 +546,7 @@ async function run() {
     Object.assign(state.blocks.pre1, ${pre1BeforeExpression});
     Object.assign(state.exp, ${expBeforeExpression});
     state.connected = true;
-    if (state.expressionParamRefreshTimer) clearTimeout(state.expressionParamRefreshTimer);
-    state.expressionParamRefreshTimer = null;
-    state.expressionPedalRaw = null;
+    NanoLive.reset();
     render();
   })()`);
   await frame();

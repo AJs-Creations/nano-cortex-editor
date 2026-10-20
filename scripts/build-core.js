@@ -51,6 +51,11 @@ const ENTRY = [
   'log', 'setStatus', 'setCaptureVolumeUI', 'render', 'renderPresetSelect', 'renderCaptureIR', 'renderCaptureIRExtraParams',
   'toast', 'showSaveResult', 'renderTunerReading', 'askText', 'askConfirm', 'showNotice', 'chooseSlot',
   'renderExpPanel', 'setExpStatus',
+  // overridden or reached by pro/live-sync.js and pro/ui.js (live pedal sync, auditions, preset moves)
+  'handleTypedMessage', 'parseBufferedCurrentState', 'beginPresetLoad', 'applyFXEnabledStatesFromCurrentState',
+  'applyFXModelsFromCurrentState', 'handleFXParamRefreshResponse', 'requestNextFXParamRefresh', 'cancelFXParamRefresh',
+  'handleCabinetSlotContentResponse', 'normalizedToParamValue', 'normaliseName', 'captureRawToDb', 'blockSlotConfig',
+  'gattWriteQueue', 'gattWritePumpRunning', 'waitUntil', 'encodeInt32',
 ];
 
 // Upstream functions the pro UI replaces on `window`. Must be function declarations.
@@ -147,31 +152,6 @@ patches.set(dollar, `// patched by build-core.js: upstream UI code may touch ids
       return id => document.getElementById(id) || stubs.get(id) || (stubs.set(id, Object.assign(document.createElement('div'), { hidden: true })), stubs.get(id));
     })();`);
 
-// The upstream core does not define the IR-library deletion messages. Keep
-// these in the generated MSG object because pro/ui.js builds and waits for
-// this request after every `npm start` regenerates core.js.
-const msg = byName.get('MSG');
-const msgSource = src.slice(msg.node.start, msg.node.end);
-const libraryResponse = 'RetrieveLibraryContentResponse: 77,';
-if (!msgSource.includes(libraryResponse)) throw new Error('Upstream MSG object moved; cannot add IR-library deletion messages');
-patches.set(msg, msgSource.replace(libraryResponse,
-  libraryResponse + '\n      DeleteLibraryIRRequest: 82,\n      DeleteLibraryIRResponse: 83,'));
-
-// A current-state read completes in the buffered FE parser. The upstream
-// fallback sees unrelated single packets, so it cannot confirm a state read.
-const bufferedState = byName.get('parseBufferedCurrentState');
-const bufferedStateSource = src.slice(bufferedState.node.start, bufferedState.node.end);
-const stateParseComplete = /(state\.stateBytes = \[\];\r?\n[ \t]*state\.stateMode = 'idle';)/;
-if (!stateParseComplete.test(bufferedStateSource)) throw new Error('Upstream current-state parser moved; cannot mark completed reads');
-patches.set(bufferedState, bufferedStateSource.replace(stateParseComplete,
-  match => match + (match.includes('\r\n') ? '\r\n' : '\n') + '      state.protocol.lastStateSync = Date.now();'));
-
-const stateFallback = byName.get('parseCurrentPresetState');
-const stateFallbackSource = src.slice(stateFallback.node.start, stateFallback.node.end);
-const fallbackSync = /[ \t]*state\.protocol\.lastStateSync = Date\.now\(\);\r?\n/;
-if (!fallbackSync.test(stateFallbackSource)) throw new Error('Upstream current-state fallback moved; cannot remove false sync');
-patches.set(stateFallback, stateFallbackSource.replace(fallbackSync, ''));
-
 // Hooks become empty declarations: the override point exists, the upstream UI body is gone.
 for (const h of HOOKS) {
   const t = byName.get(h);
@@ -192,9 +172,6 @@ const out = header + pieces.join('\n\n') + '\n';
 // Guarantees the desktop shell relies on.
 if (/midiOutput|\.send\(\[0xC0/.test(out)) throw new Error('core.js sends MIDI; the pro UI expects preset switching over BLE only');
 for (const h of HOOKS) if (!new RegExp('^\\s*function ' + h + '\\s*\\(', 'm').test(out)) throw new Error('core.js lost hook ' + h);
-if (!/DeleteLibraryIRRequest:\s*82/.test(out) || !/DeleteLibraryIRResponse:\s*83/.test(out)) {
-  throw new Error('core.js lost the IR-library deletion message types');
-}
 
 // ---------------------------------------------------------------- 5. sandbox load
 const element = () => ({

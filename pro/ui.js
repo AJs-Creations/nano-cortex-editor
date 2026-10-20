@@ -118,8 +118,7 @@
   const ui = {
     selected: 'capture',
     demo: false,
-    expressionBaseline: null,
-    expressionBaselineBoundary: false,
+    clearOverridesOnRead: true,   // the next state dump replaces local edits of expression targets
     expressionLocalOverrides: new Map(),
     pendingBypassTargets: new Map(),
     bypassWriteChain: Promise.resolve(),
@@ -1289,30 +1288,15 @@
     return coreOnC305ForTempo.apply(this, [event, ...rest]);
   };
 
-  // Device-originated parameter changes use more than one message shape. The
-  // The legacy control report (type 26) carries raw amp/capture/gate values;
-  // contextual reports that cannot be mapped locally fall back to the existing
-  // state/FX/cab readers. Keep the high-frequency paths local.
-  const LIVE_PARAMETER_REPORT = 26;
-  const LIVE_FX_PARAMETER_REPORT = 99;
-  const DEVICE_STATE_CHANGED = 31;
-  const PRESET_DIRTY_REPORT = 115;
-  const CONTEXT_PARAMETER_REPORTS = new Set([94]); // cab parameter frames without a safe target
-  const LIVE_CONTROL_IDS = {
-    0x00: ['amp', 'gain'],
-    0x01: ['amp', 'level'],
-    0x02: ['amp', 'bass'],
-    0x03: ['amp', 'mid'],
-    0x04: ['amp', 'treble'],
-    0x0A: ['capture', 'volume'],
-    0x0B: ['gate', 'reduction'],
+  // Live reports from the pedal (knobs, footswitch bypasses, the expression pedal) are applied in pro/live-sync.js.
+  // The UI's part: a bypass click the pedal hasn't confirmed yet wins over an older report, and a local edit of an
+  // expression target stays until the pedal moves again.
+  NanoLive.hooks.keepLocalBypass = (key, enabled) => {
+    const pending = ui.pendingBypassTargets.get(key);
+    return !!pending && pending.preset === Number(state.selectedPreset) && pending.on !== enabled;
   };
-  let pedalStateRefreshTimer = null;
-  let pedalStateRefreshPending = false;
-  let recentLiveFXParameter = null;
-  // Only the pedal's dirty report drives the save UI. These values are display
-  // state for expression overlays and write ordering, never a dirty model.
-  let expressionBoundaryPreset = null;
+  NanoLive.hooks.expressionMoved = () => ui.expressionLocalOverrides.clear();
+  NanoLive.hooks.afterExpression = () => restoreExpressionLocalOverrides();
 
   function clearPendingIRSlotTarget(target = ui.pendingIRSlotTarget) {
     if (!target) return;
@@ -1359,211 +1343,19 @@
   }
 
   function beginExpressionBoundary() {
-    ui.expressionBaseline = null;
-    ui.expressionBaselineBoundary = true;
+    ui.clearOverridesOnRead = true;
     ui.expressionLocalOverrides.clear();
-    expressionBoundaryPreset = null;
     ui.pendingBypassTargets.clear();
     ui.bypassWriteGeneration++;
     clearPendingIRSlotTarget();
   }
 
-  const captureDbFromRaw = (raw) => raw <= 128 ? ((raw / 128) * 24) - 24 : ((raw - 128) / 127) * 12;
-
-  function pedalStateReadBusy() {
-    return state.stateMode !== 'idle' || state.pendingParamBlock || state.paramRefreshQueue.length || state.fileBusy ||
-      gattWriteQueue.length || gattWritePumpRunning;
-  }
-
-  function runPedalStateRefresh() {
-    pedalStateRefreshTimer = null;
-    if (!pedalStateRefreshPending || !state.connected) {
-      pedalStateRefreshPending = false;
-      return;
-    }
-    if (state.protocol.presetLoad) {
-      pedalStateRefreshPending = false; // the preset load already includes an authoritative state read
-      return;
-    }
-    if (pedalStateReadBusy()) {
-      pedalStateRefreshTimer = setTimeout(runPedalStateRefresh, 100);
-      return;
-    }
-    pedalStateRefreshPending = false;
-    log('Pedal state changed; refreshing the current preset');
-    requestCurrentPresetState();
-  }
-
-  function schedulePedalStateRefresh() {
-    if (!state.connected || state.protocol.presetLoad) return;
-    pedalStateRefreshPending = true;
-    if (pedalStateRefreshTimer !== null) clearTimeout(pedalStateRefreshTimer);
-    pedalStateRefreshTimer = setTimeout(runPedalStateRefresh, 120);
-  }
-
-  function fixed32Float(entry) {
-    if (!entry || entry.wire !== 5 || !entry.raw || entry.raw.length !== 4) return null;
-    const value = new DataView(Uint8Array.from(entry.raw).buffer).getFloat32(0, true);
-    return Number.isFinite(value) ? value : null;
-  }
-
-  function applyLiveFXParameterReport(data) {
-    if (frameType(data) !== LIVE_FX_PARAMETER_REPORT) return false;
-
-    const fields = parseProtoFields(data.slice(2, data.length - 4));
-    const reportEntry = fields[1] && fields[1][0];
-    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1) return false;
-
-    const blockEntry = fields[3] && fields[3][0];
-    const paramEntry = fields[4] && fields[4][0];
-    const valueEntry = fields[5] && fields[5][0];
-    if ((blockEntry && blockEntry.wire !== 0) || (paramEntry && paramEntry.wire !== 0) ||
-      (valueEntry && valueEntry.wire !== 5)) return false;
-
-    // These are protobuf fields, so the pedal omits the zero-valued block,
-    // parameter index, and value. Slot 0 / parameter 0 / raw value 0 are the
-    // defaults represented by an absent field.
-    const blockSlot = blockEntry ? blockEntry.value : 0;
-    const paramIndex = paramEntry ? paramEntry.value : 0;
-    const raw = valueEntry ? fixed32Float(valueEntry) : 0;
-    if (!Number.isInteger(blockSlot) || blockSlot < 0 || blockSlot >= FX_BLOCK_KEYS.length ||
-      !Number.isInteger(paramIndex) || paramIndex < 0 || raw === null || raw < 0 || raw > 255) return false;
-
-    const blockKey = FX_BLOCK_KEYS[blockSlot];
-    const block = state.blocks[blockKey];
-    const param = block && block.params && block.params[paramIndex];
-    if (!param) return false;
-
-    const next = normalizedToParamValue(param, raw / 255);
-    recentLiveFXParameter = { raw, at: Date.now() };
-    if (param.value !== next) {
-      param.value = next;
-      render();
-    }
-    return true;
-  }
-
-  function applyLiveFXEnableReport(data) {
-    if (frameType(data) !== DEVICE_STATE_CHANGED) return false;
-
-    const fields = parseProtoFields(data.slice(2, data.length - 4));
-    const reportEntry = fields[1] && fields[1][0];
-    const slotEntry = fields[3] && fields[3][0];
-    const stateEntry = fields[4] && fields[4][0];
-    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1 ||
-      !slotEntry || slotEntry.wire !== 0 ||
-      (stateEntry && stateEntry.wire !== 0)) return false;
-
-    // Enable slots 4..8 correspond to Pre FX 1..2 and Post FX 1..3. A
-    // missing field 4 is protobuf's default zero, which means enabled.
-    const stateValue = stateEntry ? stateEntry.value : 0;
-    if (stateValue !== 0 && stateValue !== 1) return false;
-    const blockKey = FX_BLOCK_KEYS.find(key => blockSlotConfig[key] && blockSlotConfig[key].enableSlot === slotEntry.value);
-    const block = blockKey && state.blocks[blockKey];
-    if (!block) return false;
-
-    const enabled = stateValue === 0;
-    const pending = ui.pendingBypassTargets.get(blockKey);
-    if (pending && pending.preset === Number(state.selectedPreset) && pending.on !== enabled) return true;
-    if (block.on !== enabled) {
-      block.on = enabled;
-      render();
-    }
-    return true;
-  }
-
-  function applyLiveParameterReport(data) {
-    if (frameType(data) !== LIVE_PARAMETER_REPORT) return false;
-
-    const fields = parseProtoFields(data.slice(2, data.length - 4));
-    const reportEntry = fields[1] && fields[1][0];
-    const markerEntry = fields[6] && fields[6][0];
-    if (!reportEntry || reportEntry.wire !== 0 || reportEntry.value !== 1 ||
-      !markerEntry || markerEntry.wire !== 0 || markerEntry.value !== 1) return false;
-
-    const idEntry = fields[3] && fields[3][0];
-    if (idEntry && idEntry.wire !== 0) return false;
-    // Gain is control ID 0. Protobuf omits that field when its value is zero,
-    // so a normal gain report has no field 3 at all.
-    const controlId = idEntry ? idEntry.value : 0;
-    if (!LIVE_CONTROL_IDS[controlId]) {
-      const valueEntry = fields[4] && fields[4][0];
-      const raw = valueEntry ? valueEntry.value : 0;
-      if (controlId === 0x06 && recentLiveFXParameter && Date.now() - recentLiveFXParameter.at < 250 && raw === Math.round(recentLiveFXParameter.raw)) {
-        recentLiveFXParameter = null;
-        return true;
-      }
-      return false;
-    }
-
-    // Protobuf omits a zero-valued field 4, so `... 18 03 30 01 ...`
-    // means Mid = 0 rather than a malformed packet.
-    const valueEntry = fields[4] && fields[4][0];
-    if (valueEntry && valueEntry.wire !== 0) return false;
-    const raw = clamp(valueEntry ? valueEntry.value : 0, 0, 255);
-    const [kind, key] = LIVE_CONTROL_IDS[controlId];
-    let changed = false;
-
-    if (kind === 'amp') {
-      if (state.amp[key] !== raw) { state.amp[key] = raw; changed = true; }
-    } else if (kind === 'capture') {
-      const db = captureDbFromRaw(raw);
-      if (state.captureVolumeDb !== db) { state.captureVolumeDb = db; changed = true; }
-    } else if (kind === 'gate') {
-      const reduction = clamp(raw - 108, 0, 100);
-      if (state.gate.params[0].value !== reduction) { state.gate.params[0].value = reduction; changed = true; }
-    }
-
-    if (changed) render();
-    return true;
-  }
-
-  const coreOnC305ForLiveParameters = window.onC305;
+  // A preset change on the pedal (footswitch): local edits and unconfirmed clicks belong to the old preset.
+  const coreOnC305ForPresetChange = window.onC305;
   window.onC305 = function (event, ...rest) {
-    try {
-      const v = event && event.target && event.target.value;
-      const data = v && v.buffer ? new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength || v.buffer.byteLength) : null;
-      if (data) {
-        const type = frameType(data);
-        if (type === MSG.SetPresetSlotsRequest) beginExpressionBoundary();
-        if (type === MSG.ExpressionPedalPositionChanged) {
-          const fields = framePayloadFields(data);
-          const selector = fields[3] && fields[3][0] && fields[3][0].value;
-          if (selector === 2 && !(state.exp && state.exp.pending)) {
-            ui.expressionLocalOverrides.clear();
-          }
-        }
-        if (type === LIVE_FX_PARAMETER_REPORT) {
-          // Type 99 carries the effect slot, parameter index, and a fixed32
-          // raw value (0..255), so it can update the affected block directly.
-          // Unknown effects/parameters fall back to the authoritative refresh.
-          if (!applyLiveFXParameterReport(data)) schedulePedalStateRefresh();
-        } else if (type === LIVE_PARAMETER_REPORT) {
-          // Known raw controls update immediately; an unknown control ID still
-          // falls through to the core and remains visible in the protocol log.
-          if (!applyLiveParameterReport(data)) schedulePedalStateRefresh();
-        } else if (type === DEVICE_STATE_CHANGED) {
-          // Contextual type-31 reports identify the exact FX enable slot and
-          // bypass state, so update that block without waiting for a full read.
-          // Generic type-31 notifications are coalesced by the core handler;
-          // avoid starting a second refresh from this UI wrapper.
-          applyLiveFXEnableReport(data);
-        } else if (type === PRESET_DIRTY_REPORT) {
-          // The core has already made state.presetDirty authoritative. Do not
-          // infer a different state or start a read from this notification.
-        } else if (CONTEXT_PARAMETER_REPORTS.has(type)) {
-          // These messages do not carry enough context to safely identify the
-          // affected FX/cab parameter. One coalesced state read supplies it.
-          schedulePedalStateRefresh();
-        }
-      }
-    } catch (err) { log('ERROR: live parameter report: ' + err.message); }
-    const result = coreOnC305ForLiveParameters.apply(this, [event, ...rest]);
-    // The core handler remains the protocol owner, but its contextual type-31
-    // path applies the incoming state synchronously. Reassert the latest local
-    // click after it returns so a delayed report cannot undo the optimistic UI.
-    if (applyPendingBypassTargets()) render();
-    return result;
+    const d = NanoLive.exactBytes(event);
+    if (d && frameType(d) === MSG.SetPresetSlotsRequest) beginExpressionBoundary();
+    return coreOnC305ForPresetChange.apply(this, [event, ...rest]);
   };
 
   // A preset switch drops unsaved edits on the pedal, a pending tempo commit included.
@@ -1897,13 +1689,13 @@
 
     const nameBytes = Array.from(new TextEncoder().encode(current.name));
     const record = [0x08, ...encodeVarint(current.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
-    const frame = buildFrame([0x08, 0x02, 0x22, ...encodeVarint(record.length), ...record], MSG.DeleteLibraryIRRequest);
+    const frame = buildFrame([0x08, 0x02, 0x22, ...encodeVarint(record.length), ...record], NanoLive.MSG.DeleteLibraryIRRequest);
     ui.uploading = true;
     ui.lastAction = 'Deleting IR ' + current.name;
     renderStatus();
     let reply;
     try {
-      reply = await writeAndAwait('Delete IR ' + current.name, frame, MSG.DeleteLibraryIRResponse);
+      reply = await writeAndAwait('Delete IR ' + current.name, frame, NanoLive.MSG.DeleteLibraryIRResponse);
     } finally {
       ui.uploading = false;
       ui.lastAction = '';
@@ -2363,20 +2155,8 @@
 
   async function refreshAfterIRPreviewStop() {
     if (!state.connected) return;
-    const previousSync = Number(state.protocol.lastStateSync) || 0;
-    try {
-      const sent = await requestCurrentPresetState();
-      if (!sent) {
-        if (state.stateMode === 'current') state.stateMode = 'idle';
-        log('IR preview stopped; current preset state refresh could not be sent.');
-        return;
-      }
-      const refreshed = await waitUntil(() => !state.connected || (state.stateMode === 'idle' && Number(state.protocol.lastStateSync) > previousSync), 6000);
-      if (!state.connected && state.stateMode === 'current') state.stateMode = 'idle';
-      if (!refreshed) log('IR preview stopped; current preset state refresh timed out.');
-    } catch (err) {
-      log('ERROR: current state refresh after IR preview: ' + err.message);
-    }
+    // The official app reads the state after a stop; the pedal may report the preset dirty afterwards (115).
+    if (!(await NanoLive.readCurrentState(6000))) log('IR preview stopped; the current preset state could not be read.');
   }
 
   async function stopIRPreview() {
@@ -2647,6 +2427,7 @@
       ui.captureSlotPreselect = 0;
       state.pendingCabAssignment = null;
       state.presetDirty = false; beginExpressionBoundary();
+      NanoLive.reset();
       const d = window.__dev;
       if (d) {
         d.info = null; d.alive = null; d.settings = null; d.reading = false;
@@ -2666,7 +2447,7 @@
       irAudition.stopping = false;
       if (capturePreviewWasActive) notifyPreviewState(false, '', 'The Nano Cortex disconnected; live preview stopped.');
       if (irPreviewWasActive) log('IR preview ended because the Nano Cortex disconnected.');
-      ui.dirty = false; ui.lastAction = ''; state.presetTempo = null;
+      ui.lastAction = ''; state.presetTempo = null;
     }
     if (!connected) { state.exp.loaded = false; state.exp.preset = null; }
     render();
@@ -2699,7 +2480,7 @@
     } else if (kind === 'error') {
       toast(detail || text);
     } else if (/saving/i.test(text)) {
-      ui.expressionBaselineBoundary = true;
+      ui.clearOverridesOnRead = true;
       ui.lastAction = 'Saving preset ' + state.selectedPreset + '…';
     }
     render();
@@ -2778,7 +2559,7 @@
     const target = expressionRangeFor(key);
     if (!target) return;
     if (target.block) {
-      const param = expressionAmountParam(state.blocks[target.block]);
+      const param = NanoLive.expressionAmountParam(state.blocks[target.block]);
       if (param && kind === 'param' && value && value.index === param.index) {
         ui.expressionLocalOverrides.set('range:' + key, { kind, key, value: param.value });
       }
@@ -2791,7 +2572,7 @@
     for (const entry of ui.expressionLocalOverrides.values()) {
       if (entry.kind === 'bypass') {
         const targetDef = EXP_BYPASS.find(target => target.key === entry.key);
-        const target = targetDef && expressionTargetState(targetDef);
+        const target = targetDef && NanoLive.expressionTargetState(targetDef);
         if (target && target.get() !== entry.value) { target.set(entry.value); changed = true; }
       } else if (entry.key === 'level') {
         if (state.captureVolumeDb !== entry.value) { state.captureVolumeDb = entry.value; changed = true; }
@@ -2800,58 +2581,15 @@
       } else if (entry.key === 'gate' && state.gate.params[0] && state.gate.params[0].value !== entry.value) {
         state.gate.params[0].value = entry.value; changed = true;
       } else if (state.blocks[entry.key]) {
-        const param = expressionAmountParam(state.blocks[entry.key]);
+        const param = NanoLive.expressionAmountParam(state.blocks[entry.key]);
         if (param && param.value !== entry.value) { param.value = entry.value; changed = true; }
       }
     }
     return changed;
   }
-  const coreApplyExpressionPosition = window.applyExpressionPositionToUI;
-  window.applyExpressionPositionToUI = function (rawPosition) {
-    const result = coreApplyExpressionPosition.apply(this, arguments);
-    if (restoreExpressionLocalOverrides()) render();
-    return result;
-  };
-  function expressionBaselineFromDump(fields) {
-    const value = (n, fallback = 0) => fields[n] && fields[n][0] && fields[n][0].wire === 0 ? fields[n][0].value : fallback;
-    const fixed = (n) => fixed32Float(fields[n] && fields[n][0]);
-    const fx = fields[31] && fields[31][0];
-    const blocks = Object.fromEntries(FX_BLOCK_KEYS.map((key, index) => {
-      const block = state.blocks[key];
-      const param = expressionAmountParam(block);
-      const raw = block && block.originalPreset === state.selectedPreset && block.originalModel === block.model &&
-        param && block.originalFloats && Number.isFinite(block.originalFloats[param.index]) ? block.originalFloats[param.index] : null;
-      return [key, { on: fx && fx.wire === 2 && fx.raw && fx.raw.length > index ? fx.raw[index] === 0 : Boolean(block && block.on), amount: raw === null ? null : normalizedToParamValue(param, raw) }];
-    }));
-    return {
-      preset: Number(state.selectedPreset),
-      amp: { gain: value(3), bass: value(5), mid: value(6), treble: value(7) },
-      capture: { on: value(11) > 0, volumeDb: captureDbFromRaw(value(44)) },
-      cab: { on: Boolean(fields[12] && fields[12][0]) },
-      gate: { on: !(fields[54] && fields[54][0]), reduction: fixed(53) === null ? Number(state.gate.params[0].value) : clamp(Math.round(fixed(53) * 255) - 108, 0, 100) },
-      blocks,
-    };
-  }
-  function updateFXExpressionBaseline(blockKey) {
-    const baseline = ui.expressionBaseline;
-    const block = state.blocks[blockKey];
-    if (!baseline || baseline.preset !== Number(state.selectedPreset) || !block) return;
-    const param = expressionAmountParam(block);
-    const raw = block.originalPreset === state.selectedPreset && block.originalModel === block.model && param &&
-      block.originalFloats && Number.isFinite(block.originalFloats[param.index]) ? block.originalFloats[param.index] : null;
-    if (raw !== null) baseline.blocks[blockKey].amount = normalizedToParamValue(param, raw);
-  }
-  const coreFXParamResponse = window.handleFXParamRefreshResponse;
-  window.handleFXParamRefreshResponse = function (data) {
-    const blockKey = state.pendingParamBlock;
-    const result = coreFXParamResponse.apply(this, arguments);
-    if (blockKey) updateFXExpressionBaseline(blockKey);
-    return result;
-  };
   const coreApplyFXEnabledStates = window.applyFXEnabledStatesFromCurrentState;
   window.applyFXEnabledStatesFromCurrentState = function (fields) {
     const result = coreApplyFXEnabledStates.apply(this, arguments);
-    if (state.expressionPedalRaw !== null) window.applyExpressionPositionToUI(state.expressionPedalRaw);
     if (applyPendingBypassTargets()) render();
     return result;
   };
@@ -2859,14 +2597,10 @@
   window.parseBufferedCurrentState = function () {
     const bytes = state.stateBytes.slice();
     let src = null;
-    let fields = null;
-    const oldPreset = Number(state.selectedPreset);
     const presetLoadBoundary = state.protocol.presetLoad;
-    const boundary = ui.expressionBaselineBoundary || !ui.expressionBaseline || expressionBoundaryPreset !== oldPreset || presetLoadBoundary;
     try {
       if (bytes.length) {
-        fields = parseProtoFields(bytes);
-        const f = fields;
+        const f = parseProtoFields(bytes);
         const v = (n) => (f[n] && f[n][0] && f[n][0].wire === 0 ? f[n][0].value : 0);
         src = { bank: Math.min(5, Math.max(1, v(9) || 1)), pos: v(11), cab: v(12) };
         state.capture.fromLibrary = src.pos > 5;
@@ -2923,13 +2657,12 @@
     } catch { /* leave the gate knob as it was */ }
     try { tempoFromDump(parseProtoFields(bytes)); } catch { /* keep the tempo shown */ }
     followExp();   // a new preset (app, footswitch) or a fresh connection: read its expression assignments
-    if (fields && boundary) {
-      ui.expressionBaseline = expressionBaselineFromDump(fields);
-      ui.expressionBaselineBoundary = false;
-      expressionBoundaryPreset = Number(state.selectedPreset);
+    // After a preset load or a save the dump is the new reference: local edits of expression targets are in it.
+    if (bytes.length && (presetLoadBoundary || ui.clearOverridesOnRead)) {
+      ui.clearOverridesOnRead = false;
       ui.expressionLocalOverrides.clear();
     }
-    if (state.expressionPedalRaw !== null) window.applyExpressionPositionToUI(state.expressionPedalRaw);
+    NanoLive.reapplyExpression();   // the dump has the stored values; the pedal's position is on top of them
     if (applyPendingBypassTargets()) render();
     return r;
   };
@@ -3235,10 +2968,10 @@
     }
     if (choice !== 'discard') return false;
 
-    const previousSync = Number(state.protocol.lastStateSync) || 0;
+    const before = NanoLive.stateReads;
     state.exp.loaded = false;
     await selectPreset(current);
-    const discarded = await waitUntil(() => state.stateMode === 'idle' && !state.protocol.presetLoad && Number(state.protocol.lastStateSync) > previousSync, 7000);
+    const discarded = await waitUntil(() => !state.protocol.presetLoad && NanoLive.stateReads > before, 7000);
     if (!discarded) {
       toast('The pedal did not confirm reloading the saved preset.');
       return false;
@@ -3265,18 +2998,7 @@
     return state.connected && refreshed && state.protocol.metadataLoaded;
   }
 
-  async function refreshCurrentPresetAfterMove() {
-    if (!state.connected) return false;
-    const previousSync = Number(state.protocol.lastStateSync) || 0;
-    const sent = await requestCurrentPresetState();
-    if (!sent) {
-      if (state.stateMode === 'current') state.stateMode = 'idle';
-      return false;
-    }
-    const refreshed = await waitUntil(() => !state.connected || (state.stateMode === 'idle' && Number(state.protocol.lastStateSync) > previousSync), 10000);
-    if (!state.connected && state.stateMode === 'current') state.stateMode = 'idle';
-    return state.connected && refreshed;
-  }
+  const refreshCurrentPresetAfterMove = () => NanoLive.readCurrentState(10000);
 
   async function movePresetOrder(source, destination) {
     if (source === destination || ui.presetReorderBusy) return false;
@@ -4608,23 +4330,43 @@
     monitorPending: {}, monitorAcks: [], monitorReadTimer: null, muteInputRevision: 0,
     settingsRequestedForConnection: false };
   window.__dev = dev;
-  window.__captureTunerInputMute = () => state.connected && dev.settings
-    ? { muted: Boolean(dev.settings.muteInput), revision: dev.muteInputRevision }
-    : null;
-  window.__restoreTunerInputMute = (snapshot) => {
-    if (!snapshot || !state.connected || !dev.settings || dev.muteInputRevision !== snapshot.revision) return;
-    if (!snapshot.muted) return;
-    // The pedal leaves the setting bit on after tuner shutdown, but its audio
-    // path appears to need a fresh off-to-on edge to restore the input mute.
-    const offWrite = writeMonitorSetting('muteInput', false);
-    const pulseRevision = dev.muteInputRevision;
-    offWrite.then(() => {
+  // Tuner and Mute Input: the pedal still reports the input muted after the tuner closes, but its audio path needs a
+  // fresh off → on edge to mute again (seen on a pedal, #14). So: note the mute when the tuner opens; when it closes,
+  // wait for the tuner-off write, let the pedal settle 200 ms, then send off and, 100 ms after that write, on again,
+  // unless the user changed the mute meanwhile.
+  let tunerMuteSnapshot = null;
+  const coreOpenTuner = window.openTuner;
+  window.openTuner = function () {
+    tunerMuteSnapshot = state.connected && dev.settings ? { muted: Boolean(dev.settings.muteInput), revision: dev.muteInputRevision } : null;
+    return coreOpenTuner.apply(this, arguments);
+  };
+  const coreCloseTuner = window.closeTuner;
+  window.closeTuner = function () {
+    const wasOpen = state.tuner.open;
+    const snapshot = wasOpen ? tunerMuteSnapshot : null;
+    if (wasOpen) tunerMuteSnapshot = null;
+    const result = coreCloseTuner.apply(this, arguments);
+    if (snapshot && snapshot.muted && state.connected) {
+      // Writes leave in order, so an empty queue means the tuner-off write (if any) has gone out.
+      waitUntil(() => !gattWriteQueue.length && !gattWritePumpRunning, 3000)
+        .then(() => new Promise(r => setTimeout(r, 200)))
+        .then(() => rearmInputMute(snapshot));
+    }
+    return result;
+  };
+  function rearmInputMute(snapshot) {
+    if (!state.connected || state.tuner.open || !dev.settings || dev.muteInputRevision !== snapshot.revision) return;
+    const off = writeMonitorSetting('muteInput', false);
+    const revision = dev.muteInputRevision;
+    if (!off) return;
+    off.then((sent) => {
+      if (!sent) return;
       setTimeout(() => {
-        if (!state.connected || state.tuner.open || dev.muteInputRevision !== pulseRevision) return;
+        if (!state.connected || state.tuner.open || dev.muteInputRevision !== revision) return;
         writeMonitorSetting('muteInput', true);
       }, 100);
     });
-  };
+  }
   // Varint that stays exact past 2^31 (the Unix time is close to it).
   const varint = (n) => { const out = []; n = Math.max(0, Math.floor(n)); while (n > 127) { out.push((n % 128) | 128); n = Math.floor(n / 128); } out.push(n); return out; };
   // A typed frame whose body may pass 255 bytes: bit 0 of the flags byte is the length's ninth bit.
@@ -5388,7 +5130,7 @@
         // the simulated pedal's authoritative type-115 report.
         notify(buildFrame([0x08, 0x01, 0x18, 0x01], MSG.PresetDirtyStateChanged));
       }
-      else if (type === MSG.DeleteLibraryIRRequest) {
+      else if (type === NanoLive.MSG.DeleteLibraryIRRequest) {
         const f = framePayloadFields(bytes);
         const record = f[4] && f[4][0] ? parseProtoFields(f[4][0].raw) : {};
         const index = record[1] && record[1][0] ? record[1][0].value : -1;
@@ -5397,7 +5139,7 @@
           LIB.irUser = LIB.irUser.filter(item => item.index !== index);
           LIB.irUser.forEach((item, nextIndex) => { item.index = nextIndex; });
         }
-        notify(buildFrame([0x08, 0x06, 0x18, removed ? 0x01 : 0x00], MSG.DeleteLibraryIRResponse));
+        notify(buildFrame([0x08, 0x06, 0x18, removed ? 0x01 : 0x00], NanoLive.MSG.DeleteLibraryIRResponse));
       }
       else if (type === MSG.SetCaptureSlotContentRequest) reply(buildFrame([0x18, 0x01], MSG.SetCaptureSlotContentResponse));
       else if (type === MSG.SetCabinetSlotContentRequest) reply(buildFrame([0x18, 0x01], MSG.SetCabinetSlotContentResponse));
@@ -5621,6 +5363,9 @@
   if (devTools && pref.get('drawerAtLaunch', false)) toggleDrawer();
   if (shellBridge) shellBridge.setAccent(pref.get('accent', ACCENTS[0].hex), pref.get('dockFollowsAccent', true)).catch(() => {});
   if (shellBridge && shellBridge.setDevTools) shellBridge.setDevTools(devTools).catch(() => {});   // the menu follows the page's setting
+  // Outermost notification handler (installed last; connectAll() attaches whatever window.onC305 is): every layer
+  // below, upstream's included, gets a value whose buffer holds exactly the notification.
+  window.onC305 = NanoLive.withExactBytes(window.onC305);
   const startDemo = !navigator.bluetooth || window.__FORCE_DEMO || /[?&]demo\b/.test(location.search);
   // Reconnect at launch: the shell grants the user gesture requestDevice() needs and picks the remembered pedal.
   window.__autoConnect = () => { window.__autoConnect = null; return doConnect(); };
