@@ -82,8 +82,16 @@ The editor opens on the connect screen.
    only one Bluetooth connection at a time**; while the phone holds it, the editor cannot see the pedal.
 2. **Make it visible.** After a power-up, hold **EXIT** + **CAPTURE** for about a second, until the Gain ring lights
    up. After a plain disconnect from the editor it stays reachable without this.
-3. **Click Connect.** The app scans for a few seconds and picks your Nano Cortex automatically. If it can't tell which
-   device is the pedal, it shows a list to choose from. No USB cable is needed.
+3. **Click Connect.** The app looks only for devices that offer the Nano Cortex's Bluetooth service and connects to
+   the pedal as soon as it shows up, with or without a name. If that takes more than a moment, a "Looking for your
+   Nano Cortex" window repeats step 2 and keeps scanning. No USB cable is needed.
+
+If the pedal still doesn't appear, click **Show all Bluetooth devices** in that window. It lists every device nearby,
+updated while it scans: names that look like the pedal first, then devices without a name (on Windows the Nano Cortex
+often has none), then everything else. Pick the pedal there. **Scan again** restarts the scan (each one runs about a
+minute). The app remembers a device only after it has found the Nano Cortex's editor service on it, so picking the
+wrong one does no harm: it says "That device isn't a Nano Cortex", marks it, and lets you choose again. A pedal found
+through the full list is remembered with it, and the next Connect starts there.
 
 If the pedal doesn't show up or Bluetooth is off, the message on the connect screen has a **Troubleshooting** link to
 [section 15](#15-troubleshooting). **Read the manual** at the bottom opens this manual in your browser.
@@ -462,12 +470,21 @@ manual. On Windows and Linux the keys are Ctrl for ⌘ and Shift for ⇧ (the in
 
 ## 15. Troubleshooting
 
-**"No Nano Cortex showed up nearby."**
+**The pedal doesn't show up ("Looking for your Nano Cortex" finds nothing).**
 - Make sure the pedal is on and the Cortex Cloud phone app is **not** connected to it (quit the app or turn off the
   phone's Bluetooth). The pedal takes one connection at a time.
-- After a power-up, hold **EXIT** + **CAPTURE** for a second until the Gain ring lights up, then click **Connect**
-  again. The first scan after the pedal boots can come up empty; try once more.
+- After a power-up, hold **EXIT** + **CAPTURE** for a second until the Gain ring lights up. The window keeps scanning;
+  once the scan has finished, click **Scan again**. The first scan after the pedal boots can come up empty.
+- Still nothing: click **Show all Bluetooth devices** and look near the top of the list, including **Unnamed device**
+  rows ([section 2](#2-connecting)).
 - Move closer; Bluetooth LE range drops behind walls and racks.
+
+**The list shows other devices (speakers, headsets) but not the pedal, or "That device isn't a Nano Cortex".**
+- Put the pedal in pairing mode as above and wait a few seconds: the list updates while it scans. On Windows the Nano
+  Cortex often appears as **Unnamed device**; those are listed right after pedal-like names.
+- A device you picked that turned out not to be the pedal is marked **Not a Nano Cortex** and moved to the bottom. The
+  app never remembers it. Version 1.0.0 could remember such a device and then try it on every Connect; the first
+  failed attempt now forgets it and shows the list again. **Settings → Connection → Forget pedal** does the same by hand.
 
 **"The pedal dropped the connection."** Usually the phone app grabbed it. Close it and connect again.
 

@@ -2,6 +2,19 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Connecting on a computer with many Bluetooth devices ([#15](https://github.com/AJs-Creations/nano-cortex-editor/issues/15)).
+  Connect now looks only for devices that offer the Nano Cortex's Bluetooth service and takes the pedal as soon as it
+  appears, with or without a name. While it looks, a window repeats how to put the pedal in pairing mode. **Show all
+  Bluetooth devices** lists every device nearby (no longer only the first eight), live while it scans, with names that
+  look like the pedal first and unnamed devices next; **Scan again** restarts the scan.
+- The app remembers a device only after it has found the Nano Cortex's editor service on it. Before, any device picked
+  in the list was remembered and then tried on every Connect, so one wrong pick (a headset, say) blocked connecting.
+  A remembered device that turns out not to be a Nano Cortex is now forgotten, and the list opens again.
+
 ## 1.0.0 — 2026-10-10
 
 First public release.
