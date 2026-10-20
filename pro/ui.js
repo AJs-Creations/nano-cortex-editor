@@ -432,6 +432,7 @@
 
   async function doSave() {
     if (!state.connected) { toast('Connect your Nano Cortex to save'); return; }
+    if (!(await stopAnyAudition('Save'))) return;
     flushTempo();
     await savePreset(); // the outcome arrives through showSaveResult()
   }
@@ -447,6 +448,7 @@
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Discard', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
+    if (!(await stopAnyAudition('Discard'))) return;
     ui.lastAction = 'Discarding edits\u2026'; renderStatus();
     state.exp.loaded = false;   // the pedal reloads the saved set too; read it again
     await selectPreset(n);
@@ -486,6 +488,7 @@
     const name = input.value.trim();
     if (name.length < 4) { toast('Preset name must have at least 4 characters.'); return; }
     if (new TextEncoder().encode(name).length > 64) { toast('Preset name is too long.'); return; }
+    if (!(await stopAnyAudition('Save as'))) return;
     await savePresetAs(target, name);
   }
   async function savePresetAs(n, name) {
@@ -520,6 +523,7 @@
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
+    if (!(await stopAnyAudition('Delete'))) return;
     const ok = await deletePresetOnPedal(n);
     if (!ok) { toast('The pedal refused to delete preset ' + n); render(); return; }
     state.presetNames.set(n, 'Empty');
@@ -556,9 +560,10 @@
     if (!state.connected) { toast('Connect your Nano Cortex first'); return false; }
     // The pedal drops the current preset's unsaved edits on an assignment (seen in the trace, INVESTIGATION §8),
     // so ask first, like a preset switch does.
-    const dirty = pedalDirtyForUI();
+    const dirty = isDirtyNow();
+    let choice = null;
     if (dirty) {
-      const choice = await modal({
+      choice = await modal({
         title: 'Save changes to ' + presetName(state.selectedPreset) + '?',
         body: 'Assigning a footswitch discards edits that haven\u2019t been saved to the pedal.',
         buttons: [
@@ -568,8 +573,9 @@
         ],
       });
       if (choice === 'cancel' || !choice) { render(); return false; }
-      if (choice === 'save') await doSave();
     }
+    if (!(await stopAnyAudition('the footswitch assignment'))) return false;
+    if (dirty && choice === 'save') await doSave();
     const n = presetIndex + 1;
     const f = await writeAndAwait('Assign preset ' + n + ' to footswitch ' + fs.label, footswitchFrame(slotKey, presetIndex), MSG.SetPresetSlotsResponse);
     if (fieldValue(f, 4) !== 1) {
@@ -597,6 +603,7 @@
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Rename', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
+    if (!(await stopAnyAudition('Rename'))) return;
     const err = await renamePresetTo(n, input.value);
     if (err) { toast(err); return; }
     ui.sideSig = '';
@@ -1350,11 +1357,11 @@
     clearPendingIRSlotTarget();
   }
 
-  // A preset change on the pedal (footswitch): local edits and unconfirmed clicks belong to the old preset.
+  // A preset change on the pedal (footswitch): local edits, unconfirmed clicks and auditions belong to the old preset.
   const coreOnC305ForPresetChange = window.onC305;
   window.onC305 = function (event, ...rest) {
     const d = NanoLive.exactBytes(event);
-    if (d && frameType(d) === MSG.SetPresetSlotsRequest) beginExpressionBoundary();
+    if (d && frameType(d) === MSG.SetPresetSlotsRequest) { beginExpressionBoundary(); endAuditionsAfterPedalPresetChange(); }
     return coreOnC305ForPresetChange.apply(this, [event, ...rest]);
   };
 
@@ -1498,7 +1505,7 @@
           oncontextmenu: (e) => contextMenu(e, [
             {
               label: isActive() ? 'Stop preview' : 'Preview',
-              disabled: !state.connected || !state.library.loaded || ui.demo || ui.uploading || ui.previewBusy || irAudition.busy,
+              disabled: !state.connected || !state.library.loaded || ui.uploading || ui.previewBusy || irAudition.busy,
               action: () => isActive() ? stopIRPreview() : startIRPreview({ kind, index: item.index, name: item.name }),
             },
             {
@@ -1524,10 +1531,10 @@
           : sv('path', { d: 'M5 3v10l8-5z', fill: 'currentColor' }));
         const preview = el('button', {
           class: 'library-preview' + (isActive() ? ' playing' : ''), type: 'button',
-          disabled: !state.connected || !state.library.loaded || ui.demo || irAudition.busy,
+          disabled: !state.connected || !state.library.loaded || irAudition.busy,
           'aria-pressed': String(isActive()),
           'aria-label': isActive() ? 'Stop preview of ' + item.name : 'Preview ' + item.name,
-          title: ui.demo ? 'Connect to a pedal to audition IRs' : isPending() ? 'Starting preview' : isActive() && irAudition.stopping ? 'Stopping preview' : (isActive() ? 'Stop preview' : 'Audition without loading into a slot'),
+          title: isPending() ? 'Starting preview' : isActive() && irAudition.stopping ? 'Stopping preview' : (isActive() ? 'Stop preview' : 'Audition without loading into a slot'),
           onclick: () => isActive() ? stopIRPreview() : startIRPreview({ kind, index: item.index, name: item.name }),
         }, isPending() ? el('span', { class: 'library-preview-pending', 'aria-hidden': 'true', text: '…' }) : previewIcon);
         row.append(pick, preview);
@@ -1660,46 +1667,59 @@
     render();
   }
 
+  // Delete a user IR from the pedal's library: 82 { 1: 2, 4: { 1: index, 2: name } } → 83 { 1: 6, 3: 1 }
+  // (docs/INVESTIGATION.md §6a). The library is read again right before the delete, and the index must still hold
+  // this IR: library indices shift when an IR is added or removed.
+  function irSlotsHolding(name) {
+    const slots = [];
+    for (let i = 1; i <= irSlotCount(); i++) if (sameName(state.irNames.get(i), name)) slots.push(i);
+    return slots;
+  }
   async function deleteLibraryIR(item) {
     if (!state.connected || !item || item.kind !== 'irUser' || !Number.isInteger(item.index)) return;
-    if (ui.uploading || ui.previewBusy || irAudition.busy) {
+    if (ui.uploading || NanoTransfer.busy || ui.previewBusy || irAudition.busy) {
       toast('Finish the current pedal action before deleting an IR.');
       return;
     }
-    if (!state.library.loaded && !await ensureLibrary()) {
-      toast('Could not read the pedal IR library. Refresh it and try again.');
-      return;
-    }
-    const current = state.library.irUser.find(candidate => candidate.index === item.index);
-    if (!current || !sameName(current.name, item.name)) {
-      toast('The pedal IR library changed. Refresh it before deleting this IR.');
-      state.library.loaded = false;
-      await ensureLibrary();
-      render();
-      return;
-    }
+    const slots = irSlotsHolding(item.name);
+    const playing = activeIRSlot();
+    const where = state.cabIR.fromLibrary && sameName(state.currentIR.shortName, item.name)
+      ? ' The current preset plays it straight from the library.'
+      : slots.length ? ' It is loaded in IR slot ' + slots.join(' and ') + (slots.includes(playing) ? ', which the current preset uses' : '') + '. Check ' + (slots.length > 1 ? 'those slots' : 'that slot') + ' afterwards.' : '';
     const choice = await modal({
-      title: 'Delete IR “' + current.name + '” from the pedal?',
-      body: 'This permanently removes the IR from the Nano Cortex library. There is no undo.',
+      title: 'Delete IR “' + item.name + '” from the pedal?',
+      body: 'This permanently removes the IR from the Nano Cortex library. There is no undo.' + where,
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
-    if (ui.previewing && !(await stopCapturePreview())) return;
-    if (irAudition.active && !(await stopIRPreview())) return;
+    if (!(await stopAnyAudition('deleting the IR'))) return;
 
-    const nameBytes = Array.from(new TextEncoder().encode(current.name));
-    const record = [0x08, ...encodeVarint(current.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
-    const frame = buildFrame([0x08, 0x02, 0x22, ...encodeVarint(record.length), ...record], NanoLive.MSG.DeleteLibraryIRRequest);
     ui.uploading = true;
-    ui.lastAction = 'Deleting IR ' + current.name;
+    ui.lastAction = 'Checking the pedal library…';
     renderStatus();
-    let reply;
+    let current = null, reply = null;
     try {
-      reply = await writeAndAwait('Delete IR ' + current.name, frame, NanoLive.MSG.DeleteLibraryIRResponse);
+      state.library.loaded = false;
+      state.library.requested = false;
+      if (await ensureLibrary()) current = state.library.irUser.find(candidate => candidate.index === item.index);
+      if (current && sameName(current.name, item.name)) {
+        const nameBytes = Array.from(new TextEncoder().encode(current.name));
+        const record = [0x08, ...encodeVarint(current.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
+        const frame = buildFrame([0x08, 0x02, 0x22, ...encodeVarint(record.length), ...record], NanoLive.MSG.DeleteLibraryIRRequest);
+        ui.lastAction = 'Deleting IR ' + current.name;
+        renderStatus();
+        reply = await writeAndAwait('Delete IR ' + current.name, frame, NanoLive.MSG.DeleteLibraryIRResponse);
+      }
     } finally {
       ui.uploading = false;
       ui.lastAction = '';
       render();
+    }
+    if (!current || !sameName(current.name, item.name)) {
+      toast(state.library.loaded
+        ? 'The pedal’s IR library changed: “' + item.name + '” is no longer where it was. Nothing was deleted.'
+        : 'Could not read the pedal’s IR library, so nothing was deleted. Try again.');
+      return;
     }
     if (!reply || fieldValue(reply, 3) !== 1) {
       toast('The pedal did not confirm deleting ' + current.name + '.');
@@ -1717,6 +1737,7 @@
       ? current.name + ' deleted from the pedal IR library.'
       : current.name + ' deleted, but the pedal IR list could not be refreshed.');
   }
+  window.__deleteLibraryIR = deleteLibraryIR;
 
   // ------------------------------------------------------------------ slot usage scan
   // Parity with the native app: step through every saved preset, note the capture and cab slot each one
@@ -1745,6 +1766,7 @@
   async function scanUsage() {
     if (ui.scanning || !state.connected) return;
     if (isDirtyNow()) { toast('Save or discard your edits first: the scan switches presets.'); return; }
+    if (!(await stopAnyAudition('the scan'))) return;
     ui.scanning = true; ui.scanStop = false;
     const origin = state.selectedPreset;
     const todo = [];
@@ -1853,6 +1875,7 @@
       if (choice === 'cancel' || !choice) { render(); return; }
       if (choice === 'save') await doSave();
     }
+    if (!(await stopAnyAudition('the preset switch'))) { ui.sideSig = ''; render(); return; }
     await selectPreset(n);
     if (ui.demo) demo.load(n);
     render();
@@ -1896,7 +1919,7 @@
   async function receiveCapture(bundle) {
     const meta = bundle.meta || {};
     if (!state.connected) { toast('Connect your Nano Cortex first, then send ' + (meta.name || 'the capture') + ' again.'); return false; }
-    if (ui.uploading) { toast('A capture is already being sent.'); return false; }
+    if (ui.uploading || NanoTransfer.busy) { toast('Another transfer to the pedal is still running. Try again when it has finished.'); return false; }
     const cns = typeof bundle.cns === 'string' ? Uint8Array.from(atob(bundle.cns), c => c.charCodeAt(0)) : Uint8Array.from(bundle.cns);
     const choice = await modal({
       title: 'Send ' + meta.name + ' to the pedal?',
@@ -1940,14 +1963,14 @@
     const name = String(meta.name || 'Cloud impulse response');
     let outcome = { ok: false, name };
     try {
-      if (!state.connected || ui.demo) {
+      if (!state.connected) {
         const error = 'Connect your Nano Cortex first, then send ' + name + ' again.';
         toast(error);
         outcome.error = error;
         return outcome;
       }
-      if (ui.uploading) {
-        const error = 'A library transfer is already in progress.';
+      if (ui.uploading || NanoTransfer.busy) {
+        const error = 'Another transfer to the pedal is still running. Try again when it has finished.';
         toast(error);
         outcome.error = error;
         return outcome;
@@ -2040,14 +2063,25 @@
   window.__receiveCloudIR = receiveCloudIR;
   if (window.nanoCloud && window.nanoCloud.onImpulseResponse) window.nanoCloud.onImpulseResponse(receiveCloudIR);
 
+  // ------------------------------------------------------------------ auditions (from #14)
+  // Two ways to hear something on the pedal without storing it: a Cortex Cloud capture (150 → 151, "Live Preview" in
+  // the Cloud toolbar) and a library IR (158 → 159, the play button in the Cab / IR inspector). Both end with
+  // 148 → 149 (pro/transfer.js stopAudition) and are kept alive with 91 every 20 s. Anything that saves or changes the
+  // preset stops them first (stopAnyAudition); docs/INVESTIGATION.md §12.
+  const MSG_IR_PREVIEW = 158, MSG_IR_PREVIEW_REPLY = 159;
+
+  // The Cloud toolbar's Live Preview button mirrors this; every exit path pushes it, so the button never sticks.
+  let previewToolbar = { active: false, name: '', error: '', phase: 'idle' };
   function notifyPreviewState(active, name = '', error = '', phase = null) {
-    if (shellBridge && shellBridge.previewState) shellBridge.previewState({
-      active: !!active,
-      name: name || '',
-      error: error || '',
-      phase: phase || (active ? 'active' : 'idle'),
-    });
+    previewToolbar = { active: !!active, name: name || '', error: error || '', phase: phase || (active ? 'active' : 'idle') };
+    if (shellBridge && shellBridge.previewState) shellBridge.previewState(previewToolbar);
   }
+  // The toolbar state from what is true now (a start or stop in flight shows as starting / stopping).
+  function pushPreviewState(error = '') {
+    const phase = ui.previewBusy ? (ui.previewing ? 'stopping' : 'starting') : ui.previewing ? 'active' : 'idle';
+    notifyPreviewState(ui.previewing, ui.previewing || ui.previewBusy ? ui.previewName : '', error, phase);
+  }
+  window.__previewToolbar = () => previewToolbar;   // for the UX test
 
   let lastCabIRStateSignature = '';
   function notifyCabIRState(force = false) {
@@ -2070,9 +2104,10 @@
   function irAuditioning() {
     return Boolean(irAudition.busy || irAudition.pending || irAudition.active);
   }
+  const auditioning = () => Boolean(ui.previewing || ui.previewBusy || irAuditioning());
 
-  // The pedal keeps accepted capture and IR previews alive with type 91 requests
-  // about every 20 seconds. The Nano answers with type 92.
+  // While anything is auditioned the pedal wants type 91 about every 20 s (it answers 92); without it the audition
+  // ends after about a minute. One timer for both kinds; it runs until the last audition is confirmed stopped.
   const PREVIEW_KEEP_ALIVE_MS = 20000;
   const PREVIEW_KEEP_ALIVE_TYPE = 91;
   let previewKeepAliveTimer = null;
@@ -2091,10 +2126,7 @@
     if ((!ui.previewing && !irAudition.active) || !state.connected || previewKeepAliveInFlight) return;
     previewKeepAliveInFlight = true;
     try {
-      const ok = await writeC304(
-        'Preview keep-alive',
-        buildFrame([0x08, 0x03], PREVIEW_KEEP_ALIVE_TYPE)
-      );
+      const ok = await writeC304('Preview keep-alive', buildFrame([0x08, 0x03], PREVIEW_KEEP_ALIVE_TYPE));
       if (!ok && (ui.previewing || irAudition.active)) log('ERROR: Preview keep-alive write failed.');
     } finally {
       previewKeepAliveInFlight = false;
@@ -2106,30 +2138,31 @@
     log('Live preview keep-alive started (every ' + (PREVIEW_KEEP_ALIVE_MS / 1000) + ' s).');
     previewKeepAliveTimer = setInterval(() => { void sendPreviewKeepAlive(); }, PREVIEW_KEEP_ALIVE_MS);
   }
+  const stopKeepAliveIfIdle = () => { if (!ui.previewing && !irAudition.active) stopPreviewKeepAlive(); };
 
+  // 158: factory cabs and user IRs use different record fields (3 and 4); field 8 = 1 in every observed Play.
   function irPreviewRequest(item) {
     const nameBytes = Array.from(new TextEncoder().encode(item.name));
     const record = [0x08, ...encodeVarint(item.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
-    // Factory cabs and user IRs use different record fields in type 158.
     const recordField = item.kind === 'irFactory' ? 0x1A : 0x22;
-    return buildFrame([recordField, ...encodeVarint(record.length), ...record, 0x40, 0x01], 158);
+    return buildFrame([recordField, ...encodeVarint(record.length), ...record, 0x40, 0x01], MSG_IR_PREVIEW);
   }
+  window.__irPreviewRequest = irPreviewRequest;
 
   async function startIRPreview(item) {
-    if (!state.connected || ui.demo || !state.library.loaded) return false;
-    if (irAudition.busy || ui.previewBusy || ui.uploading) return false;
+    if (!state.connected || !state.library.loaded) return false;
+    if (irAudition.busy || ui.previewBusy || ui.uploading || NanoTransfer.busy) return false;
     if (!item || !Number.isInteger(item.index) || !item.name) return false;
-    if (ui.previewing && !(await stopCapturePreview())) return false;
+    if (ui.previewing && !(await stopCapturePreview({ quiet: true }))) { toast('The live preview could not be stopped, so ' + item.name + ' was not previewed.'); return false; }
 
     irAudition.busy = true;
     irAudition.pending = item;
     irAudition.stopping = false;
     render();
     try {
-      // Finish a mic/position write queued before the audition so it cannot
-      // reach the pedal after the type 158 Play request.
+      // Finish a mic/position write queued before the audition so it cannot reach the pedal after the Play.
       await cabMicPositionWritePromise;
-      const reply = await writeAndAwait('Preview IR "' + item.name + '"', irPreviewRequest(item), 159);
+      const reply = await writeAndAwait('Preview IR "' + item.name + '"', irPreviewRequest(item), MSG_IR_PREVIEW_REPLY);
       const status = fieldValue(reply, 3);
       if (!reply || status !== 1) {
         log('IR preview rejected: type 159 index=' + item.index + ' status=' + status);
@@ -2153,140 +2186,151 @@
     }
   }
 
+  // The official app reads the state after a stop; the pedal may then report the preset dirty (115).
   async function refreshAfterIRPreviewStop() {
     if (!state.connected) return;
-    // The official app reads the state after a stop; the pedal may report the preset dirty afterwards (115).
     if (!(await NanoLive.readCurrentState(6000))) log('IR preview stopped; the current preset state could not be read.');
   }
 
-  async function stopIRPreview() {
-    if (!irAudition.active || irAudition.busy) return !irAudition.active;
+  // true once the pedal confirmed the stop (149 with this transaction and status 1). Otherwise nothing changes: the
+  // IR may still be playing, so it stays marked active and the keep-alive keeps running.
+  async function stopIRPreview({ quiet = false } = {}) {
+    if (!irAudition.active) return !irAudition.busy;
+    if (irAudition.busy) return false;
     if (!state.connected) return false;
-    const transaction = Date.now();
     irAudition.busy = true;
     irAudition.stopping = true;
     render();
+    let result = null, error = '';
     try {
-      const transactionBytes = [];
-      let remaining = transaction;
-      while (remaining > 0x7f) {
-        transactionBytes.push((remaining % 128) | 0x80);
-        remaining = Math.floor(remaining / 128);
-      }
-      transactionBytes.push(remaining);
-      const frame = buildFrame([0x10, ...transactionBytes, 0x20, 0x00], 148);
-      const reply = await writeAndAwait('Stop IR preview', frame, 149);
-      const status = fieldValue(reply, 3);
-      const acknowledgedTransaction = fieldValue(reply, 2);
-      if (!reply || status !== 1 || acknowledgedTransaction !== transaction) {
-        log('IR preview stop unconfirmed: type 149 transaction=' + acknowledgedTransaction + ' status=' + status + ' expected=' + transaction);
-        toast('The pedal did not confirm stopping the IR preview.');
-        return false;
-      }
-      log('IR preview stop confirmed: type 149 transaction=' + transaction + ' status=' + status);
-      irAudition.active = null;
-      if (!ui.previewing) stopPreviewKeepAlive();
-      await refreshAfterIRPreviewStop();
-      settleIRSlotTargetAfterPreview();
-      return true;
+      result = await NanoTransfer.stopAudition('ir');
     } catch (err) {
+      error = err.message;
       log('ERROR: stopping IR preview: ' + err.message);
-      toast('Stopping the IR preview failed: ' + err.message);
-      return false;
     } finally {
       irAudition.busy = false;
       irAudition.stopping = false;
-      render();
     }
+    if (!result || !result.ok) {
+      if (!quiet) toast('The pedal did not confirm stopping the IR preview' + (error ? ': ' + error : '.') + ' It may still be playing.');
+      render();
+      return false;
+    }
+    irAudition.active = null;
+    stopKeepAliveIfIdle();
+    render();
+    await refreshAfterIRPreviewStop();
+    settleIRSlotTargetAfterPreview();
+    return true;
   }
 
   window.__previewIR = startIRPreview;
   window.__stopIRPreview = stopIRPreview;
 
-  // The official Cloud app's Play button sends the capture to a temporary
-  // audition cache. It is intentionally not the library upload path above:
-  // no user-capture record or slot is created or changed.
+  // The official Cloud app's Play button sends the capture to a temporary audition cache. It is intentionally not
+  // the library upload above: no user-capture record or slot is created or changed.
   async function receivePreview(bundle) {
-    const meta = bundle.meta || {};
+    const meta = (bundle && bundle.meta) || {};
     const name = meta.name || 'capture';
-    if (!state.connected) {
-      const error = 'Connect your Nano Cortex first, then preview ' + name + '.';
-      toast(error); notifyPreviewState(false, '', error); return false;
-    }
-    if (ui.uploading) { const error = 'A capture is already being sent to the library.'; toast(error); notifyPreviewState(false, '', error); return false; }
-    if (irAudition.busy || (irAudition.active && !(await stopIRPreview()))) return false;
-    if (ui.previewBusy) return false;
-    if (ui.previewing && !(await stopCapturePreview())) return false;
+    const refuse = (error) => { if (error) toast(error); pushPreviewState(error); render(); return false; };
+    if (!state.connected) return refuse('Connect your Nano Cortex first, then preview ' + name + '.');
+    if (ui.uploading || NanoTransfer.busy) return refuse('Another transfer to the pedal is still running. Try again when it has finished.');
+    if (ui.previewBusy || irAudition.busy) return refuse('Wait for the current preview to start or stop, then try again.');
+    if (irAudition.active && !(await stopIRPreview({ quiet: true }))) return refuse('The IR preview could not be stopped, so ' + name + ' was not previewed.');
+    if (ui.previewing && !(await stopCapturePreview({ quiet: true }))) return refuse('The current live preview could not be stopped, so ' + name + ' was not previewed.');
+    let cns;
+    try { cns = captureBytes(bundle); } catch { return refuse('The capture download is unreadable.'); }
 
-    const cns = captureBytes(bundle);
     ui.previewBusy = true;
     ui.previewName = name;
     ui.lastAction = 'Preparing live preview: ' + name;
-    notifyPreviewState(false, name, '', 'starting');
+    pushPreviewState();
     renderStatus();
-    let reply;
+    let reply = null, error = '';
     try {
       reply = await NanoTransfer.previewCapture({ cns, meta }, (i, n) => {
         ui.lastAction = 'Previewing ' + name + ': sending ' + i + ' / ' + n;
         renderStatus();
       });
     } catch (err) {
-      ui.previewBusy = false; ui.previewName = ''; ui.lastAction = '';
-      const error = 'Live preview failed: ' + err.message;
-      toast(error); notifyPreviewState(false, '', error); render();
-      return false;
+      error = 'Live preview failed: ' + err.message;
     }
     ui.previewBusy = false;
     ui.lastAction = '';
-    if (!reply.ok) {
+    if (!reply || !reply.ok || !state.connected) {
       ui.previewName = '';
-      const error = 'The pedal refused the live preview' + (reply.message ? ': ' + reply.message : '.');
-      toast(error); notifyPreviewState(false, '', error); render();
-      return false;
+      return refuse(error || (state.connected ? 'The pedal refused the live preview' + (reply && reply.message ? ': ' + reply.message : '.') : ''));
     }
     ui.previewing = true;
     ui.previewName = name;
     startPreviewKeepAlive();
-    notifyPreviewState(true, name, '', 'active');
+    pushPreviewState();
     toast('Previewing ' + name + '. Click Stop Preview to end it.');
-    renderStatus();
+    render();
     return true;
   }
 
-  async function stopCapturePreview() {
-    if (!ui.previewing && !ui.previewBusy) return true;
-    stopPreviewKeepAlive();
-    if (!state.connected) {
-      ui.previewing = false; ui.previewBusy = false; ui.previewName = '';
-      notifyPreviewState(false, '', 'The Nano Cortex is not connected.');
-      return false;
-    }
+  // true once the pedal confirmed the stop. Otherwise the preview stays marked active (it may still be playing),
+  // the keep-alive keeps running, and the toolbar shows Stop Preview again.
+  async function stopCapturePreview({ quiet = false } = {}) {
+    if (!ui.previewing) { if (!ui.previewBusy) pushPreviewState(); return !ui.previewBusy; }
+    if (ui.previewBusy) return false;
+    if (!state.connected) return false;
     ui.previewBusy = true;
     ui.lastAction = 'Stopping live preview';
-    notifyPreviewState(true, ui.previewName, '', 'stopping');
+    pushPreviewState();
     renderStatus();
-    let reply;
+    let result = null, error = '';
     try {
-      reply = await NanoTransfer.stopPreview();
+      result = await NanoTransfer.stopAudition('capture');
     } catch (err) {
-      ui.previewBusy = false;
-      const error = 'Stopping live preview failed: ' + err.message;
-      toast(error); notifyPreviewState(true, ui.previewName, error); renderStatus();
+      error = err.message;
+    }
+    ui.previewBusy = false;
+    ui.lastAction = '';
+    if (!result || !result.ok) {
+      const message = 'The pedal did not confirm stopping the live preview' + (error ? ': ' + error : '.') + ' It may still be playing.';
+      if (!quiet) toast(message);
+      pushPreviewState(quiet ? '' : message);
+      render();
       return false;
     }
-    ui.previewBusy = false; ui.lastAction = '';
-    if (!reply.ok) {
-      const error = 'The pedal did not confirm stopping live preview.';
-      ui.previewing = true;
-      startPreviewKeepAlive();
-      toast(error); notifyPreviewState(true, ui.previewName, error, 'active'); render();
-      return false;
+    ui.previewing = false;
+    ui.previewName = '';
+    stopKeepAliveIfIdle();
+    pushPreviewState();
+    if (!quiet) toast('Live preview stopped.');
+    render();
+    return true;
+  }
+
+  // Every action that saves or changes the preset (Save, Save as, switching, Discard, Rename, Delete, footswitch
+  // assignment, the slot scan, reordering, deleting an IR) first ends any audition and waits for the pedal's 149.
+  // If the stop isn't confirmed the action is refused: the pedal may still be playing the audition.
+  async function stopAnyAudition(action) {
+    if (!auditioning()) return true;
+    if (ui.previewBusy || irAudition.busy) { toast('A preview is starting or stopping. Try ' + action + ' again in a moment.'); return false; }
+    const ok = (!ui.previewing || await stopCapturePreview({ quiet: true })) && (!irAudition.active || await stopIRPreview({ quiet: true }));
+    if (!ok) toast('The pedal did not confirm stopping the preview, so ' + action + ' did not happen. Stop the preview and try again.');
+    return ok;
+  }
+  window.__stopAnyAudition = stopAnyAudition;
+
+  // The pedal switched presets itself (footswitch) during an audition: end it anyway (the stop is sent, best effort)
+  // and forget it, so the keep-alive stops and the toolbar and inspector don't show an audition of the old preset.
+  function endAuditionsAfterPedalPresetChange() {
+    if (!auditioning()) return;
+    log('The pedal changed presets during a preview; ending the preview.');
+    for (const [kind, active] of [['capture', ui.previewing], ['ir', !!irAudition.active]]) {
+      if (active) NanoTransfer.stopAudition(kind).catch(err => log('Preview stop after a preset change: ' + err.message));
     }
     ui.previewing = false; ui.previewName = '';
-    notifyPreviewState(false, '', '', 'idle');
-    toast('Live preview stopped.');
-    renderStatus();
-    return true;
+    irAudition.active = null;
+    stopPreviewKeepAlive();
+    if (ui.pendingIRSlotTarget) clearPendingIRSlotTarget();
+    pushPreviewState();
+    toast('The pedal switched presets, so the preview ended.');
+    render();
   }
 
   window.__previewCapture = receivePreview;
@@ -5049,6 +5093,7 @@
     const reply = (frame) => setTimeout(() => handleTypedMessage(frame), 30);
     const notify = (frame) => setTimeout(() => window.onC305({ target: { value: { buffer: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) } } }), 30);
     const reassemble = NanoTransfer.makeReassembler();
+    const hooks = {};   // test hooks (window.__demo.hooks): refuseStop, dropStateReads
     const firstField = (fields, n) => fields[n] && fields[n][0];
     const textField = (fields, n) => {
       const x = firstField(fields, n);
@@ -5065,6 +5110,16 @@
       const enc = (s) => Array.from(new TextEncoder().encode(s));
       const replyRecord = [0x12, enc(name).length, ...enc(name), 0x1A, enc(hash).length, ...enc(hash)];
       notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, replyRecord.length, ...replyRecord], NanoTransfer.MSG_PREVIEW_CAPTURE_REPLY));
+    };
+    // 15 { 3: { 1: WAV, 2: MD5 }, 4: product id, 5: file name } → 16 { 1: 6, 3: 1, 4: { 1: index, 2: name } }
+    const irDownloadReply = (body) => {
+      const f = parseProtoFields(body);
+      const name = textField(f, 5).replace(/\.wav$/i, '') || 'Cloud IR';
+      const index = LIB.irUser.length;
+      LIB.irUser.push({ index, name });
+      const enc = Array.from(new TextEncoder().encode(name));
+      const record = [0x08, index, 0x12, enc.length, ...enc];
+      notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, record.length, ...record], NanoTransfer.MSG_DOWNLOAD_IR_REPLY));
     };
     function onWrite(bytes) {
       // Streamed (multi-write) messages: capture uploads and live previews.
@@ -5083,12 +5138,18 @@
           const record = [0x08, index, 0x12, enc(name).length, ...enc(name), 0x1A, enc(hash).length, ...enc(hash)];
           notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, record.length, ...record], NanoTransfer.MSG_UPLOAD_CAPTURE_REPLY));
         } else if (t === NanoTransfer.MSG_PREVIEW_CAPTURE) previewReply(whole.slice(0, whole.length - 4));
+        else if (t === NanoTransfer.MSG_DOWNLOAD_IR) irDownloadReply(Array.from(whole.slice(0, whole.length - 4)));
         return;
       }
       const type = frameType(bytes);
       // State and metadata reads get no reply here; pretend they completed so the
       // core's "one read at a time" guard doesn't block later requests.
       if (state.stateMode === 'current' || state.stateMode === 'metadata') setTimeout(() => { if (state.stateMode !== 'library') state.stateMode = 'idle'; }, 20);
+      // A current-state read (1 {1:3 3:1 4:1 5:1}) completes like the core's parse would end it: the preset load is
+      // over and the read counts (pro/live-sync.js). Test hook: hooks.dropStateReads leaves it unanswered.
+      if (type === 1 && bytes[4] === 0x18 && bytes[5] === 0x01 && !hooks.dropStateReads) {
+        setTimeout(() => { if (state.stateMode === 'current') state.stateMode = 'idle'; state.protocol.presetLoad = false; NanoLive.noteStateRead(); }, 20);
+      }
       if (type === MSG.SetPresetSlotsRequest) {
         // Field 4 = -1 (parsed as a huge number): a footswitch assignment, not a preset change. Keep the slots
         // the next state dump reports, and ack like the pedal did in the trace (31, then 30 via onC305).
@@ -5152,8 +5213,23 @@
         tunerDemo(Boolean(f[4] && f[4][0] && f[4][0].value));
       } else if (type === NanoTransfer.MSG_PREVIEW_CAPTURE) {
         previewReply(Array.from(bytes.slice(2, bytes.length - 4)));
+      } else if (type === NanoTransfer.MSG_DOWNLOAD_IR) {
+        irDownloadReply(Array.from(bytes.slice(2, bytes.length - 4)));
       } else if (type === NanoTransfer.MSG_PREVIEW_STOP) {
-        notify(buildFrame([0x08, 0x01, 0x18, 0x01], NanoTransfer.MSG_PREVIEW_STOP_REPLY));
+        // 148 { 2: transaction, 3 or 4: 0 } → 149 { 1: 1, 2: transaction, 3: 1 }. Test hook: answer a refusal (status 0).
+        const f = framePayloadFields(bytes);
+        const tx = f[2] && f[2][0] ? f[2][0].value : 0;
+        notify(buildFrame([0x08, 0x01, 0x10, ...varint(tx), 0x18, hooks.refuseStop ? 0x00 : 0x01], NanoTransfer.MSG_PREVIEW_STOP_REPLY));
+      } else if (type === MSG_IR_PREVIEW) {
+        // 158 { 3 or 4: { 1: index, 2: name }, 8: 1 } → 159 { 1: 6, 3: 1, 4: { 2: name } } when the item exists.
+        const f = framePayloadFields(bytes);
+        const rec = f[3] ? f[3][0] : f[4] ? f[4][0] : null;
+        const r = rec ? parseProtoFields(rec.raw) : {};
+        const list = f[3] ? LIB.irFactory : LIB.irUser;
+        const name = textField(r, 2);
+        const ok = list.some(x => x.index === (r[1] ? r[1][0].value : 0) && sameName(x.name, name));
+        const enc = Array.from(new TextEncoder().encode(name));
+        notify(buildFrame([0x08, 0x06, 0x18, ok ? 0x01 : 0x00, 0x22, enc.length + 2, 0x12, enc.length, ...enc], MSG_IR_PREVIEW_REPLY));
       } else if (type === DEV_MSG.ALIVE_REQ || type === DEV_MSG.INFO_REQ || type === DEV_MSG.SETTINGS_REQ || type === DEV_MSG.SET || type === DEV_MSG.CAPTURE_REQ) {
         notify(deviceReply(type, framePayloadFields(bytes)));
       }
@@ -5350,7 +5426,7 @@
     }
     const store = (n) => { saved.set(n, snapshot()); expSaved.set(n, expOf(state.selectedPreset)); expLive.delete(n); };
     const erase = (n) => { saved.delete(n); expSaved.delete(n); expLive.delete(n); state.presetNames.set(n, 'Empty'); };
-    return { start, stop, load, store, erase, pickCapture, pickIR, stateDump, get running() { return running; }, get tempo() { return { buf: tempoBuf, run: tempoRun }; } };
+    return { start, stop, load, store, erase, pickCapture, pickIR, stateDump, hooks, get running() { return running; }, get tempo() { return { buf: tempoBuf, run: tempoRun }; } };
   })();
   window.__demo = demo;
 
@@ -5363,6 +5439,8 @@
   if (devTools && pref.get('drawerAtLaunch', false)) toggleDrawer();
   if (shellBridge) shellBridge.setAccent(pref.get('accent', ACCENTS[0].hex), pref.get('dockFollowsAccent', true)).catch(() => {});
   if (shellBridge && shellBridge.setDevTools) shellBridge.setDevTools(devTools).catch(() => {});   // the menu follows the page's setting
+  // A freshly (re)loaded editor runs no preview: tell the Cloud toolbar, which may still show Stop Preview.
+  pushPreviewState();
   // Outermost notification handler (installed last; connectAll() attaches whatever window.onC305 is): every layer
   // below, upstream's included, gets a value whose buffer holds exactly the notification.
   window.onC305 = NanoLive.withExactBytes(window.onC305);

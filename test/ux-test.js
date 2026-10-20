@@ -188,6 +188,11 @@ async function reloadPage() {
   wc.reload();
   await loaded; await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle(); await frame();
 }
+// A typed frame as the Activity log prints it: [len] C0 [payload] [u32 LE type].
+const hexBytes = (bytes) => bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+const frameHex = (payload, type) => { const f = [0, 0xC0, ...payload, type & 255, (type >> 8) & 255, 0, 0]; f[0] = f.length - 2; return hexBytes(f); };
+const utf8 = (text) => [...Buffer.from(text, 'utf8')];
+const toastText = () => js('document.getElementById("toast").textContent');
 // Computed colours come back as rgb(…) or, for color-mix(), as color(srgb r g b) in 0..1.
 const rgbOf = (css) => {
   let m = /^rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/.exec(css || '');
@@ -1032,6 +1037,36 @@ async function run() {
   await checkSoon('Close button ends the tuner and the Tuner button un-lights', '!state.tuner.open && !document.getElementById("tunerBtn").classList.contains("on")');
   await settle();
 
+  // ---------------------------------------------------------------- header Mute and the tuner's mute re-arm
+  // Mute Input is a global setting (67 {1:1 12:0|1}, read back as 66 field 15). The pedal still reports it on after the
+  // tuner closes but needs a fresh off → on to mute again, so closing the tuner sends both (after the tuner-off write).
+  const MUTE_IN = (on) => frameHex([0x08, 0x01, 0x60, on ? 1 : 0], 67);
+  await checkSoon('the header Mute button is ready once the device settings are read at connect', '!document.getElementById("muteBtn").disabled && document.getElementById("muteBtn").getAttribute("aria-pressed") === "false"');
+  n0 = await mark();
+  await click('#muteBtn');
+  tx = await txWait(n0, t => t.some(x => x.endsWith(': ' + MUTE_IN(true))));
+  tx = tx.filter(x => /Mute Input/.test(x));
+  check('header Mute sends Mute Input on, exactly 67 {1:1 12:1}', tx.length === 1 && tx[0] === 'TX Device monitoring: Mute Input ON: ' + MUTE_IN(true), JSON.stringify(tx));
+  await checkSoon('… and turns red, pressed (read back from 66 field 15)', 'document.getElementById("muteBtn").classList.contains("mute-active") && document.getElementById("muteBtn").getAttribute("aria-pressed") === "true" && __dev.settings.muteInput === true');
+  await click('#tunerBtn');
+  await checkSoon('the tuner opens while the input is muted', 'state.tuner.open');
+  n0 = await mark();
+  await click('#tunerClose');
+  tx = (await txWait(n0, t => t.filter(x => /^TX (Tuner off|Device monitoring: Mute Input)/.test(x)).length >= 3)).filter(x => /^TX (Tuner off|Device monitoring: Mute Input)/.test(x)).map(x => x.split(': ').pop());
+  check('closing the tuner re-arms the mute: Tuner off, then Mute Input off and on again', JSON.stringify(tx) === JSON.stringify([frameHex([0x20, 0x00], 127), MUTE_IN(false), MUTE_IN(true)]), JSON.stringify(tx));
+  await checkSoon('the mute is still on afterwards', '__dev.settings.muteInput === true && document.getElementById("muteBtn").classList.contains("mute-active")');
+  n0 = await mark();
+  await click('#muteBtn');
+  tx = await txWait(n0, t => t.some(x => x.endsWith(': ' + MUTE_IN(false))));
+  tx = tx.filter(x => /Mute Input/.test(x));
+  check('header Mute again sends Mute Input off (an explicit 0)', tx.length === 1 && tx[0].endsWith(': ' + MUTE_IN(false)), JSON.stringify(tx));
+  await checkSoon('… and the button is back to normal', '!document.getElementById("muteBtn").classList.contains("mute-active") && __dev.settings.muteInput === false');
+  await click('#tunerBtn'); await checkSoon('tuner up again, input not muted', 'state.tuner.open');
+  n0 = await mark();
+  await click('#tunerClose'); await waitFor('!state.tuner.open');
+  await settle({ quiet: 600 });
+  check('without the mute, closing the tuner sends only Tuner off', JSON.stringify((await txSince(n0)).map(x => x.split(': ')[0])) === JSON.stringify(['TX Tuner off']), JSON.stringify(await txSince(n0)));
+
   // ---------------------------------------------------------------- metronome
   await js('document.activeElement.blur()');
   await key('n');
@@ -1523,6 +1558,123 @@ async function run() {
   await js('__previewTimerTest.callback()'); await settle();
   check('a stopped preview does not send another keep-alive', !(await txSince(n0)).some(t => /^TX Preview keep-alive:/.test(t)));
   await js('window.setInterval = __previewTimerTest.originalSetInterval; window.clearInterval = __previewTimerTest.originalClearInterval; delete window.__previewTimerTest');
+
+  // ---------------------------------------------------------------- streamed transfers: one at a time
+  check('MD5 for the 150/15 messages matches the reference (empty, "abc")', (await js('NanoTransfer.md5Hex(new Uint8Array()) + " " + NanoTransfer.md5Hex(new TextEncoder().encode("abc"))')) === 'd41d8cd98f00b204e9800998ecf8427e 900150983cd24fb0d6963f7d28e17f72');
+  n0 = await mark();
+  const mutex = await js(`(async () => {
+    const meta = ${JSON.stringify(previewMeta)};
+    const preview = NanoTransfer.previewCapture({ cns: new Uint8Array(3000), meta });
+    const busy = NanoTransfer.busy;
+    let err = '';
+    try { await NanoTransfer.downloadImpulseResponse({ wav: new Uint8Array(64), meta: { name: 'Mutex IR', productId: '00000000-0000-4000-8000-000000000003', filename: 'Mutex IR.wav' } }); }
+    catch (e) { err = e.message; }
+    const r = await preview;
+    const stop = await NanoTransfer.stopAudition('capture');
+    return { busy, err, ok: r.ok, stopped: stop.ok, after: NanoTransfer.busy };
+  })()`);
+  tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
+  check('stream mutex: a Cloud IR (15) is refused while a capture preview (150) streams; the 150 completes', mutex.busy === 'capture preview' && /Another transfer to the pedal is still running/.test(mutex.err) && mutex.ok && mutex.stopped && mutex.after === '' && !tx.some(t => /Cloud IR download/.test(t)) && (() => { const parts = tx.filter(t => /^TX Capture preview "Test Preview" \d+\/\d+:/.test(t)); const m = parts.length && /\/(\d+):/.exec(parts[0]); return parts.length > 1 && m && Number(m[1]) === parts.length; })(), JSON.stringify(mutex) + ' ' + JSON.stringify(tx.map(t => t.slice(0, 50))));
+
+  // ---------------------------------------------------------------- Cortex Cloud IR → the pedal's library (15 → 16), and deleting it (82 → 83)
+  // A minimal valid WAV: RIFF/WAVE, fmt (float, mono, 48 kHz), 4 samples.
+  const wav = (() => {
+    const b = Buffer.alloc(44 + 16);
+    b.write('RIFF', 0); b.writeUInt32LE(b.length - 8, 4); b.write('WAVE', 8); b.write('fmt ', 12); b.writeUInt32LE(16, 16);
+    b.writeUInt16LE(3, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(48000, 24); b.writeUInt32LE(48000 * 4, 28); b.writeUInt16LE(4, 32); b.writeUInt16LE(32, 34);
+    b.write('data', 36); b.writeUInt32LE(16, 40);
+    return b.toString('base64');
+  })();
+  const irMeta = { name: 'Demo Cloud IR', productId: '00000000-0000-4000-8000-000000000004', filename: 'Demo Cloud IR.wav' };
+  n0 = await mark();
+  await js(`window.__irDone = __receiveCloudIR({ wav: ${JSON.stringify(wav)}, meta: ${JSON.stringify(irMeta)} }); 0`);
+  await checkSoon('a Cloud IR asks for confirmation first', '!!document.querySelector(".modal") && /Send Demo Cloud IR to the pedal/.test(document.querySelector(".modal h2").textContent)');
+  await key('Return');
+  tx = await txWait(n0, t => t.some(x => /^TX Cloud IR download/.test(x)));
+  const irOutcome = await js('window.__irDone');
+  check('the IR goes out as one type-15 message and the (demo) pedal adds it (16), then the library is read again', tx.some(t => /^TX Cloud IR download "Demo Cloud IR" 1\/1: [0-9A-F]{2} C0 08 06 1A .* 0F 00 00 00$/.test(t)) && irOutcome.ok && irOutcome.refreshed && irOutcome.index === 1 && tx.some(t => /^TX Library content request/.test(t)) && await js('state.library.irUser.some(x => x.name === "Demo Cloud IR" && x.index === 1)'), JSON.stringify(irOutcome) + ' ' + JSON.stringify(tx.map(t => t.slice(0, 60))));
+  n0 = await mark();
+  await js(`window.__irAgain = null; __receiveCloudIR({ wav: ${JSON.stringify(wav)}, meta: ${JSON.stringify(irMeta)} }).then(r => { window.__irAgain = r; }); 0`);
+  await waitFor('!!window.__irAgain || !!document.querySelector(".modal")');
+  if (await js('!!document.querySelector(".modal")')) { await key('Escape'); await waitFor('!!window.__irAgain'); }
+  const irAgain = await js('window.__irAgain');
+  await settle();
+  check('sending it again finds it on the pedal by name and sends nothing', irAgain.alreadyOnNano === true && await js('!document.querySelector(".modal")') && !(await txSince(n0)).some(t => /Cloud IR download/.test(t)), JSON.stringify(irAgain));
+
+  // Delete it again: right-click → Delete…; the library is read again right before the 82, which carries the user index and name.
+  await key('5'); await frame();
+  const userRow = '[...document.querySelectorAll(".cab-library-section .library-row")].find(r => r.querySelector(".library-item span")?.textContent === "Demo Cloud IR")';
+  await waitFor(`!!(${userRow})`);
+  await js('state.irNames.set(5, "Demo Cloud IR"); render()'); await frame();
+  await js(`(() => { const r = ${userRow}; r.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 300 })); })()`);
+  await waitFor('!!document.querySelector(".ctx")');
+  await js(ctxItem('Delete') + '.click()');
+  await checkSoon('Delete asks first and says an IR slot holds that IR', '!!document.querySelector(".modal") && /Delete IR “Demo Cloud IR” from the pedal/.test(document.querySelector(".modal h2").textContent) && /IR slot 5/.test(document.querySelector(".modal").textContent)', () => js('document.querySelector(".modal")?.textContent'));
+  n0 = await mark();
+  await key('Return');
+  tx = (await txWait(n0, t => t.some(x => /^TX Delete IR/.test(x)))).filter(t => /^TX (Library content request|Delete IR)/.test(t));
+  const del82 = frameHex([0x08, 0x02, 0x22, 2 + 2 + utf8('Demo Cloud IR').length, 0x08, 0x01, 0x12, utf8('Demo Cloud IR').length, ...utf8('Demo Cloud IR')], 82);
+  check('IR delete: the library is read right before, then 82 carries the user index and name (exact bytes)', tx.length >= 2 && /^TX Library content request/.test(tx[0]) && tx[1] === 'TX Delete IR Demo Cloud IR: ' + del82, JSON.stringify(tx) + ' expected ' + del82);
+  await checkSoon('the (demo) pedal confirms (83) and the IR is gone from the list', async () => (await toastText()) === 'Demo Cloud IR deleted from the pedal IR library.' && await js('!state.library.irUser.some(x => x.name === "Demo Cloud IR")'));
+  await js('state.irNames.set(5, "212 Blue"); render()'); await settle();
+
+  // ---------------------------------------------------------------- IR audition (158 → 159), and every audition stops before Save or a switch
+  await waitFor('document.querySelectorAll(".cab-library-section .library-preview").length >= 6');
+  const firstPreview = '.cab-library-section .library-row .library-preview';
+  n0 = await mark();
+  await click(firstPreview);
+  tx = await txWait(n0, t => t.some(x => /^TX Preview IR/.test(x)));
+  const play412 = frameHex([0x1A, 4 + utf8('412 V30').length, 0x08, 0x00, 0x12, utf8('412 V30').length, ...utf8('412 V30'), 0x40, 0x01], 158);
+  check('previewing a factory cab sends 158 with the record in field 3 (exact bytes), nothing else', tx.length === 1 && tx[0] === 'TX Preview IR "412 V30": ' + play412, JSON.stringify(tx));
+  await checkSoon('the (demo) pedal accepts it (159): the row plays, the keep-alive runs', async () => await js('!!document.querySelector(".cab-library-section .library-row.previewing .library-preview.playing")') && await js(`__ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive started/.test(l.text))`));
+  const userPlay = await js('hex(__irPreviewRequest({ kind: "irUser", index: 0, name: "OwnHammer 412 Mix" }))');
+  check('a user IR goes in field 4 instead (exact bytes)', userPlay === frameHex([0x22, 4 + utf8('OwnHammer 412 Mix').length, 0x08, 0x00, 0x12, utf8('OwnHammer 412 Mix').length, ...utf8('OwnHammer 412 Mix'), 0x40, 0x01], 158), userPlay);
+  // Save while it plays: the stop (148 with field 4 = 0, confirmed by a 149 with the same transaction) goes first.
+  await js('state.presetDirty = false; document.activeElement.blur(); render()');
+  n0 = await mark();
+  await key('s', [MOD]);
+  tx = (await txWait(n0, t => t.some(x => /^TX save preset/.test(x)))).filter(t => /^TX (Stop IR preview|save preset|Preview keep-alive)/.test(t));
+  check('Save during an IR audition sends the stop first (148 {2:tx 4:0}), then saves', tx.length === 2 && /^TX Stop IR preview: [0-9A-F]{2} C0 10 ([0-9A-F]{2} )+20 00 94 00 00 00$/.test(tx[0]) && /^TX save preset/.test(tx[1]), JSON.stringify(tx));
+  await checkSoon('… the audition is over: row back to Play, keep-alive stopped', async () => await js('!document.querySelector(".library-preview.playing")') && await js(`__ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive stopped/.test(l.text))`));
+  await settle();
+  // The pedal doesn't confirm the stop: Save and a preset switch are refused and the audition stays shown as playing.
+  n0 = await mark();
+  await click(firstPreview);
+  await checkSoon('previewing again', '!!document.querySelector(".library-preview.playing")');
+  await js('__demo.hooks.refuseStop = true; state.presetDirty = false; render()');
+  n0 = await mark();
+  await key('s', [MOD]);
+  await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+  check('a refused stop refuses Save: nothing saved, the IR still shows as playing, the user is told', !(await txSince(n0)).some(t => /^TX save preset/.test(t)) && await js('!!document.querySelector(".library-preview.playing")') && /did not confirm stopping the preview, so Save did not happen/.test(await toastText()), (await toastText()) + ' ' + JSON.stringify(await txSince(n0)));
+  const presetBefore = await js('state.selectedPreset');
+  const otherPreset = presetBefore === 1 ? 2 : 1;
+  n0 = await mark();
+  await click(`.preset-row[data-n="${otherPreset}"]`);
+  await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+  check('… and refuses a preset switch: no 29 sent, still on the same preset', !(await txSince(n0)).some(t => /^TX Preset change/.test(t)) && (await js('state.selectedPreset')) === presetBefore && /the preset switch did not happen/.test(await toastText()), (await toastText()) + ' ' + JSON.stringify(await txSince(n0)));
+  await js('__demo.hooks.refuseStop = false');
+  n0 = await mark();
+  await click(`.preset-row[data-n="${otherPreset}"]`);
+  tx = (await txWait(n0, t => t.some(x => /^TX Preset change/.test(x)))).filter(t => /^TX (Stop IR preview|Preset change \d)/.test(t));
+  check('once the pedal confirms, the switch goes ahead: stop first, then the preset change', tx.length === 2 && /^TX Stop IR preview/.test(tx[0]) && /^TX Preset change \d+:/.test(tx[1]) && (await js('state.selectedPreset')) === otherPreset, JSON.stringify(tx));
+  await settle();
+  // A preset change on the pedal itself (footswitch) during an audition: it is stopped and forgotten.
+  await click(firstPreview);
+  await checkSoon('previewing once more', '!!document.querySelector(".library-preview.playing")');
+  n0 = await mark();
+  await js('window.onC305({ target: { value: { buffer: buildFrame([0x18, 0x00, 0x20, state.selectedPreset - 1], MSG.SetPresetSlotsRequest).buffer } } })');
+  tx = await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+  await checkSoon('a footswitch preset change ends the audition (stop sent, keep-alive off, row back to Play)', async () => tx.some(t => /^TX Preset change ack/.test(t)) && await js('!document.querySelector(".library-preview.playing")') && await js(`__ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive stopped/.test(l.text))`), () => JSON.stringify(tx));
+  await settle();
+  // Capture preview: a refused stop keeps it honest (still previewing) and the toolbar shows Stop Preview with the error.
+  n0 = await mark();
+  check('capture preview starts', (await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`)) === true && await js('__previewToolbar().active && __previewToolbar().phase === "active"'));
+  await js('__demo.hooks.refuseStop = true');
+  const refusedStop = await js('__stopCapturePreview()');
+  check('a refused capture-preview stop leaves it previewing and the toolbar on Stop Preview, with the reason', refusedStop === false && await js('__ui.previewing && !__ui.previewBusy && __previewToolbar().active && __previewToolbar().phase === "active" && /did not confirm/.test(__previewToolbar().error)'), JSON.stringify(await js('__previewToolbar()')));
+  await js('__demo.hooks.refuseStop = false');
+  check('a confirmed stop sets the toolbar back to idle', (await js('__stopCapturePreview()')) === true && await js('!__ui.previewing && !__previewToolbar().active && __previewToolbar().phase === "idle"'), JSON.stringify(await js('__previewToolbar()')));
+  await key('4'); await frame(); await settle();
 
   // ---------------------------------------------------------------- write coalescing
   // Deterministic: the first write leaves at once, the next five queue behind it under one key and merge.

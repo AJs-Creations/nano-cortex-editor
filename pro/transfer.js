@@ -1,4 +1,5 @@
-// Capture upload to the pedal over C304.
+// Streamed transfers to the pedal over C304: a capture into the library (13 → 14), a Cortex Cloud IR into the
+// library (15 → 16), a capture audition (150 → 151) and the audition stop (148 → 149). One at a time.
 //
 // Decoded from a PacketLogger trace of the official phone app sending two
 // captures to a Nano Cortex (docs/INVESTIGATION.md §6; the recording itself is
@@ -14,6 +15,7 @@
 // bit 8 of len. (A single-chunk message is the familiar `len C0 … type` frame.)
 // The last write is padded to 500 bytes like the official app does.
 // The pedal answers with type 14: { 1: 6, 3: status, 4: { 1: userIndex, 2: name, 3: hash } }.
+// The IR download, the audition and the stop are in docs/INVESTIGATION.md §6a and §12 (from #14).
 //
 // Loaded after core.js (needs writeC304, frameType, parseProtoFields, onC305)
 // and before ui.js.
@@ -165,96 +167,101 @@
     };
   }
 
-  // Catch the pedal's reply before the core's dispatch sees it.
-  let waiting = null;
-  let irDownloadWaiting = null;
-  let previewWaiting = null;
-
-  function waitForIRDownloadReply(timeoutMs = 20000) {
-    let waiter;
-    const promise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (irDownloadWaiting === waiter) irDownloadWaiting = null;
-        reject(new Error('The pedal did not answer the IR download within ' + (timeoutMs / 1000) + ' s'));
-      }, timeoutMs);
-      waiter = {
-        resolve(data) { clearTimeout(timer); if (irDownloadWaiting === waiter) irDownloadWaiting = null; resolve(parseIRDownloadReply(data)); },
-        reject(error) { clearTimeout(timer); if (irDownloadWaiting === waiter) irDownloadWaiting = null; reject(error instanceof Error ? error : new Error(String(error))); },
-      };
-      irDownloadWaiting = waiter;
-    });
-    return { promise, cancel: error => waiter && waiter.reject(error) };
+  // ------------------------------------------------------------------ one transfer at a time
+  // The streamed messages (13 capture to the library, 15 IR to the library, 150 capture audition) go out as a run of
+  // writes that only make sense together, and each waits for its own reply. One at a time; the others are refused.
+  let streamBusy = '';
+  async function exclusive(label, fn) {
+    if (streamBusy) throw new Error('Another transfer to the pedal is still running (' + streamBusy + '). Try again when it has finished.');
+    streamBusy = label;
+    try { return await fn(); } finally { streamBusy = ''; }
   }
 
-  function waitForPreviewReply(type, parser, timeoutMs = 20000) {
-    let waiter;
+  // Replies a transfer waits for, by message type, caught before the core's dispatch sees them. Every wait ends:
+  // with the reply, a timeout or a cancel; and a wait nobody awaits any more never becomes an unhandled rejection.
+  const waiters = new Map();
+  function awaitReply(type, parse, what, timeoutMs = 20000) {
+    if (waiters.has(type)) throw new Error('Still waiting for the pedal to answer ' + what + '.');
+    let settle;
     const promise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (previewWaiting === waiter) previewWaiting = null;
-        reject(new Error('The pedal did not answer preview message ' + type + ' within ' + (timeoutMs / 1000) + ' s'));
-      }, timeoutMs);
-      waiter = {
-        type,
-        resolve(value) { clearTimeout(timer); if (previewWaiting === waiter) previewWaiting = null; resolve(parser(value)); },
-        reject(error) { clearTimeout(timer); if (previewWaiting === waiter) previewWaiting = null; reject(error); },
+      let done = false;
+      const timer = setTimeout(() => settle(new Error('The pedal did not answer ' + what + ' within ' + (timeoutMs / 1000) + ' s')), timeoutMs);
+      settle = (err, data) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (waiters.get(type) === settle) waiters.delete(type);
+        if (err) { reject(err instanceof Error ? err : new Error(String(err))); return; }
+        try { resolve(parse(data)); } catch (e) { reject(e); }
       };
-      previewWaiting = waiter;
+      waiters.set(type, settle);
     });
-    return { promise, cancel: error => waiter && waiter.reject(error instanceof Error ? error : new Error(String(error))) };
+    promise.catch(() => {});
+    return { promise, cancel: (err) => settle(err) };
   }
 
   const coreOnC305 = window.onC305;
   window.onC305 = function (event) {
-    const data = new Uint8Array(event.target.value.buffer.slice(0));
-    if (waiting && frameType(data) === MSG_UPLOAD_CAPTURE_REPLY) {
-      log('RX capture upload reply: ' + hex(data));
-      const w = waiting; waiting = null;
-      w(parseUploadReply(data));
+    const v = event && event.target && event.target.value;
+    const data = v && v.buffer ? new Uint8Array(v.buffer, v.byteOffset || 0, typeof v.byteLength === 'number' ? v.byteLength : v.buffer.byteLength) : null;
+    const type = data ? frameType(data) : null;
+    const settle = type !== null && waiters.get(type);
+    if (settle) {
+      log('RX ' + (REPLY_LABEL[type] || 'reply ' + type) + ': ' + hex(data));
+      settle(null, data);
       return;
-    }
-    if (irDownloadWaiting && frameType(data) === MSG_DOWNLOAD_IR_REPLY) {
-      const waiter = irDownloadWaiting;
-      waiter.resolve(data);
-      log('RX IR download reply ' + MSG_DOWNLOAD_IR_REPLY + ': ' + hex(data));
-      return;
-    }
-    if (previewWaiting) {
-      const type = frameType(data);
-      if (type === previewWaiting.type) {
-        const waiter = previewWaiting;
-        waiter.resolve(data);
-        log('RX preview reply ' + type + ': ' + hex(data));
-        return;
-      }
     }
     return coreOnC305.call(this, event);
   };
 
-  // Sends one capture. cns: Uint8Array; meta: see captureRecord. Resolves with
-  // the parsed reply; rejects on a failed write or no reply.
-  async function uploadCapture({ cns, meta }, onProgress) {
-    if (!state.connected) throw new Error('Not connected');
-    const parts = chunks(uploadMessage(cns, meta), MSG_UPLOAD_CAPTURE);
-    const reply = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { if (waiting === resolve) { waiting = null; reject(new Error('The pedal did not answer within 20 s')); } }, 20000);
-      waiting = (r) => { clearTimeout(timer); resolve(r); };
-    });
+  // Writes the parts in order; on a failed write the reply wait is cancelled (and awaited) before the error is thrown.
+  async function stream(label, parts, reply, onProgress) {
     for (let i = 0; i < parts.length; i++) {
-      const ok = await writeC304('Capture upload "' + meta.name + '" ' + (i + 1) + '/' + parts.length, parts[i]);
-      if (!ok) { waiting = null; throw new Error('Bluetooth write failed at part ' + (i + 1) + ' of ' + parts.length); }
+      const ok = await writeC304(label + ' ' + (i + 1) + '/' + parts.length, parts[i]);
+      if (!ok) {
+        const err = new Error('Bluetooth write failed at part ' + (i + 1) + ' of ' + parts.length);
+        reply.cancel(err);
+        await reply.promise.catch(() => {});
+        throw err;
+      }
       if (onProgress) onProgress(i + 1, parts.length);
     }
-    const r = await reply;
-    log('Capture upload ' + (r.ok ? 'accepted' : 'REFUSED') + ': "' + r.name + '" user index ' + r.index + (r.message ? ' (' + r.message + ')' : ''));
-    return r;
+    return reply.promise;
+  }
+
+  const first = (fields, n) => fields[n] && fields[n][0];
+  const text = (fields, n) => { const x = first(fields, n); return x && x.wire === 2 ? new TextDecoder().decode(Uint8Array.from(x.raw)) : ''; };
+  function replyFields(data) {
+    const f = parseProtoFields(Array.from(data.slice(2, data.length - 4)));
+    const rec = first(f, 4) && first(f, 4).wire === 2 ? parseProtoFields(first(f, 4).raw) : {};
+    return { f, rec, status: first(f, 3) ? first(f, 3).value : 0 };
+  }
+
+  function parseUploadReply(data) {
+    const { f, rec, status } = replyFields(data);
+    return {
+      ok: status === 1,
+      index: first(rec, 1) ? first(rec, 1).value : 0,
+      name: text(rec, 2), hash: text(rec, 3),
+      message: text(f, 5) || text(rec, 4) || '',
+    };
+  }
+
+  // Sends one capture. cns: Uint8Array; meta: see captureRecord. Resolves with
+  // the parsed reply; rejects on a failed write, no reply, or another transfer running.
+  function uploadCapture({ cns, meta }, onProgress) {
+    return exclusive('capture upload', async () => {
+      if (!state.connected) throw new Error('Not connected');
+      const parts = chunks(uploadMessage(cns, meta), MSG_UPLOAD_CAPTURE);
+      const reply = awaitReply(MSG_UPLOAD_CAPTURE_REPLY, parseUploadReply, 'the capture upload');
+      const r = await stream('Capture upload "' + meta.name + '"', parts, reply, onProgress);
+      log('Capture upload ' + (r.ok ? 'accepted' : 'REFUSED') + ': "' + r.name + '" user index ' + r.index + (r.message ? ' (' + r.message + ')' : ''));
+      return r;
+    });
   }
 
   function parseIRDownloadReply(data) {
-    const f = parseProtoFields(data.slice(2, data.length - 4));
-    const first = (fields, n) => fields[n] && fields[n][0];
-    const text = (fields, n) => { const x = first(fields, n); return x && x.wire === 2 ? new TextDecoder().decode(Uint8Array.from(x.raw)) : ''; };
-    const status = first(f, 3) ? first(f, 3).value : 0;
-    const rec = first(f, 4) && first(f, 4).wire === 2 ? parseProtoFields(first(f, 4).raw) : {};
+    const { f, rec, status } = replyFields(data);
     return {
       ok: status === 1,
       status,
@@ -264,86 +271,77 @@
     };
   }
 
-  async function downloadImpulseResponse({ wav, meta }, onProgress) {
-    if (!state.connected) throw new Error('Not connected');
-    if (waiting || irDownloadWaiting || previewWaiting) throw new Error('Another pedal transfer is still in progress.');
-    if (!wav || !meta || !meta.productId || !meta.filename || !/\.wav$/i.test(meta.filename)) throw new Error('The Cloud IR download is incomplete.');
-    const parts = chunks(irDownloadMessage(wav, meta), MSG_DOWNLOAD_IR);
-    const reply = waitForIRDownloadReply();
-    try {
-      for (let i = 0; i < parts.length; i++) {
-        const ok = await writeC304('Cloud IR download "' + meta.name + '" ' + (i + 1) + '/' + parts.length, parts[i]);
-        if (!ok) throw new Error('Bluetooth write failed at IR download part ' + (i + 1) + ' of ' + parts.length);
-        if (onProgress) onProgress(i + 1, parts.length);
-      }
-    } catch (err) {
-      reply.cancel(err);
-      await reply.promise.catch(() => {});
-      throw err;
-    }
-    const result = await reply.promise;
-    log('Cloud IR download ' + (result.ok ? 'accepted' : 'REFUSED') + ': "' + (result.name || meta.name) + '" user IR index ' + result.index + (result.message ? ' (' + result.message + ')' : ''));
-    return result;
+  // A Cloud IR (raw WAV) into the pedal's IR library: type 15 → 16.
+  function downloadImpulseResponse({ wav, meta }, onProgress) {
+    return exclusive('IR download', async () => {
+      if (!state.connected) throw new Error('Not connected');
+      if (!wav || !meta || !meta.productId || !meta.filename || !/\.wav$/i.test(meta.filename)) throw new Error('The Cloud IR download is incomplete.');
+      const parts = chunks(irDownloadMessage(wav, meta), MSG_DOWNLOAD_IR);
+      const reply = awaitReply(MSG_DOWNLOAD_IR_REPLY, parseIRDownloadReply, 'the IR download');
+      const result = await stream('Cloud IR download "' + meta.name + '"', parts, reply, onProgress);
+      log('Cloud IR download ' + (result.ok ? 'accepted' : 'REFUSED') + ': "' + (result.name || meta.name) + '" user IR index ' + result.index + (result.message ? ' (' + result.message + ')' : ''));
+      return result;
+    });
   }
 
   function parsePreviewReply(data) {
-    const f = parseProtoFields(data.slice(2, data.length - 4));
-    const first = (fields, n) => fields[n] && fields[n][0];
-    const text = (fields, n) => { const x = first(fields, n); return x && x.wire === 2 ? new TextDecoder().decode(Uint8Array.from(x.raw)) : ''; };
-    const status = first(f, 3) ? first(f, 3).value : 0;
-    const rec = first(f, 4) && first(f, 4).wire === 2 ? parseProtoFields(first(f, 4).raw) : {};
+    const { f, rec, status } = replyFields(data);
     return {
       ok: status === 1,
       status,
       kind: first(f, 1) ? first(f, 1).value : 0,
+      transaction: first(f, 2) ? first(f, 2).value : null,
       name: text(rec, 2),
       hash: text(rec, 3),
       message: text(f, 5),
     };
   }
 
-  function wideVarint(value) {
-    const out = [];
-    value = Math.max(0, Math.floor(Number(value) || 0));
-    while (value > 0x7f) {
-      out.push((value % 128) | 0x80);
-      value = Math.floor(value / 128);
-    }
-    out.push(value);
-    return out;
+  // Capture audition (Cortex Cloud "Play"): type 150 → 151. Nothing is stored on the pedal.
+  function previewCapture({ cns, meta }, onProgress) {
+    return exclusive('capture preview', async () => {
+      if (!state.connected) throw new Error('Not connected');
+      const parts = chunks(previewMessage(cns, meta), MSG_PREVIEW_CAPTURE);
+      const reply = awaitReply(MSG_PREVIEW_CAPTURE_REPLY, parsePreviewReply, 'the capture preview');
+      const result = await stream('Capture preview "' + meta.name + '"', parts, reply, onProgress);
+      log('Capture preview ' + (result.ok ? 'accepted' : 'REFUSED') + ': "' + (result.name || meta.name) + '"');
+      return result;
+    });
   }
 
-  async function previewCapture({ cns, meta }, onProgress) {
-    if (!state.connected) throw new Error('Not connected');
-    const parts = chunks(previewMessage(cns, meta), MSG_PREVIEW_CAPTURE);
-    const reply = waitForPreviewReply(MSG_PREVIEW_CAPTURE_REPLY, parsePreviewReply);
-    for (let i = 0; i < parts.length; i++) {
-      const ok = await writeC304('Capture preview "' + meta.name + '" ' + (i + 1) + '/' + parts.length, parts[i]);
-      if (!ok) { reply.cancel('Bluetooth write failed at preview part ' + (i + 1) + ' of ' + parts.length); throw new Error('Bluetooth write failed at preview part ' + (i + 1) + ' of ' + parts.length); }
-      if (onProgress) onProgress(i + 1, parts.length);
-    }
-    const result = await reply.promise;
-    log('Capture preview ' + (result.ok ? 'accepted' : 'REFUSED') + ': "' + (result.name || meta.name) + '"');
-    return result;
+  // Ends a capture preview or an IR audition: type 148 { 2: transaction, 3 (capture) or 4 (IR): 0 } → 149
+  // { 1: 1, 2: same transaction, 3: 1 }. ok only when the pedal echoes this transaction with status 1.
+  function stopAuditionFrame(kind, transaction) {
+    return buildFrame([0x10, ...varint(transaction), kind === 'ir' ? 0x20 : 0x18, 0x00], MSG_PREVIEW_STOP);
   }
-
-  async function stopPreview() {
+  async function stopAudition(kind) {
     if (!state.connected) throw new Error('Not connected');
     const transaction = Date.now();
-    const frame = buildFrame([0x10, ...wideVarint(transaction), 0x18, 0x00], MSG_PREVIEW_STOP);
-    const reply = waitForPreviewReply(MSG_PREVIEW_STOP_REPLY, parsePreviewReply);
-    const sent = await writeC304('Stop capture preview', frame);
-    if (!sent) { reply.cancel('Bluetooth write failed while stopping preview'); throw new Error('Bluetooth write failed while stopping preview'); }
+    const what = kind === 'ir' ? 'IR preview' : 'capture preview';
+    const reply = awaitReply(MSG_PREVIEW_STOP_REPLY, parsePreviewReply, 'the ' + what + ' stop', 10000);
+    const sent = await writeC304('Stop ' + what, stopAuditionFrame(kind, transaction));
+    if (!sent) {
+      const err = new Error('Bluetooth write failed while stopping the ' + what);
+      reply.cancel(err);
+      await reply.promise.catch(() => {});
+      throw err;
+    }
     const result = await reply.promise;
-    result.transaction = transaction;
-    log('Capture preview stop ' + (result.ok ? 'confirmed' : 'FAILED') + ' (' + transaction + ')');
+    result.ok = result.status === 1 && result.transaction === transaction;
+    result.sentTransaction = transaction;
+    log((kind === 'ir' ? 'IR' : 'Capture') + ' preview stop ' + (result.ok ? 'confirmed' : 'NOT confirmed (status ' + result.status + ', transaction ' + result.transaction + ')') + ' (' + transaction + ')');
     return result;
   }
+  const stopPreview = () => stopAudition('capture');
+
+  const REPLY_LABEL = { [MSG_UPLOAD_CAPTURE_REPLY]: 'capture upload reply', [MSG_DOWNLOAD_IR_REPLY]: 'IR download reply',
+    [MSG_PREVIEW_CAPTURE_REPLY]: 'capture preview reply', [MSG_PREVIEW_STOP_REPLY]: 'preview stop reply' };
 
   window.NanoTransfer = {
     MSG_UPLOAD_CAPTURE, MSG_UPLOAD_CAPTURE_REPLY, MSG_DOWNLOAD_IR, MSG_DOWNLOAD_IR_REPLY, MSG_PREVIEW_STOP, MSG_PREVIEW_STOP_REPLY,
     MSG_PREVIEW_CAPTURE, MSG_PREVIEW_CAPTURE_REPLY, WRITE_SIZE, uploadMessage, previewMessage,
     captureRecord, chunks, makeReassembler, md5Hex, irDownloadMessage, parseUploadReply, parseIRDownloadReply, parsePreviewReply,
-    uploadCapture, downloadImpulseResponse, previewCapture, stopPreview,
+    uploadCapture, downloadImpulseResponse, previewCapture, stopPreview, stopAudition, stopAuditionFrame,
+    get busy() { return streamBusy; },
   };
 })();
