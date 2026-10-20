@@ -1576,6 +1576,38 @@ async function run() {
   tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
   check('stream mutex: a Cloud IR (15) is refused while a capture preview (150) streams; the 150 completes', mutex.busy === 'capture preview' && /Another transfer to the pedal is still running/.test(mutex.err) && mutex.ok && mutex.stopped && mutex.after === '' && !tx.some(t => /Cloud IR download/.test(t)) && (() => { const parts = tx.filter(t => /^TX Capture preview "Test Preview" \d+\/\d+:/.test(t)); const m = parts.length && /\/(\d+):/.exec(parts[0]); return parts.length > 1 && m && Number(m[1]) === parts.length; })(), JSON.stringify(mutex) + ' ' + JSON.stringify(tx.map(t => t.slice(0, 50))));
 
+  // ---------------------------------------------------------------- Cloud IR checks in the shell (src/cloud-ir.js), no network
+  {
+    const cloudIR = require('../src/cloud-ir');
+    const wavOf = ({ format = 3, channels = 1, rate = 48000, bits = 32, data = 16, fmt = true, extensible = false, cut = 0, riff = 'RIFF' } = {}) => {
+      const fmtLen = extensible ? 40 : 16;
+      const chunks = [];
+      if (fmt) {
+        const f = Buffer.alloc(8 + fmtLen);
+        f.write('fmt ', 0); f.writeUInt32LE(fmtLen, 4);
+        f.writeUInt16LE(extensible ? 0xFFFE : format, 8); f.writeUInt16LE(channels, 10); f.writeUInt32LE(rate, 12);
+        f.writeUInt32LE(rate * channels * bits / 8, 16); f.writeUInt16LE(channels * bits / 8, 20); f.writeUInt16LE(bits, 22);
+        if (extensible) { f.writeUInt16LE(22, 24); f.writeUInt16LE(format, 32); }
+        chunks.push(f);
+      }
+      if (data) { const d = Buffer.alloc(8 + data); d.write('data', 0); d.writeUInt32LE(data + cut, 4); chunks.push(d); }
+      else { const l = Buffer.alloc(8 + 28); l.write('LIST', 0); l.writeUInt32LE(28, 4); chunks.push(l); }
+      const body = Buffer.concat(chunks);
+      const head = Buffer.alloc(12); head.write(riff, 0); head.writeUInt32LE(body.length + 4, 4); head.write('WAVE', 8);
+      return Buffer.concat([head, body]);
+    };
+    const why = (opts) => { try { cloudIR.checkWav(wavOf(opts)); return 'ok'; } catch (e) { return e.message; } };
+    check('Cloud IR check: a mono 48 kHz float WAV (the traced kind) passes', why() === 'ok', why());
+    check('Cloud IR check: 24-bit PCM stereo at 44.1 kHz and WAVE_FORMAT_EXTENSIBLE float pass', why({ format: 1, bits: 24, channels: 2, rate: 44100 }) === 'ok' && why({ extensible: true }) === 'ok', why({ format: 1, bits: 24, channels: 2, rate: 44100 }) + ' / ' + why({ extensible: true }));
+    check('Cloud IR check: a compressed WAV (format 2) is refused with the reason', /not PCM or floating-point audio \(WAV format 2\)/.test(why({ format: 2, bits: 16 })), why({ format: 2, bits: 16 }));
+    check('Cloud IR check: 6 channels are refused', /6 channels; the pedal takes mono or stereo/.test(why({ channels: 6 })), why({ channels: 6 }));
+    check('Cloud IR check: a 4 kHz or 384 kHz sample rate is refused', /sample rate \(4000 Hz\)/.test(why({ rate: 4000 })) && /384000 Hz/.test(why({ rate: 384000 })), why({ rate: 4000 }));
+    check('Cloud IR check: 8-bit PCM is refused', /8-bit PCM samples/.test(why({ format: 1, bits: 8 })), why({ format: 1, bits: 8 }));
+    check('Cloud IR check: no format chunk, no audio, a cut-short chunk or not RIFF are refused', /no format chunk/.test(why({ fmt: false, data: 64 })) && /no audio data/.test(why({ data: 0 })) && /cut short/.test(why({ cut: 100 })) && /not a WAV file/.test(why({ riff: 'RIFX' })), [why({ fmt: false, data: 64 }), why({ data: 0 }), why({ cut: 100 }), why({ riff: 'RIFX' })].join(' / '));
+    const big = (() => { try { cloudIR.decodeIRPayload('A'.repeat(1500000)); return 'ok'; } catch (e) { return e.message; } })();
+    check('Cloud IR check: a payload over 1 MB is refused before decoding', /larger than 1 MB/.test(big) && cloudIR.decodeIRPayload(wavOf().toString('base64')).length === wavOf().length, big);
+  }
+
   // ---------------------------------------------------------------- Cortex Cloud IR → the pedal's library (15 → 16), and deleting it (82 → 83)
   // A minimal valid WAV: RIFF/WAVE, fmt (float, mono, 48 kHz), 4 samples.
   const wav = (() => {

@@ -17,6 +17,7 @@ const LINKS = require('../pro/links');   // repo, manual, issues, support: the s
 const { menuTemplate, menuLabels } = require('./menu');
 const { createActivityLog } = require('./activity-log');
 const { randomUUID } = require('crypto');
+const { decodeIRPayload, checkWav } = require('./cloud-ir');
 
 // Capture pages live under /cloud/discover/… and under pack pages like /cloud/<pack>/…
 const CAPTURE_PAGE = /\/neural-capture\/view\/([0-9a-f-]{36})/i;
@@ -403,11 +404,11 @@ function createWindow() {
   win.contentView.addChildView(editor);
   win.contentView.addChildView(cloud);
   win.contentView.addChildView(toolbar);
+  win.on('resize', layout);
   // Native content bounds can settle after show (e.g. Windows menus) without a window resize.
   win.contentView.on('bounds-changed', layout);
   layout();
-  editor.setVisible(true);
-  cloud.setVisible(false);
+  show('editor');
 }
 
 function startDevRemote() {
@@ -471,6 +472,7 @@ ipcMain.on('editor-reload', () => editor.webContents.reload());
 // ---------- editor settings IPC (src/editor-preload.js → window.nanoShell) ----------
 const fromEditor = (e) => editor && e.sender === editor.webContents;
 const fromCloud = (e) => cloud && e.sender === cloud.webContents;
+const fromToolbar = (e) => toolbar && e.sender === toolbar.webContents;
 ipcMain.handle('settings-get', (e) => (fromEditor(e) ? {
   platform: process.platform, accent: shellSettings.accent, dockFollowsAccent: shellSettings.dockFollowsAccent,
   pedal: shellSettings.pedal, recordingsDir: recordingsDir(), version: app.getVersion(), devTools: shellSettings.devTools,
@@ -611,12 +613,10 @@ async function fetchCloudIRBundle(productId, listedName) {
   if (!res.ok) throw new Error('Cortex Cloud answered ' + res.status + (res.status === 401 ? ' (sign in to Cortex Cloud first)' : ''));
   let json;
   try { json = await res.json(); } catch { throw new Error('Cortex Cloud returned an unreadable IR download.'); }
-  if (!json || typeof json.payload !== 'string' || !json.payload) throw new Error('The Cloud response has no IR payload.');
+  if (!json) throw new Error('The Cloud response has no IR payload.');
   if (json.id && String(json.id).toLowerCase() !== String(productId).toLowerCase()) throw new Error('Cortex Cloud returned a different product than the selected IR.');
-  const wav = Buffer.from(json.payload, 'base64');
-  if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') {
-    throw new Error('The Cloud IR payload is not a WAV file.');
-  }
+  const wav = decodeIRPayload(json.payload);   // at most 1 MB
+  checkWav(wav);                               // PCM or float, mono or stereo, 8–192 kHz, with audio data
   const name = String(json.name || listedName || 'Cloud impulse response').trim();
   return {
     wav: wav.toString('base64'),
@@ -645,9 +645,27 @@ function finishCloudIRTransfer(transferId, result) {
 ipcMain.on('cloud-ir-transfer-complete', (event, transferId, result) => {
   if (fromEditor(event)) finishCloudIRTransfer(transferId, result);
 });
+// The editor reports when its confirmation dialog is open ('confirming': no timeout while the user decides) and when
+// the transfer starts ('sending': three minutes from now).
+const IR_TRANSFER_TIMEOUT = 3 * 60 * 1000;
+function armCloudIRTimeout(transferId) {
+  const pending = cloudIRTransfers.get(transferId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pending.timer = setTimeout(() => finishCloudIRTransfer(transferId, {
+    ok: false, error: 'The editor did not finish the IR transfer. Check its status and try again if needed.'
+  }), IR_TRANSFER_TIMEOUT);
+}
+ipcMain.on('cloud-ir-transfer-status', (event, transferId, phase) => {
+  const pending = fromEditor(event) && cloudIRTransfers.get(String(transferId || ''));
+  if (!pending) return;
+  if (phase === 'confirming') { clearTimeout(pending.timer); pending.timer = null; }
+  else if (phase === 'sending') armCloudIRTimeout(String(transferId));
+});
 
 ipcMain.handle('send-cloud-ir', async (event, productId, listedName) => {
-  if (!fromCloud(event) || !isCloudIRPage(cloud.webContents.getURL())) return { ok: false, error: 'Open your Cortex Cloud Impulse Responses page first.' };
+  const cloudURL = cloud && cloud.webContents.getURL();
+  if (!fromCloud(event) || !isCloudHost(cloudURL) || !isCloudIRPage(cloudURL)) return { ok: false, error: 'Open your Cortex Cloud Impulse Responses page first.' };
   if (editorFlavor !== 'pro') return { ok: false, error: 'Switch to the Pro Editor to send an IR to the pedal.' };
   if (!CLOUD_PRODUCT_ID.test(String(productId || ''))) return { ok: false, error: 'This Cloud IR has an invalid product ID.' };
   if (!editor || editor.webContents.isDestroyed()) return { ok: false, error: 'The editor is not ready.' };
@@ -656,12 +674,8 @@ ipcMain.handle('send-cloud-ir', async (event, productId, listedName) => {
   try {
     const bundle = await fetchCloudIRBundle(productId, listedName);
     transferId = randomUUID();
-    const response = new Promise(resolve => {
-      const timer = setTimeout(() => finishCloudIRTransfer(transferId, {
-        ok: false, error: 'The editor did not finish the IR transfer. Check its status and try again if needed.'
-      }), 3 * 60 * 1000);
-      cloudIRTransfers.set(transferId, { resolve, timer });
-    });
+    const response = new Promise(resolve => cloudIRTransfers.set(transferId, { resolve, timer: null }));
+    armCloudIRTimeout(transferId);
     editor.webContents.send('cloud-ir-bundle', { ...bundle, transferId });
     show('editor');
     return await response;
@@ -675,32 +689,42 @@ ipcMain.handle('send-cloud-ir', async (event, productId, listedName) => {
 // Live audition uses the same Cloud bundle, but the editor sends it through
 // the separate type-150 preview path instead of the normal type-13 library
 // upload. Keep the editor hidden so the Cloud page remains visible while the
-// pedal is auditioning the capture.
+// pedal is auditioning the capture. Every refusal here tells the toolbar too,
+// so its Live Preview button never sticks.
+function previewRefused(error, { tell = true } = {}) {
+  const pro = editorFlavor === 'pro' && editor && !editor.webContents.isDestroyed();
+  if (pro) editor.webContents.executeJavaScript('window.__pushPreviewState && window.__pushPreviewState()', true).catch(() => {});
+  else if (toolbar && !toolbar.webContents.isDestroyed()) toolbar.webContents.send('preview-state', { active: false, name: '', error: '', phase: 'idle' });
+  if (tell) dialog.showMessageBox(win, { type: 'warning', message: 'Could not preview the capture', detail: error });
+  return { ok: false, error };
+}
 async function previewCaptureOnNano(id) {
+  if (editorFlavor !== 'pro' || !editor || editor.webContents.isDestroyed()) return previewRefused('Live Preview works in the Pro Editor. Switch back from the Classic Editor (View menu) first.');
   id = id || captureIdOf(cloud.webContents.getURL());
-  if (!id) return { ok: false, error: 'Open a capture page in Cortex Cloud first.' };
+  if (!id) return previewRefused('Open a capture page in Cortex Cloud first.');
   try {
     const bundle = await fetchCaptureBundle(id);
     editor.webContents.send('preview-bundle', bundle);
     return { ok: true, name: bundle.meta.name, bytes: Buffer.from(bundle.cns, 'base64').length };
   } catch (err) {
     dialog.showMessageBox(win, { type: 'warning', message: 'Could not fetch the capture for preview', detail: err.message });
-    return { ok: false, error: err.message };
+    return previewRefused(err.message, { tell: false });
   }
 }
-ipcMain.handle('preview-capture', () => previewCaptureOnNano());
-ipcMain.handle('stop-preview', async () => {
-  if (!editor || editor.webContents.isDestroyed()) return false;
+ipcMain.handle('preview-capture', (e) => (fromToolbar(e) ? previewCaptureOnNano() : { ok: false, error: 'Not allowed.' }));
+ipcMain.handle('stop-preview', async (e) => {
+  if (!fromToolbar(e) || !editor || editor.webContents.isDestroyed()) return false;
   return editor.webContents.executeJavaScript('window.__stopCapturePreview ? window.__stopCapturePreview() : false', true).catch(() => false);
 });
-ipcMain.handle('get-cab-ir-state', async () => {
-  if (!editor || editor.webContents.isDestroyed()) return { connected: false, on: false };
+ipcMain.handle('get-cab-ir-state', async (e) => {
+  if (!fromToolbar(e) || !editor || editor.webContents.isDestroyed()) return { connected: false, on: false };
   return editor.webContents.executeJavaScript(
     'window.__getCabIRState ? window.__getCabIRState() : { connected: false, on: false }',
     true
   ).catch(() => ({ connected: false, on: false }));
 });
-ipcMain.handle('toggle-cab-ir', async () => {
+ipcMain.handle('toggle-cab-ir', async (e) => {
+  if (!fromToolbar(e)) return { ok: false, error: 'Not allowed.' };
   if (!editor || editor.webContents.isDestroyed()) return { ok: false, error: 'The editor is not ready.' };
   return editor.webContents.executeJavaScript(
     'window.__toggleCabIR ? window.__toggleCabIR() : { ok: false, error: \'The editor is not ready.\' }',

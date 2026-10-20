@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('nanoCloud', {
   onPreview: (fn) => ipcRenderer.on('preview-bundle', (_e, bundle) => fn(bundle)),
   onImpulseResponse: (fn) => ipcRenderer.on('cloud-ir-bundle', (_e, bundle) => fn(bundle)),
   completeImpulseResponse: (transferId, result) => ipcRenderer.send('cloud-ir-transfer-complete', String(transferId || ''), result || {}),
+  impulseResponseStatus: (transferId, phase) => ipcRenderer.send('cloud-ir-transfer-status', String(transferId || ''), String(phase || '')),
 });
 
 contextBridge.exposeInMainWorld('nanoShell', {

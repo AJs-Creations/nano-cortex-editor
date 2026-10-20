@@ -1995,12 +1995,17 @@
         return outcome;
       }
       if (typeof bundle.wav !== 'string' || !bundle.wav) throw new Error('The Cloud IR download has no WAV data.');
+      // The shell already checked the WAV (src/cloud-ir.js); these guard the bridge.
+      if (bundle.wav.length > 1400000) throw new Error('The IR is larger than 1 MB.');
       const wav = Uint8Array.from(atob(bundle.wav), c => c.charCodeAt(0));
       if (wav.length < 44 || String.fromCharCode(...wav.slice(0, 4)) !== 'RIFF' || String.fromCharCode(...wav.slice(8, 12)) !== 'WAVE') {
         throw new Error('The Cloud IR download is not a WAV file.');
       }
       if (!meta.productId || !meta.filename || !/\.wav$/i.test(meta.filename)) throw new Error('The Cloud IR download is missing its product ID or WAV filename.');
 
+      // No transfer timeout in the shell while the user decides.
+      const irStatus = (phase) => { if (transferId && window.nanoCloud && window.nanoCloud.impulseResponseStatus) window.nanoCloud.impulseResponseStatus(transferId, phase); };
+      irStatus('confirming');
       const choice = await modal({
         title: 'Send ' + name + ' to the pedal?',
         body: (wav.length / 1024).toFixed(1) + ' KB over Bluetooth. This adds it to “IRs on pedal”; it does not change any preset slot.',
@@ -2012,6 +2017,7 @@
         return outcome;
       }
 
+      irStatus('sending');
       ui.uploading = true;
       ui.lastAction = 'Sending IR ' + name;
       renderStatus();
@@ -2082,6 +2088,7 @@
     notifyPreviewState(ui.previewing, ui.previewing || ui.previewBusy ? ui.previewName : '', error, phase);
   }
   window.__previewToolbar = () => previewToolbar;   // for the UX test
+  window.__pushPreviewState = () => pushPreviewState();   // the shell asks after refusing a preview request
 
   let lastCabIRStateSignature = '';
   function notifyCabIRState(force = false) {
