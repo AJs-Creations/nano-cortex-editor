@@ -118,7 +118,14 @@
   const ui = {
     selected: 'capture',
     demo: false,
-    dirty: false,
+    clearOverridesOnRead: true,   // the next state dump replaces local edits of expression targets
+    expressionLocalOverrides: new Map(),
+    pendingBypassTargets: new Map(),
+    bypassWriteChain: Promise.resolve(),
+    bypassWriteGeneration: 0,
+    stagePointerClicks: new Map(),
+    bypassPointerClicks: new Map(),
+    stageContextNativePending: false,
     connText: 'Not connected',
     connecting: false,
     connectError: '',
@@ -127,15 +134,30 @@
     drawerOpen: false,
     editing: false,       // an inline value editor is open
     renderQueued: false,
+    knobDragging: false,  // defer full renders while a pointer drag owns a knob
+    renderAfterKnob: false,
     sideSig: '',
+    presetReorderBusy: false,
+    presetUnknown: false,   // a read after a preset move failed: which preset the pedal is on isn't known
     lastAction: '',
     logs: [],
     logSeq: 0,   // lines ever logged; each entry carries its number, so readers can index past the trim below
     usage: null,          // last slot usage scan: { captures, cabs, library, cabLibrary, date, complete, scanned, total }
     scanning: false,
     scanStop: false,
+    previewing: false,
+    previewBusy: false,
+    previewName: '',
+    cabIRLoadActive: null,
+    cabIRLoadQueue: [],
+    cabIRLoadPaused: false,
+    cabIRLoadTimedOut: null,
+    captureSlotPreselect: 0,
+    pendingIRSlotTarget: null,
   };
   window.__ui = ui; // handy for poking at from DevTools
+  let presetMoveProtocolPending = false;
+  let suppressPresetClickUntil = 0;
 
   // ------------------------------------------------------------------ settings storage + accent colour
   // Small per-machine preferences in localStorage under "settings.*". The metronome keeps its own "metronome" key.
@@ -246,78 +268,152 @@
     return state.capture.selectedSlot || null;
   }
   function activeIRSlot() {
+    const pending = ui.pendingIRSlotTarget;
+    if (pending && pending.preset === Number(state.selectedPreset)) return pending.slot;
     if (!state.cabIR.on) return 0;
     if (state.cabIR.fromLibrary) return null;
     const sel = state.cabIR.selectedSlot;
-    if (sel && sameName(state.irNames.get(sel), state.currentIR.shortName)) return sel;
+    if (Number.isInteger(sel) && sel >= 1 && sel <= 5) return sel;
     for (let i = 1; i <= irSlotCount(); i++) {
       if (state.currentIR.shortName && sameName(state.irNames.get(i), state.currentIR.shortName)) return i;
     }
     return state.cabIR.selectedSlot || null;
   }
 
+  function selectedIRIsFactory() {
+    const slot = activeIRSlot();
+    const name = slot && state.irNames.get(slot);
+    const factoryIRs = state.library.irFactory || [];
+    if (slot && slot >= 1 && slot <= 5 && state.library.loaded) {
+      // With the pedal library loaded, a pedal slot is factory only when its
+      // actual contents match a factory entry. Missing or user names must not
+      // inherit the microphone from an IR that was only being previewed.
+      return Boolean(name && factoryIRs.some(item => sameName(item.name, name)));
+    }
+    if (name) {
+      // The selected pedal slot is authoritative when preview state leaves the
+      // current IR name stale. Unknown slot names are non-factory once the
+      // pedal library has been read, rather than inheriting the preview's mic.
+      if (factoryIRs.some(item => sameName(item.name, name))) return true;
+      if ((state.library.irUser || []).some(item => sameName(item.name, name)) || state.library.loaded) return false;
+    }
+    return isFactoryCabIR();
+  }
+
   const shortMic = (m) => String(m || '').replace('Condenser', 'Cond').replace('Dynamic', 'Dyn').replace('Ribbon', 'Rib');
+
+  const actualStageEnabled = (key) => key === 'gate' ? Boolean(state.gate.on)
+    : key === 'capture' ? Boolean(state.capture.on)
+      : key === 'cab' ? Boolean(state.cabIR.on) : Boolean(state.blocks[key] && state.blocks[key].on);
+  const stageEnabled = (key) => {
+    const pending = ui.pendingBypassTargets.get(key);
+    return pending && pending.preset === Number(state.selectedPreset) ? pending.on : actualStageEnabled(key);
+  };
 
   function stageInfo(key) {
     if (key === 'gate') {
       const r = state.gate.params[0];
-      return { on: state.gate.on, model: 'Noise gate', sub: 'Reduction ' + Math.round(r.value) + '%', canToggle: true };
+      return { on: stageEnabled(key), model: 'Noise gate', sub: 'Reduction ' + Math.round(r.value) + '%', canToggle: true };
     }
     if (key === 'capture') {
       const slot = activeCaptureSlot();
       const name = state.currentCapture.name || (slot ? state.captureNames.get(slot) : '') || '';
+      const on = stageEnabled(key);
       return {
-        on: state.capture.on,
-        model: state.capture.on ? (name || 'Capture') : (name || 'Capture'),
-        sub: !state.capture.on ? 'Bypassed' : state.capture.fromLibrary ? 'From the library: ' + (name || 'capture')
+        on,
+        model: name || 'Capture',
+        sub: !on ? 'Bypassed' : state.capture.fromLibrary ? 'From the library: ' + (name || 'capture')
           : (state.currentCapture.inBank === false ? 'Library capture' : (slot ? 'Slot ' + slot : '')),
         canToggle: true,
       };
     }
     if (key === 'cab') {
       const name = state.currentIR.shortName || '';
+      const on = stageEnabled(key);
       return {
-        on: state.cabIR.on,
+        on,
         model: name || 'Cab / IR',
-        sub: !state.cabIR.on ? 'Bypassed' : state.cabIR.fromLibrary ? 'From the library: ' + (name || 'cab') : (isFactoryCabIR() ? shortMic(state.cabIR.mic) + ', pos ' + state.cabIR.position : (state.currentIR.inBank === false ? 'Library IR' : 'User IR')),
+        sub: !on ? 'Bypassed' : state.cabIR.fromLibrary ? 'From the library: ' + (name || 'cab') : (selectedIRIsFactory() ? shortMic(state.cabIR.mic) + ', pos ' + state.cabIR.position : (state.currentIR.inBank === false ? 'Library IR' : 'User IR')),
         canToggle: true,
       };
     }
     const b = state.blocks[key];
-    if (b.unknownId) return { on: b.on, none: false, unknown: true, model: 'Unknown effect', sub: 'Newer firmware?', canToggle: true };
+    if (b.unknownId) return { on: stageEnabled(key), none: false, unknown: true, model: 'Unknown effect', sub: 'Newer firmware?', canToggle: true };
     const def = b.models.find(m => m.name === b.model);
     const none = b.model === 'None';
     return {
-      on: b.on, none,
+      on: stageEnabled(key), none,
       model: none ? 'Empty' : b.model,
       sub: none ? 'Add effect' : (def ? def.category : ''),
-      canToggle: !(none && !b.on),
+      canToggle: !(none && !stageEnabled(key)),
     };
   }
 
   // ------------------------------------------------------------------ actions
-  function markDirty() {
-    if (!ui.dirty) { ui.dirty = true; render(); }
+  function pedalDirtyForUI() {
+    return Boolean(state.presetDirty);
+  }
+
+  function setStageEnabled(key, on) {
+    if (key === 'gate') state.gate.on = on;
+    else if (key === 'capture') state.capture.on = on;
+    else if (key === 'cab') state.cabIR.on = on;
+    else if (state.blocks[key]) state.blocks[key].on = on;
+  }
+  function writeStageEnabled(key, on) {
+    if (key === 'gate') return setGateEnabled(on);
+    if (key === 'capture') return on ? setCapture(state.capture.lastActiveSlot || 1) : selectCaptureSlot(0);
+    if (key === 'cab') return selectCabIRSlot(on ? (state.cabIR.lastActiveSlot || 1) : 0);
+    return setFXBlockEnabled(key, on);
+  }
+  const BYPASS_TARGET_GRACE_MS = 300;
+  function applyPendingBypassTargets() {
+    const preset = Number(state.selectedPreset);
+    let changed = false;
+    for (const [key, target] of ui.pendingBypassTargets) {
+      if (target.preset === preset && actualStageEnabled(key) !== target.on) {
+        setStageEnabled(key, target.on);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+  function refreshAfterBypassWrites(job) {
+    if (job.generation !== ui.bypassWriteGeneration || job.preset !== Number(state.selectedPreset)) return Promise.resolve();
+    if (!state.connected || ui.demo) {
+      if (job.generation === ui.bypassWriteGeneration) {
+        setTimeout(() => {
+          if (job.generation === ui.bypassWriteGeneration) ui.pendingBypassTargets.clear();
+        }, BYPASS_TARGET_GRACE_MS);
+      }
+      return Promise.resolve();
+    }
+    const checked = waitForPresetState(job.preset, 1800);
+    return Promise.resolve(requestCurrentPresetState()).then(() => checked).then(() => {
+      if (job.generation === ui.bypassWriteGeneration) ui.pendingBypassTargets.clear();
+    });
+  }
+  function queueStageEnabled(key, on) {
+    const job = { key, on: Boolean(on), preset: Number(state.selectedPreset), generation: ++ui.bypassWriteGeneration };
+    ui.pendingBypassTargets.set(key, job);
+    ui.bypassWriteChain = ui.bypassWriteChain
+      .catch(() => {})
+      .then(() => job.preset === Number(state.selectedPreset) ? writeStageEnabled(key, job.on) : false)
+      .then(() => refreshAfterBypassWrites(job))
+      .catch(err => log('ERROR: bypass write: ' + err.message));
   }
 
   function toggleStage(key) {
     if (!state.connected) return;
-    if (key === 'gate') {
-      state.gate.on = !state.gate.on;
-      setGateEnabled(state.gate.on);
-    } else if (key === 'capture') {
-      if (state.capture.on) selectCaptureSlot(0);
-      else setCapture(state.capture.lastActiveSlot || 1);
-    } else if (key === 'cab') {
-      if (state.cabIR.on) selectCabIRSlot(0);
-      else selectCabIRSlot(state.cabIR.lastActiveSlot || 1);
-    } else {
+    if (key !== 'gate' && key !== 'capture' && key !== 'cab') {
       const b = state.blocks[key];
+      if (!b) return;
       if (!b.on && b.model === 'None' && !b.unknownId) { toast('Choose an effect for ' + b.title + ' first'); return; }
-      b.on = !b.on;
-      setFXBlockEnabled(key, b.on);
     }
-    markDirty();
+    const on = !stageEnabled(key);
+    setStageEnabled(key, on);
+    noteExpressionLocalOverride(key, 'bypass', on);
+    queueStageEnabled(key, on);
     render();
   }
 
@@ -332,12 +428,13 @@
     } else {
       setFXModel(key, name);
     }
-    markDirty();
     render();
   }
 
   async function doSave() {
     if (!state.connected) { toast('Connect your Nano Cortex to save'); return; }
+    if (presetUnknownRefuses()) return;
+    if (!(await stopAnyAudition('Save'))) return;
     flushTempo();
     await savePreset(); // the outcome arrives through showSaveResult()
   }
@@ -346,6 +443,7 @@
   // (the same reload doDelete() uses for the current preset).
   async function doDiscard() {
     if (!state.connected) { toast('Connect your Nano Cortex first'); return; }
+    if (presetUnknownRefuses()) return;
     const n = state.selectedPreset;
     const choice = await modal({
       title: 'Discard edits to ' + presetName(n) + '?',
@@ -353,8 +451,8 @@
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Discard', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
+    if (!(await stopAnyAudition('Discard'))) return;
     ui.lastAction = 'Discarding edits\u2026'; renderStatus();
-    ui.dirty = false;
     state.exp.loaded = false;   // the pedal reloads the saved set too; read it again
     await selectPreset(n);
     if (ui.demo) demo.load(n);
@@ -368,6 +466,7 @@
   // with the chosen slot and name; verified on the pedal 2026-10-08 from the native app.
   async function doSaveAs(preselect) {
     if (!state.connected) { toast('Connect your Nano Cortex to save'); return; }
+    if (presetUnknownRefuses()) return;
     const from = state.selectedPreset;
     let target = Number.isInteger(preselect) && preselect !== from ? preselect : 0;
     for (let i = 1; !target && i <= 64; i++) if (i !== from && presetName(i) === 'Empty') { target = i; break; }
@@ -393,6 +492,7 @@
     const name = input.value.trim();
     if (name.length < 4) { toast('Preset name must have at least 4 characters.'); return; }
     if (new TextEncoder().encode(name).length > 64) { toast('Preset name is too long.'); return; }
+    if (!(await stopAnyAudition('Save as'))) return;
     await savePresetAs(target, name);
   }
   async function savePresetAs(n, name) {
@@ -406,7 +506,6 @@
     if (!await writeC304('save preset ' + n, packet)) { toast('Save failed: the Bluetooth write did not go through.'); ui.lastAction = ''; render(); return false; }
     state.presetNames.set(n, name);
     if (ui.demo) demo.store(n);
-    ui.dirty = false;
     ui.sideSig = '';
     await selectPreset(n);
     if (ui.demo) demo.load(n);
@@ -428,6 +527,7 @@
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
+    if (!(await stopAnyAudition('Delete'))) return;
     const ok = await deletePresetOnPedal(n);
     if (!ok) { toast('The pedal refused to delete preset ' + n); render(); return; }
     state.presetNames.set(n, 'Empty');
@@ -464,9 +564,10 @@
     if (!state.connected) { toast('Connect your Nano Cortex first'); return false; }
     // The pedal drops the current preset's unsaved edits on an assignment (seen in the trace, INVESTIGATION §8),
     // so ask first, like a preset switch does.
-    const dirty = ui.dirty || state.presetDirty;
+    const dirty = isDirtyNow();
+    let choice = null;
     if (dirty) {
-      const choice = await modal({
+      choice = await modal({
         title: 'Save changes to ' + presetName(state.selectedPreset) + '?',
         body: 'Assigning a footswitch discards edits that haven\u2019t been saved to the pedal.',
         buttons: [
@@ -476,8 +577,9 @@
         ],
       });
       if (choice === 'cancel' || !choice) { render(); return false; }
-      if (choice === 'save') await doSave();
     }
+    if (!(await stopAnyAudition('the footswitch assignment'))) return false;
+    if (dirty && choice === 'save') await doSave();
     const n = presetIndex + 1;
     const f = await writeAndAwait('Assign preset ' + n + ' to footswitch ' + fs.label, footswitchFrame(slotKey, presetIndex), MSG.SetPresetSlotsResponse);
     if (fieldValue(f, 4) !== 1) {
@@ -487,7 +589,7 @@
       return false;
     }
     state.presetSlots = { ...state.presetSlots, [slotKey]: presetIndex };
-    if (dirty) { ui.dirty = false; if (ui.demo) demo.load(state.selectedPreset); }   // the pedal is back on the stored preset
+    if (dirty && ui.demo) demo.load(state.selectedPreset);   // the pedal is back on the stored preset
     window.log('Assigned preset ' + n + ' to footswitch ' + fs.label);
     toast('Preset ' + n + ' on footswitch ' + fs.label);
     render();
@@ -498,6 +600,7 @@
 
   async function doRename() {
     if (!state.connected) { toast('Connect your Nano Cortex to rename presets'); return; }
+    if (presetUnknownRefuses()) return;
     const n = state.selectedPreset;
     const input = el('input', { class: 'search', type: 'text', value: presetName(n), maxlength: '64', 'aria-label': 'Preset name', spellcheck: 'false' });
     const choice = await modal({
@@ -505,6 +608,7 @@
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Rename', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
+    if (!(await stopAnyAudition('Rename'))) return;
     const err = await renamePresetTo(n, input.value);
     if (err) { toast(err); return; }
     ui.sideSig = '';
@@ -1139,7 +1243,6 @@
     tempo.lastLive = null;
     state.presetTempo = bpm;
     writeC304('Preset tempo ' + bpm + ' BPM', tempoFrame(0, bpm));
-    markDirty();
     tempoChanged();
   }
   function tempoCommitSoon(ms) { cancelTempoCommit(); tempo.commitTimer = setTimeout(() => { tempo.commitTimer = null; tempoCommit(state.presetTempo); }, ms); }
@@ -1196,9 +1299,112 @@
     } catch { /* fall through to the core */ }
     return coreOnC305ForTempo.apply(this, [event, ...rest]);
   };
+
+  // Live reports from the pedal (knobs, footswitch bypasses, the expression pedal) are applied in pro/live-sync.js.
+  // The UI's part: a bypass click the pedal hasn't confirmed yet wins over an older report, and a local edit of an
+  // expression target stays until the pedal moves again.
+  NanoLive.hooks.keepLocalBypass = (key, enabled) => {
+    const pending = ui.pendingBypassTargets.get(key);
+    return !!pending && pending.preset === Number(state.selectedPreset) && pending.on !== enabled;
+  };
+  NanoLive.hooks.expressionMoved = () => ui.expressionLocalOverrides.clear();
+  NanoLive.hooks.stateRead = () => { if (ui.presetUnknown) { ui.presetUnknown = false; ui.sideSig = ''; render(); } };
+  NanoLive.hooks.afterExpression = () => restoreExpressionLocalOverrides();
+
+  function clearPendingIRSlotTarget(target = ui.pendingIRSlotTarget) {
+    if (!target) return;
+    clearTimeout(target.timer);
+    if (ui.pendingIRSlotTarget === target) ui.pendingIRSlotTarget = null;
+  }
+
+  function holdIRSlotTargetForPreview() {
+    const target = ui.pendingIRSlotTarget;
+    if (!target) return;
+    target.holdForPreviewStop = true;
+    clearTimeout(target.timer);
+    target.timer = null;
+  }
+
+  function releaseIRSlotTargetWhenPreviewFails() {
+    const target = ui.pendingIRSlotTarget;
+    if (!target || !target.holdForPreviewStop || irAudition.active) return;
+    target.holdForPreviewStop = false;
+    target.timer = setTimeout(() => settlePendingIRSlotTarget(target), 2500);
+  }
+
+  function settleIRSlotTargetAfterPreview() {
+    const target = ui.pendingIRSlotTarget;
+    if (!target || !target.holdForPreviewStop) return;
+    if (target.preset !== Number(state.selectedPreset)) {
+      clearPendingIRSlotTarget(target);
+      return;
+    }
+    state.cabIR.fromLibrary = false;
+    state.cabIR.on = target.slot > 0;
+    state.cabIR.selectedSlot = target.slot;
+    state.cabIR.stateSlot = target.slot;
+    if (target.slot > 0) state.cabIR.lastActiveSlot = target.slot;
+    if (target.currentIR) state.currentIR = { ...target.currentIR };
+    clearPendingIRSlotTarget(target);
+    render();
+  }
+
+  function settlePendingIRSlotTarget(target) {
+    if (ui.pendingIRSlotTarget !== target) return;
+    clearPendingIRSlotTarget(target);
+    render();
+  }
+
+  function beginExpressionBoundary() {
+    ui.clearOverridesOnRead = true;
+    ui.expressionLocalOverrides.clear();
+    ui.pendingBypassTargets.clear();
+    ui.bypassWriteGeneration++;
+    clearPendingIRSlotTarget();
+  }
+
+  // A preset change on the pedal (footswitch): local edits, unconfirmed clicks and auditions belong to the old preset.
+  const coreOnC305ForPresetChange = window.onC305;
+  window.onC305 = function (event, ...rest) {
+    const d = NanoLive.exactBytes(event);
+    if (d && frameType(d) === MSG.SetPresetSlotsRequest) { beginExpressionBoundary(); endAuditionsAfterPedalPresetChange(); }
+    return coreOnC305ForPresetChange.apply(this, [event, ...rest]);
+  };
+
+  // Edits on their way to the pedal. Its dirty report (115) comes after an edit lands, so a prompt right after an
+  // edit would see a clean preset: an edit write queued or in flight, or sent less than 300 ms ago with no 115 since,
+  // counts as unsaved for the "Save changes to …?" prompts (isDirtyNow). The mark in the header stays the pedal's.
+  const EDIT_WRITE_TYPES = new Set([26, 28, 31, 62, 94, 95, 99, 136]);   // knobs, slots, bypass, expression, cab, FX, models
+  const editWrites = { inFlight: 0, lastSentAt: 0, lastReportAt: 0 };
+  const isEditWrite = (p) => {
+    const type = p && p.length >= 6 ? frameType(p) : null;
+    return EDIT_WRITE_TYPES.has(type) || (type === TEMPO_MSG && p[2] === 0x18 && p[3] === 0);   // tempo: the preset's, not the live one
+  };
+  const coreWriteC304 = window.writeC304;
+  window.writeC304 = function (label, payload) {
+    if (!isEditWrite(payload)) return coreWriteC304.apply(this, arguments);
+    editWrites.inFlight++;
+    return coreWriteC304.apply(this, arguments).then((ok) => {
+      editWrites.inFlight--;
+      if (ok) editWrites.lastSentAt = Date.now();
+      return ok;
+    });
+  };
+  const coreTypedForDirty = window.handleTypedMessage;
+  window.handleTypedMessage = function (data) {
+    if (frameType(data) === MSG.PresetDirtyStateChanged) editWrites.lastReportAt = Date.now();
+    return coreTypedForDirty.apply(this, arguments);
+  };
+  const editPending = () => editWrites.inFlight > 0 || (editWrites.lastSentAt > editWrites.lastReportAt && Date.now() - editWrites.lastSentAt < 300);
+
   // A preset switch drops unsaved edits on the pedal, a pending tempo commit included.
   const coreSelectPreset = window.selectPreset;
-  window.selectPreset = function () { cancelTempoCommit(); tempo.lastLive = null; return coreSelectPreset.apply(this, arguments); };
+  window.selectPreset = function () {
+    cancelTempoCommit();
+    tempo.lastLive = null;
+    beginExpressionBoundary();
+    return coreSelectPreset.apply(this, arguments);
+  };
 
   // The Tempo field in the inspector's top row: −/+ (Shift ×10), typeable, Tap. Built once and moved into each
   // inspector head, so it keeps focus and a half-typed value across renders.
@@ -1273,6 +1479,7 @@
   window.__tempo = { state: tempo, frame: tempoFrame, live: tempoLive, commit: tempoCommit, tap: tempoTap, setFollow: setFollowPreset };
 
   // ------------------------------------------------------------------ pedal library
+  let irLibraryQuery = '';
   async function ensureLibrary() {
     if (state.library.loaded) return true;
     requestLibraryContent();
@@ -1280,9 +1487,189 @@
     while (!state.library.loaded && Date.now() - t0 < 6000) await new Promise(r => setTimeout(r, 100));
     return state.library.loaded;
   }
+
+  function applyIRLibrarySearch(root) {
+    const query = irLibraryQuery.trim().toLowerCase();
+    let visible = 0;
+    root.querySelectorAll('.cab-library-group').forEach(group => {
+      let groupVisible = 0;
+      group.querySelectorAll('.library-row').forEach(row => {
+        const match = !query || row.dataset.search.includes(query);
+        row.hidden = !match;
+        if (match) groupVisible++;
+      });
+      group.hidden = groupVisible === 0;
+      visible += groupVisible;
+    });
+    const empty = root.querySelector('.library-empty');
+    if (empty) {
+      const loaded = state.library.loaded;
+      empty.hidden = loaded && visible > 0;
+      if (!loaded) empty.textContent = state.connected ? 'Reading the pedal library…' : 'Connect your Nano Cortex to read its library.';
+      else if (query) empty.textContent = 'Nothing matches “' + irLibraryQuery.trim() + '”.';
+      else empty.textContent = 'No cabs or IRs are available in the pedal library.';
+    }
+  }
+
+  // Built again only when the library or an audition changed (the inspector redraws on every report). The query is
+  // applied to the rows in place, so typing never rebuilds it; the same input keeps its focus and caret.
+  let irLibraryCache = { sig: '', node: null };
+  function irLibrarySection() {
+    const lib = state.library;
+    const sig = JSON.stringify([state.connected, lib.loaded, ui.uploading, ui.previewBusy,
+      irAudition.busy, irAudition.stopping, irAudition.active && [irAudition.active.kind, irAudition.active.index],
+      irAudition.pending && [irAudition.pending.kind, irAudition.pending.index],
+      ...['irFactory', 'irUser'].map(k => (lib[k] || []).map(x => x.index + ':' + x.name).join('|'))]);
+    if (irLibraryCache.node && irLibraryCache.sig === sig) return irLibraryCache.node;
+    const old = irLibraryCache.node && irLibraryCache.node.querySelector('.cab-library-search');
+    const caret = old && document.activeElement === old ? [old.selectionStart, old.selectionEnd] : null;
+    const root = el('div', { class: 'cab-library-content' });
+    irLibraryCache = { sig, node: root };
+    const search = el('input', {
+      class: 'search cab-library-search', type: 'search', placeholder: 'Search cabs and IRs', dataset: { fk: 'cab-lib-search' },
+      'aria-label': 'Search cabs and IRs', autocomplete: 'off', spellcheck: 'false', value: irLibraryQuery,
+      oninput: (e) => { irLibraryQuery = e.currentTarget.value; applyIRLibrarySearch(root); },
+    });
+    const groups = [
+      ['irFactory', 'Factory cabs', state.library.irFactory || []],
+      ['irUser', 'Your IRs', state.library.irUser || []],
+    ];
+    const list = el('div', { class: 'cab-library-groups' });
+    for (const [kind, label, items] of groups) {
+      if (!items.length) continue;
+      const grid = el('div', { class: 'library-grid' });
+      for (const item of items) {
+        const details = [label, item.type, item.instrument, item.author, item.description, ...(item.tags || [])].filter(Boolean).join(' · ');
+        const isActive = () => Boolean(irAudition.active && irAudition.active.kind === kind && irAudition.active.index === item.index);
+        const isPending = () => Boolean(irAudition.pending && irAudition.pending.kind === kind && irAudition.pending.index === item.index);
+        const row = el('div', {
+          class: 'library-row' + (isActive() ? ' previewing' : ''),
+          dataset: { search: [item.name, details].join(' ').toLowerCase() },
+          title: details || item.name,
+          oncontextmenu: (e) => contextMenu(e, [
+            {
+              label: isActive() ? 'Stop preview' : 'Preview',
+              disabled: !state.connected || !state.library.loaded || ui.uploading || ui.previewBusy || irAudition.busy,
+              action: () => isActive() ? stopIRPreview() : startIRPreview({ kind, index: item.index, name: item.name }),
+            },
+            {
+              label: 'Load into slot…',
+              disabled: !state.connected || !state.library.loaded || ui.uploading,
+              action: () => loadFromLibrary('cab', { kind, index: item.index, name: item.name }),
+            },
+            ...(kind === 'irUser' ? ['-', {
+              label: 'Delete…', danger: true,
+              disabled: !state.connected || !state.library.loaded || ui.uploading || ui.previewBusy || irAudition.busy,
+              action: () => deleteLibraryIR({ ...item, kind }),
+            }] : []),
+          ]),
+        });
+        const pick = el('button', {
+          class: 'library-item', type: 'button', disabled: !state.connected || !state.library.loaded,
+          'aria-label': 'Choose a slot for ' + item.name,
+          onclick: () => loadFromLibrary('cab', { kind, index: item.index, name: item.name }),
+        }, el('span', { text: item.name }));
+        const previewIcon = sv('svg', { class: 'library-preview-icon', viewBox: '0 0 16 16', 'aria-hidden': 'true', focusable: 'false' });
+        previewIcon.append(isActive()
+          ? sv('path', { d: 'M4 3h8v10H4z', fill: 'currentColor' })
+          : sv('path', { d: 'M5 3v10l8-5z', fill: 'currentColor' }));
+        const preview = el('button', {
+          class: 'library-preview' + (isActive() ? ' playing' : ''), type: 'button',
+          disabled: !state.connected || !state.library.loaded || irAudition.busy,
+          'aria-pressed': String(isActive()),
+          'aria-label': isActive() ? 'Stop preview of ' + item.name : 'Preview ' + item.name,
+          title: isPending() ? 'Starting preview' : isActive() && irAudition.stopping ? 'Stopping preview' : (isActive() ? 'Stop preview' : 'Audition without loading into a slot'),
+          onclick: () => isActive() ? stopIRPreview() : startIRPreview({ kind, index: item.index, name: item.name }),
+        }, isPending() ? el('span', { class: 'library-preview-pending', 'aria-hidden': 'true', text: '…' }) : previewIcon);
+        row.append(pick, preview);
+        grid.append(row);
+      }
+      list.append(el('div', { class: 'cab-library-group' }, el('h4', { text: label }), grid));
+    }
+    const empty = el('p', { class: 'library-empty' });
+    root.append(search, list, empty);
+    applyIRLibrarySearch(root);
+    if (caret) search.setSelectionRange(caret[0], caret[1]);   // rebuilt while typing: the caret stays where it was
+    return root;
+  }
+
+  let cabIRLoadId = 0;
+  function queueCabIRLoad(item, preselectedSlot = 0) {
+    if (ui.cabIRLoadPaused) {
+      toast('The last IR load was not confirmed. Reconnect the pedal before loading another IR.');
+      return;
+    }
+    const job = {
+      id: ++cabIRLoadId,
+      kind: item.kind,
+      index: item.index,
+      name: item.name,
+      preselectedSlot: Number(preselectedSlot) || 0,
+      slot: null,
+      phase: 'queued',
+    };
+    const queued = Boolean(ui.cabIRLoadActive || ui.cabIRLoadQueue.length);
+    ui.cabIRLoadQueue.push(job);
+    if (queued) toast('Queued ' + item.name + '. It will load after the current IR change.');
+    render();
+    startNextCabIRLoad();
+  }
+
+  function startNextCabIRLoad() {
+    if (ui.cabIRLoadPaused || ui.cabIRLoadActive || !ui.cabIRLoadQueue.length) return;
+    const job = ui.cabIRLoadQueue.shift();
+    ui.cabIRLoadActive = job;
+    job.phase = 'choosing';
+    ui.slotPreselect = job.preselectedSlot;
+    render();
+
+    const current = (state.library[job.kind] || []).find(candidate => candidate.index === job.index);
+    if (!current || !sameName(current.name, job.name)) {
+      toast('The pedal IR library changed. Refresh it and try again.');
+      void finishCabIRLoad(job, false);
+      return;
+    }
+
+    Promise.resolve(loadLibraryCab(job.kind, job.index)).then(slot => {
+      if (ui.cabIRLoadActive !== job || job.finishing) return;
+      if (slot) {
+        if (ui.demo) demo.pickIR(slot);
+        void finishCabIRLoad(job, true);
+        return;
+      }
+      const pending = state.pendingCabAssignment;
+      const uncertain = job.slot && pending && pending.slot === job.slot && sameName(pending.name, job.name);
+      if (uncertain) {
+        state.pendingCabAssignment = null;
+        ui.cabIRLoadPaused = true;
+        ui.cabIRLoadTimedOut = job;
+        ui.cabIRLoadQueue.length = 0;
+        toast('The pedal did not confirm this IR change. Reconnect before trying another IR.');
+      }
+      void finishCabIRLoad(job, false, { acknowledged: job.responseReceived, timeout: uncertain });
+    }).catch(err => {
+      if (ui.cabIRLoadActive !== job || job.finishing) return;
+      log('ERROR: loading library IR: ' + err.message);
+      toast('Could not load ' + job.name + ' into a pedal slot.');
+      void finishCabIRLoad(job, false);
+    });
+  }
+
+  async function finishCabIRLoad(job, success, { acknowledged = false, timeout = false } = {}) {
+    if (ui.cabIRLoadActive !== job || job.finishing) return;
+    job.finishing = true;
+    job.phase = success ? 'activating' : timeout ? 'unconfirmed' : 'failed';
+    render();
+    if (success) toast('Cab ' + job.name + ' loaded into slot ' + job.slot);
+    else if (!acknowledged && !timeout && job.slot) toast('Could not confirm loading ' + job.name + ' into a slot.');
+    ui.slotPreselect = 0;
+    ui.cabIRLoadActive = null;
+    render();
+    startNextCabIRLoad();
+  }
+
   // `slot`: load the pick straight into that slot (from a slot button's menu) instead of asking.
   async function openLibraryPicker(kind, anchor, slot) {
-    ui.slotPreselect = slot || 0;
     if (pop) { closePopover(); return; }
     if (!state.library.loaded) {
       toast('Reading the library on the pedal…');
@@ -1304,23 +1691,105 @@
       placeholder: isCap ? 'Search captures' : 'Search cabs and IRs',
       items, isCurrent: (m) => sameName(m.name, curName),
       emptyText: (q) => (items.length ? 'Nothing matches “' + q + '”.' : 'The pedal’s library is empty.'),
-      onPick: (m) => loadFromLibrary(kind, m),
+      onPick: (m) => loadFromLibrary(kind, m, slot || 0),
     });
   }
-  async function loadFromLibrary(kind, item) {
-    const slot = kind === 'capture' ? await loadLibraryCapture(item.kind, item.index) : await loadLibraryCab(item.kind, item.index);
+  async function loadFromLibrary(kind, item, preselectedSlot = 0) {
+    if (kind === 'cab') {
+      queueCabIRLoad(item, preselectedSlot);
+      return;
+    }
+    if (preselectedSlot) ui.captureSlotPreselect = Number(preselectedSlot) || 0;
+    let slot;
+    try {
+      slot = await loadLibraryCapture(item.kind, item.index);
+    } finally {
+      ui.captureSlotPreselect = 0;
+    }
     if (!slot) { render(); return; }
-    if (ui.demo) (kind === 'capture' ? demo.pickCapture : demo.pickIR)(slot);
-    markDirty();
-    toast((kind === 'capture' ? 'Capture ' : 'Cab ') + item.name + ' loaded into slot ' + slot);
+    if (ui.demo) demo.pickCapture(slot);
+    toast('Capture ' + item.name + ' loaded into slot ' + slot);
     render();
   }
+
+  // Delete a user IR from the pedal's library: 82 { 1: 2, 4: { 1: index, 2: name } } → 83 { 1: 6, 3: 1 }
+  // (docs/INVESTIGATION.md §6a). The library is read again right before the delete, and the index must still hold
+  // this IR: library indices shift when an IR is added or removed.
+  function irSlotsHolding(name) {
+    const slots = [];
+    for (let i = 1; i <= irSlotCount(); i++) if (sameName(state.irNames.get(i), name)) slots.push(i);
+    return slots;
+  }
+  async function deleteLibraryIR(item) {
+    if (!state.connected || !item || item.kind !== 'irUser' || !Number.isInteger(item.index)) return;
+    if (ui.uploading || NanoTransfer.busy || ui.previewBusy || irAudition.busy) {
+      toast('Finish the current pedal action before deleting an IR.');
+      return;
+    }
+    const slots = irSlotsHolding(item.name);
+    const playing = activeIRSlot();
+    const where = state.cabIR.fromLibrary && sameName(state.currentIR.shortName, item.name)
+      ? ' The current preset plays it straight from the library.'
+      : slots.length ? ' It is loaded in IR slot ' + slots.join(' and ') + (slots.includes(playing) ? ', which the current preset uses' : '') + '. Check ' + (slots.length > 1 ? 'those slots' : 'that slot') + ' afterwards.' : '';
+    const choice = await modal({
+      title: 'Delete IR “' + item.name + '” from the pedal?',
+      body: 'This permanently removes the IR from the Nano Cortex library. There is no undo.' + where,
+      buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Delete', primary: true }],
+    });
+    if (choice !== 'ok') { render(); return; }
+    if (!(await stopAnyAudition('deleting the IR'))) return;
+
+    ui.uploading = true;
+    ui.lastAction = 'Checking the pedal library…';
+    renderStatus();
+    let current = null, reply = null;
+    try {
+      state.library.loaded = false;
+      state.library.requested = false;
+      if (await ensureLibrary()) current = state.library.irUser.find(candidate => candidate.index === item.index);
+      if (current && sameName(current.name, item.name)) {
+        const nameBytes = Array.from(new TextEncoder().encode(current.name));
+        const record = [0x08, ...encodeVarint(current.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
+        const frame = buildFrame([0x08, 0x02, 0x22, ...encodeVarint(record.length), ...record], NanoLive.MSG.DeleteLibraryIRRequest);
+        ui.lastAction = 'Deleting IR ' + current.name;
+        renderStatus();
+        reply = await writeAndAwait('Delete IR ' + current.name, frame, NanoLive.MSG.DeleteLibraryIRResponse);
+      }
+    } finally {
+      ui.uploading = false;
+      ui.lastAction = '';
+      render();
+    }
+    if (!current || !sameName(current.name, item.name)) {
+      toast(state.library.loaded
+        ? 'The pedal’s IR library changed: “' + item.name + '” is no longer where it was. Nothing was deleted.'
+        : 'Could not read the pedal’s IR library, so nothing was deleted. Try again.');
+      return;
+    }
+    if (!reply || fieldValue(reply, 3) !== 1) {
+      toast('The pedal did not confirm deleting ' + current.name + '.');
+      return;
+    }
+
+    state.library.loaded = false;
+    state.library.requested = false;
+    const refreshed = await ensureLibrary();
+    if (!refreshed) {
+      state.library.irUser = state.library.irUser.filter(candidate => candidate.index !== current.index);
+    }
+    render();
+    toast(refreshed
+      ? current.name + ' deleted from the pedal IR library.'
+      : current.name + ' deleted, but the pedal IR list could not be refreshed.');
+  }
+  window.__deleteLibraryIR = deleteLibraryIR;
 
   // ------------------------------------------------------------------ slot usage scan
   // Parity with the native app: step through every saved preset, note the capture and cab slot each one
   // plays (or that it plays one straight from the library), then go back to the preset we started on.
   // Switching presets discards unsaved edits, so the scan refuses to start while there are any.
-  const isDirtyNow = () => Boolean(ui.dirty || state.presetDirty);
+  const isDirtyNow = () => pedalDirtyForUI() || editPending();
+  window.__isDirtyForPrompt = isDirtyNow;
   const presetLabel = (n) => n + ' ' + presetName(n);
   const usersOf = (kind, slot) => (ui.usage && (kind === 'capture' ? ui.usage.captures : ui.usage.cabs)[slot]) || [];
   const scanTime = () => (ui.usage ? ui.usage.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
@@ -1343,6 +1812,7 @@
   async function scanUsage() {
     if (ui.scanning || !state.connected) return;
     if (isDirtyNow()) { toast('Save or discard your edits first: the scan switches presets.'); return; }
+    if (!(await stopAnyAudition('the scan'))) return;
     ui.scanning = true; ui.scanStop = false;
     const origin = state.selectedPreset;
     const todo = [];
@@ -1437,8 +1907,8 @@
     if (ui.scanning) { toast('Wait for the slot usage scan to finish.'); ui.sideSig = ''; render(); return; }
     ui.pendingPreset = null;
     ui.sideSig = ''; // repaint the list either way (undoes a keyboard highlight if cancelled)
-    if (n === state.selectedPreset && state.connected) { render(); return; }
-    if (ui.dirty && state.connected) {
+    if (n === state.selectedPreset && state.connected && !ui.presetUnknown) { render(); return; }
+    if (isDirtyNow() && state.connected) {
       const choice = await modal({
         title: 'Save changes to ' + presetName(state.selectedPreset) + '?',
         body: 'Switching presets discards edits that haven’t been saved to the pedal.',
@@ -1451,7 +1921,7 @@
       if (choice === 'cancel' || !choice) { render(); return; }
       if (choice === 'save') await doSave();
     }
-    ui.dirty = false;
+    if (!(await stopAnyAudition('the preset switch'))) { ui.sideSig = ''; render(); return; }
     await selectPreset(n);
     if (ui.demo) demo.load(n);
     render();
@@ -1651,7 +2121,7 @@
   async function receiveCapture(bundle) {
     const meta = bundle.meta || {};
     if (!state.connected) { toast('Connect your Nano Cortex first, then send ' + (meta.name || 'the capture') + ' again.'); return false; }
-    if (ui.uploading) { toast('A capture is already being sent.'); return false; }
+    if (ui.uploading || NanoTransfer.busy) { toast('Another transfer to the pedal is still running. Try again when it has finished.'); return false; }
     const cns = typeof bundle.cns === 'string' ? Uint8Array.from(atob(bundle.cns), c => c.charCodeAt(0)) : Uint8Array.from(bundle.cns);
     const choice = await modal({
       title: 'Send ' + meta.name + ' to the pedal?',
@@ -1689,6 +2159,405 @@
   window.__uploadCapture = receiveCapture;
   if (window.nanoCloud && window.nanoCloud.onCapture) window.nanoCloud.onCapture(receiveCapture);
 
+  async function receiveCloudIR(bundle) {
+    const transferId = String(bundle && bundle.transferId || '');
+    const meta = bundle && bundle.meta || {};
+    const name = String(meta.name || 'Cloud impulse response');
+    let outcome = { ok: false, name };
+    try {
+      if (!state.connected) {
+        const error = 'Connect your Nano Cortex first, then send ' + name + ' again.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      if (ui.uploading || NanoTransfer.busy) {
+        const error = 'Another transfer to the pedal is still running. Try again when it has finished.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      if (ui.previewBusy || ui.previewing || irAudition.busy || irAudition.active) {
+        const error = 'Stop the active preview before sending a Cloud IR.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      if (!await ensureLibrary()) {
+        const error = 'Could not read the Nano Cortex IR library. Refresh it and try again.';
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+      const existingIR = [...(state.library.irUser || []), ...(state.library.irFactory || [])]
+        .find(item => sameName(item.name, name));
+      if (existingIR) {
+        toast(existingIR.name + ' is already in IRs on pedal.');
+        outcome = { ok: true, alreadyOnNano: true, name: existingIR.name, index: existingIR.index, refreshed: true };
+        return outcome;
+      }
+      if (typeof bundle.wav !== 'string' || !bundle.wav) throw new Error('The Cloud IR download has no WAV data.');
+      // The shell already checked the WAV (src/cloud-ir.js); these guard the bridge.
+      if (bundle.wav.length > 1400000) throw new Error('The IR is larger than 1 MB.');
+      const wav = Uint8Array.from(atob(bundle.wav), c => c.charCodeAt(0));
+      if (wav.length < 44 || String.fromCharCode(...wav.slice(0, 4)) !== 'RIFF' || String.fromCharCode(...wav.slice(8, 12)) !== 'WAVE') {
+        throw new Error('The Cloud IR download is not a WAV file.');
+      }
+      if (!meta.productId || !meta.filename || !/\.wav$/i.test(meta.filename)) throw new Error('The Cloud IR download is missing its product ID or WAV filename.');
+
+      // No transfer timeout in the shell while the user decides.
+      const irStatus = (phase) => { if (transferId && window.nanoCloud && window.nanoCloud.impulseResponseStatus) window.nanoCloud.impulseResponseStatus(transferId, phase); };
+      irStatus('confirming');
+      const choice = await modal({
+        title: 'Send ' + name + ' to the pedal?',
+        body: (wav.length / 1024).toFixed(1) + ' KB over Bluetooth. This adds it to “IRs on pedal”; it does not change any preset slot.',
+        buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'send', label: 'Send IR', primary: true }],
+      });
+      if (choice !== 'send') {
+        render();
+        outcome.cancelled = true;
+        return outcome;
+      }
+
+      irStatus('sending');
+      ui.uploading = true;
+      ui.lastAction = 'Sending IR ' + name;
+      renderStatus();
+      let reply;
+      try {
+        reply = await NanoTransfer.downloadImpulseResponse({ wav, meta }, (i, n) => {
+          ui.lastAction = 'Sending IR ' + name + ': ' + i + ' / ' + n;
+          renderStatus();
+        });
+      } finally {
+        ui.uploading = false;
+        ui.lastAction = '';
+        render();
+      }
+      if (!reply.ok) {
+        const error = 'The pedal refused ' + name + (reply.message ? ': ' + reply.message : '.');
+        toast(error);
+        outcome.error = error;
+        return outcome;
+      }
+
+      // type 16 gives the assigned user-IR index. Re-read type 77 so the
+      // editor's “IRs on pedal” section immediately contains the new item.
+      state.library.loaded = false;
+      const refreshed = await ensureLibrary();
+      render();
+      const libraryItem = refreshed
+        ? state.library.irUser.find(item => item.index === reply.index) || state.library.irUser.find(item => sameName(item.name, reply.name || name))
+        : null;
+      const pedalName = libraryItem && libraryItem.name || reply.name || name;
+      if (libraryItem) {
+        toast(pedalName + ' is now in IRs on pedal.');
+      } else {
+        toast(pedalName + ' was sent to the pedal, but its IR list did not refresh. Use Refresh to reload it.');
+      }
+      outcome = { ok: true, name: pedalName, index: reply.index, refreshed: !!libraryItem };
+      return outcome;
+    } catch (err) {
+      const error = 'Cloud IR transfer failed: ' + String(err && err.message || err);
+      toast(error);
+      outcome.error = error;
+      return outcome;
+    } finally {
+      if (transferId && window.nanoCloud && window.nanoCloud.completeImpulseResponse) {
+        window.nanoCloud.completeImpulseResponse(transferId, outcome);
+      }
+    }
+  }
+  window.__receiveCloudIR = receiveCloudIR;
+  if (window.nanoCloud && window.nanoCloud.onImpulseResponse) window.nanoCloud.onImpulseResponse(receiveCloudIR);
+
+  // ------------------------------------------------------------------ auditions (from #14)
+  // Two ways to hear something on the pedal without storing it: a Cortex Cloud capture (150 → 151, "Live Preview" in
+  // the Cloud toolbar) and a library IR (158 → 159, the play button in the Cab / IR inspector). Both end with
+  // 148 → 149 (pro/transfer.js stopAudition) and are kept alive with 91 every 20 s. Anything that saves or changes the
+  // preset stops them first (stopAnyAudition); docs/INVESTIGATION.md §12.
+  const MSG_IR_PREVIEW = 158, MSG_IR_PREVIEW_REPLY = 159;
+
+  // The Cloud toolbar's Live Preview button mirrors this; every exit path pushes it, so the button never sticks.
+  let previewToolbar = { active: false, name: '', error: '', phase: 'idle' };
+  function notifyPreviewState(active, name = '', error = '', phase = null) {
+    previewToolbar = { active: !!active, name: name || '', error: error || '', phase: phase || (active ? 'active' : 'idle') };
+    if (shellBridge && shellBridge.previewState) shellBridge.previewState(previewToolbar);
+  }
+  // The toolbar state from what is true now (a start or stop in flight shows as starting / stopping).
+  function pushPreviewState(error = '') {
+    const phase = ui.previewBusy ? (ui.previewing ? 'stopping' : 'starting') : ui.previewing ? 'active' : 'idle';
+    notifyPreviewState(ui.previewing, ui.previewing || ui.previewBusy ? ui.previewName : '', error, phase);
+  }
+  window.__previewToolbar = () => previewToolbar;   // for the UX test
+  window.__pushPreviewState = () => pushPreviewState();   // the shell asks after refusing a preview request
+
+  let lastCabIRStateSignature = '';
+  function notifyCabIRState(force = false) {
+    if (!shellBridge || !shellBridge.cabIRState) return;
+    const cabState = { connected: !!state.connected, on: !!(state.connected && state.cabIR.on) };
+    const signature = cabState.connected + ':' + cabState.on;
+    if (!force && signature === lastCabIRStateSignature) return;
+    lastCabIRStateSignature = signature;
+    shellBridge.cabIRState(cabState);
+  }
+
+  function captureBytes(bundle) {
+    return typeof bundle.cns === 'string'
+      ? Uint8Array.from(atob(bundle.cns), c => c.charCodeAt(0))
+      : Uint8Array.from(bundle.cns || []);
+  }
+
+  const irAudition = { active: null, pending: null, busy: false, stopping: false };
+  let cabMicPositionWritePromise = Promise.resolve(true);
+  function irAuditioning() {
+    return Boolean(irAudition.busy || irAudition.pending || irAudition.active);
+  }
+  const auditioning = () => Boolean(ui.previewing || ui.previewBusy || irAuditioning());
+
+  // While anything is auditioned the pedal wants type 91 about every 20 s (it answers 92); without it the audition
+  // ends after about a minute. One timer for both kinds; it runs until the last audition is confirmed stopped.
+  const PREVIEW_KEEP_ALIVE_MS = 20000;
+  const PREVIEW_KEEP_ALIVE_TYPE = 91;
+  let previewKeepAliveTimer = null;
+  let previewKeepAliveInFlight = false;
+
+  function stopPreviewKeepAlive() {
+    if (previewKeepAliveTimer !== null) {
+      clearInterval(previewKeepAliveTimer);
+      previewKeepAliveTimer = null;
+      log('Live preview keep-alive stopped.');
+    }
+    previewKeepAliveInFlight = false;
+  }
+
+  async function sendPreviewKeepAlive() {
+    if ((!ui.previewing && !irAudition.active) || !state.connected || previewKeepAliveInFlight) return;
+    previewKeepAliveInFlight = true;
+    try {
+      const ok = await writeC304('Preview keep-alive', buildFrame([0x08, 0x03], PREVIEW_KEEP_ALIVE_TYPE));
+      if (!ok && (ui.previewing || irAudition.active)) log('ERROR: Preview keep-alive write failed.');
+    } finally {
+      previewKeepAliveInFlight = false;
+    }
+  }
+
+  function startPreviewKeepAlive() {
+    if (previewKeepAliveTimer !== null) return;
+    log('Live preview keep-alive started (every ' + (PREVIEW_KEEP_ALIVE_MS / 1000) + ' s).');
+    previewKeepAliveTimer = setInterval(() => { void sendPreviewKeepAlive(); }, PREVIEW_KEEP_ALIVE_MS);
+  }
+  const stopKeepAliveIfIdle = () => { if (!ui.previewing && !irAudition.active) stopPreviewKeepAlive(); };
+
+  // 158: factory cabs and user IRs use different record fields (3 and 4); field 8 = 1 in every observed Play.
+  function irPreviewRequest(item) {
+    const nameBytes = Array.from(new TextEncoder().encode(item.name));
+    const record = [0x08, ...encodeVarint(item.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
+    const recordField = item.kind === 'irFactory' ? 0x1A : 0x22;
+    return buildFrame([recordField, ...encodeVarint(record.length), ...record, 0x40, 0x01], MSG_IR_PREVIEW);
+  }
+  window.__irPreviewRequest = irPreviewRequest;
+
+  async function startIRPreview(item) {
+    if (!state.connected || !state.library.loaded) return false;
+    if (irAudition.busy || ui.previewBusy || ui.uploading || NanoTransfer.busy) return false;
+    if (!item || !Number.isInteger(item.index) || !item.name) return false;
+    if (ui.previewing && !(await stopCapturePreview({ quiet: true }))) { toast('The live preview could not be stopped, so ' + item.name + ' was not previewed.'); return false; }
+
+    irAudition.busy = true;
+    irAudition.pending = item;
+    irAudition.stopping = false;
+    render();
+    try {
+      // Finish a mic/position write queued before the audition so it cannot reach the pedal after the Play.
+      await cabMicPositionWritePromise;
+      const reply = await writeAndAwait('Preview IR "' + item.name + '"', irPreviewRequest(item), MSG_IR_PREVIEW_REPLY);
+      const status = fieldValue(reply, 3);
+      if (!reply || status !== 1) {
+        log('IR preview rejected: type 159 index=' + item.index + ' status=' + status);
+        toast('The pedal did not accept the IR preview.');
+        return false;
+      }
+      irAudition.active = { kind: item.kind, index: item.index, name: item.name };
+      holdIRSlotTargetForPreview();
+      startPreviewKeepAlive();
+      log('IR preview accepted: type 159 index=' + item.index + ' status=' + status);
+      return true;
+    } catch (err) {
+      log('ERROR: IR preview: ' + err.message);
+      toast('IR preview failed: ' + err.message);
+      return false;
+    } finally {
+      irAudition.busy = false;
+      irAudition.pending = null;
+      releaseIRSlotTargetWhenPreviewFails();
+      render();
+    }
+  }
+
+  // The official app reads the state after a stop; the pedal may then report the preset dirty (115).
+  async function refreshAfterIRPreviewStop() {
+    if (!state.connected) return;
+    if (!(await NanoLive.readCurrentState(6000))) log('IR preview stopped; the current preset state could not be read.');
+  }
+
+  // true once the pedal confirmed the stop (149 with this transaction and status 1). Otherwise nothing changes: the
+  // IR may still be playing, so it stays marked active and the keep-alive keeps running.
+  async function stopIRPreview({ quiet = false } = {}) {
+    if (!irAudition.active) return !irAudition.busy;
+    if (irAudition.busy) return false;
+    if (!state.connected) return false;
+    irAudition.busy = true;
+    irAudition.stopping = true;
+    render();
+    let result = null, error = '';
+    try {
+      result = await NanoTransfer.stopAudition('ir');
+    } catch (err) {
+      error = err.message;
+      log('ERROR: stopping IR preview: ' + err.message);
+    } finally {
+      irAudition.busy = false;
+      irAudition.stopping = false;
+    }
+    if (!result || !result.ok) {
+      if (!quiet) toast('The pedal did not confirm stopping the IR preview' + (error ? ': ' + error : '.') + ' It may still be playing.');
+      render();
+      return false;
+    }
+    irAudition.active = null;
+    stopKeepAliveIfIdle();
+    render();
+    await refreshAfterIRPreviewStop();
+    settleIRSlotTargetAfterPreview();
+    return true;
+  }
+
+  window.__previewIR = startIRPreview;
+  window.__stopIRPreview = stopIRPreview;
+
+  // The official Cloud app's Play button sends the capture to a temporary audition cache. It is intentionally not
+  // the library upload above: no user-capture record or slot is created or changed.
+  async function receivePreview(bundle) {
+    const meta = (bundle && bundle.meta) || {};
+    const name = meta.name || 'capture';
+    const refuse = (error) => { if (error) toast(error); pushPreviewState(error); render(); return false; };
+    if (!state.connected) return refuse('Connect your Nano Cortex first, then preview ' + name + '.');
+    if (ui.uploading || NanoTransfer.busy) return refuse('Another transfer to the pedal is still running. Try again when it has finished.');
+    if (ui.previewBusy || irAudition.busy) return refuse('Wait for the current preview to start or stop, then try again.');
+    if (irAudition.active && !(await stopIRPreview({ quiet: true }))) return refuse('The IR preview could not be stopped, so ' + name + ' was not previewed.');
+    if (ui.previewing && !(await stopCapturePreview({ quiet: true }))) return refuse('The current live preview could not be stopped, so ' + name + ' was not previewed.');
+    let cns;
+    try { cns = captureBytes(bundle); } catch { return refuse('The capture download is unreadable.'); }
+
+    ui.previewBusy = true;
+    ui.previewName = name;
+    ui.lastAction = 'Preparing live preview: ' + name;
+    pushPreviewState();
+    renderStatus();
+    let reply = null, error = '';
+    try {
+      reply = await NanoTransfer.previewCapture({ cns, meta }, (i, n) => {
+        ui.lastAction = 'Previewing ' + name + ': sending ' + i + ' / ' + n;
+        renderStatus();
+      });
+    } catch (err) {
+      error = 'Live preview failed: ' + err.message;
+    }
+    ui.previewBusy = false;
+    ui.lastAction = '';
+    if (!reply || !reply.ok || !state.connected) {
+      ui.previewName = '';
+      return refuse(error || (state.connected ? 'The pedal refused the live preview' + (reply && reply.message ? ': ' + reply.message : '.') : ''));
+    }
+    ui.previewing = true;
+    ui.previewName = name;
+    startPreviewKeepAlive();
+    pushPreviewState();
+    toast('Previewing ' + name + '. Click Stop Preview to end it.');
+    render();
+    return true;
+  }
+
+  // true once the pedal confirmed the stop. Otherwise the preview stays marked active (it may still be playing),
+  // the keep-alive keeps running, and the toolbar shows Stop Preview again.
+  async function stopCapturePreview({ quiet = false } = {}) {
+    if (!ui.previewing) { if (!ui.previewBusy) pushPreviewState(); return !ui.previewBusy; }
+    if (ui.previewBusy) return false;
+    if (!state.connected) return false;
+    ui.previewBusy = true;
+    ui.lastAction = 'Stopping live preview';
+    pushPreviewState();
+    renderStatus();
+    let result = null, error = '';
+    try {
+      result = await NanoTransfer.stopAudition('capture');
+    } catch (err) {
+      error = err.message;
+    }
+    ui.previewBusy = false;
+    ui.lastAction = '';
+    if (!result || !result.ok) {
+      const message = 'The pedal did not confirm stopping the live preview' + (error ? ': ' + error : '.') + ' It may still be playing.';
+      if (!quiet) toast(message);
+      pushPreviewState(quiet ? '' : message);
+      render();
+      return false;
+    }
+    ui.previewing = false;
+    ui.previewName = '';
+    stopKeepAliveIfIdle();
+    pushPreviewState();
+    if (!quiet) toast('Live preview stopped.');
+    render();
+    return true;
+  }
+
+  // Every action that saves or changes the preset (Save, Save as, switching, Discard, Rename, Delete, footswitch
+  // assignment, the slot scan, reordering, deleting an IR) first ends any audition and waits for the pedal's 149.
+  // If the stop isn't confirmed the action is refused: the pedal may still be playing the audition.
+  async function stopAnyAudition(action) {
+    if (!auditioning()) return true;
+    if (ui.previewBusy || irAudition.busy) { toast('A preview is starting or stopping. Try ' + action + ' again in a moment.'); return false; }
+    const ok = (!ui.previewing || await stopCapturePreview({ quiet: true })) && (!irAudition.active || await stopIRPreview({ quiet: true }));
+    if (!ok) toast('The pedal did not confirm stopping the preview, so ' + action + ' did not happen. Stop the preview and try again.');
+    return ok;
+  }
+  window.__stopAnyAudition = stopAnyAudition;
+
+  // The pedal switched presets itself (footswitch) during an audition: end it anyway (the stop is sent, best effort)
+  // and forget it, so the keep-alive stops and the toolbar and inspector don't show an audition of the old preset.
+  function endAuditionsAfterPedalPresetChange() {
+    if (!auditioning()) return;
+    log('The pedal changed presets during a preview; ending the preview.');
+    for (const [kind, active] of [['capture', ui.previewing], ['ir', !!irAudition.active]]) {
+      if (active) NanoTransfer.stopAudition(kind).catch(err => log('Preview stop after a preset change: ' + err.message));
+    }
+    ui.previewing = false; ui.previewName = '';
+    irAudition.active = null;
+    stopPreviewKeepAlive();
+    if (ui.pendingIRSlotTarget) clearPendingIRSlotTarget();
+    pushPreviewState();
+    toast('The pedal switched presets, so the preview ended.');
+    render();
+  }
+
+  window.__previewCapture = receivePreview;
+  window.__stopCapturePreview = stopCapturePreview;
+  if (window.nanoCloud && window.nanoCloud.onPreview) window.nanoCloud.onPreview(receivePreview);
+
+  window.__getCabIRState = () => ({ connected: !!state.connected, on: !!(state.connected && state.cabIR.on) });
+  window.__toggleCabIR = async function () {
+    if (!state.connected) {
+      const error = 'Connect your Nano Cortex before toggling Cab / IR.';
+      toast(error); notifyCabIRState(true); return { ok: false, error };
+    }
+    const on = !Boolean(state.cabIR.on);
+    await selectCabIRSlot(on ? (state.cabIR.lastActiveSlot || 1) : 0);
+    render();
+    return { ok: true, on: Boolean(state.cabIR.on) };
+  };
+
   // Replies an action waits for (delete ack type 51, footswitch assignment ack type 30): writeAndAwait() sends a
   // frame and resolves with the reply's protobuf fields, or null if the write failed or nothing came within 10 s.
   // While a waiter is registered its reply type is consumed here instead of reaching the core's parsers.
@@ -1707,6 +2576,10 @@
     try {
       const v = event && event.target && event.target.value;
       const d = v && v.buffer ? new Uint8Array(v.buffer, v.byteOffset || 0, v.byteLength || v.buffer.byteLength) : null;
+      if (d && presetMoveProtocolPending && frameType(d) === MSG.PresetDirtyStateChanged) {
+        log('Ignoring transient preset-dirty notification during preset reorder.');
+        return;
+      }
       if (d && d.length >= 6 && (d[1] & 0xC0) === 0xC0 && replyWaiters.size) {
         const type = d[d.length - 4] | (d[d.length - 3] << 8) | (d[d.length - 2] << 16) | (d[d.length - 1] << 24);
         const waiter = replyWaiters.get(type);
@@ -1787,9 +2660,51 @@
 
   window.setStatus = function (text, connected = false) {
     ui.connText = text;
-    if (connected) tapC304();
-    if (connected && !ui.demo) bleResult('ok');   // C304/C305 found: the shell remembers this device
-    if (!connected && /disconnect/i.test(text)) { ui.dirty = false; ui.lastAction = ''; state.presetTempo = null; }
+    if (connected) {
+      tapC304();
+      if (!ui.demo) bleResult('ok');   // C304/C305 found: the shell remembers this device
+      ui.cabIRLoadPaused = false;
+      ui.cabIRLoadTimedOut = null;
+      const d = window.__dev;
+      if (d && !d.settingsRequestedForConnection) {
+        // Read the global mute state as soon as the pedal is available so the
+        // header control is usable without first opening Settings → Device.
+        d.settingsRequestedForConnection = true;
+        requestDeviceSettings();
+      }
+    }
+    if (!connected && /disconnect/i.test(text)) {
+      ui.cabIRLoadPaused = false;
+      ui.cabIRLoadTimedOut = null;
+      ui.cabIRLoadQueue.length = 0;
+      ui.cabIRLoadActive = null;
+      ui.slotPreselect = 0;
+      ui.captureSlotPreselect = 0;
+      state.pendingCabAssignment = null;
+      state.presetDirty = false; beginExpressionBoundary();
+      NanoLive.reset();
+      ui.presetUnknown = false;
+      const d = window.__dev;
+      if (d) {
+        d.info = null; d.alive = null; d.settings = null; d.reading = false;
+        d.settingsRequestedForConnection = false;
+        d.monitorPending = {}; d.monitorAcks.length = 0;
+        clearTimeout(d.monitorReadTimer); d.monitorReadTimer = null;
+      }
+      const capturePreviewWasActive = ui.previewing || ui.previewBusy;
+      const irPreviewWasActive = Boolean(irAudition.active) || irAudition.busy;
+      stopPreviewKeepAlive();
+      ui.previewing = false;
+      ui.previewBusy = false;
+      ui.previewName = '';
+      irAudition.active = null;
+      irAudition.pending = null;
+      irAudition.busy = false;
+      irAudition.stopping = false;
+      if (capturePreviewWasActive) notifyPreviewState(false, '', 'The Nano Cortex disconnected; live preview stopped.');
+      if (irPreviewWasActive) log('IR preview ended because the Nano Cortex disconnected.');
+      ui.lastAction = ''; state.presetTempo = null;
+    }
     if (!connected) { state.exp.loaded = false; state.exp.preset = null; }
     render();
   };
@@ -1816,12 +2731,12 @@
   window.showNotice = async (title, text) => { await modal({ title, body: text, buttons: [{ id: 'ok', label: 'OK', primary: true }] }); return true; };
   window.showSaveResult = function (text, kind, detail) {
     if (kind === 'ok') {
-      ui.dirty = false;
       if (ui.demo) demo.store(state.selectedPreset);
       toast('Saved to preset ' + state.selectedPreset + ', ' + presetName(state.selectedPreset));
     } else if (kind === 'error') {
       toast(detail || text);
     } else if (/saving/i.test(text)) {
+      ui.clearOverridesOnRead = true;
       ui.lastAction = 'Saving preset ' + state.selectedPreset + '…';
     }
     render();
@@ -1854,19 +2769,28 @@
     return coreCabRefresh.call(this, data);
   };
   window.setCabIRMicPosition = async function (mic, position) {
-    if (!isFactoryCabIR()) { log('Cab mic/position ignored: current IR is not a factory cab slot.'); return; }
-    const cabName = String(state.currentIR.shortName || '').trim();
+    if (irAuditioning()) {
+      log('Cab mic/position ignored: stop the IR preview first.');
+      return false;
+    }
+    if (!selectedIRIsFactory()) { log('Cab mic/position ignored: current IR is not a factory cab slot.'); return false; }
+    const selectedSlot = activeIRSlot();
+    const cabName = String((selectedSlot && state.irNames.get(selectedSlot)) || state.currentIR.shortName || '').trim();
     const micName = String(mic || state.cabIR.mic || '').trim();
-    let index = state.cabIR.libraryIndex;
-    if (!Number.isInteger(index)) { const hit = state.library.irFactory.find(x => sameName(x.name, cabName)); index = hit ? hit.index : null; }
-    if (!cabName || !micName || !Number.isInteger(index)) { log('Cab mic/position ignored: the cab\'s library index is unknown (read the cab first).'); return; }
+    const factoryIR = (state.library.irFactory || []).find(x => sameName(x.name, cabName));
+    let index = factoryIR ? factoryIR.index : state.cabIR.libraryIndex;
+    if (!Number.isInteger(index)) index = null;
+    if (!cabName || !micName || !Number.isInteger(index)) { log('Cab mic/position ignored: the cab\'s library index is unknown (read the cab first).'); return false; }
     const pos = clamp(Math.round(Number(position || state.cabIR.position || 1)), 1, 6);
     state.cabIR.mic = micName;
     state.cabIR.position = pos;
     const cab = new TextEncoder().encode(cabName), m = new TextEncoder().encode(micName);
     const inner = [0x08, ...encodeVarint(index), 0x12, cab.length, ...cab, 0x18, pos - 1, 0x22, m.length, ...m];
-    await writeC304('Cab mic/position ' + micName + ' pos ' + pos, new Uint8Array([inner.length + 6, 0xC0, 0x1A, inner.length, ...inner, 0x5E, 0, 0, 0]));
+    const writePromise = writeC304('Cab mic/position ' + micName + ' pos ' + pos, new Uint8Array([inner.length + 6, 0xC0, 0x1A, inner.length, ...inner, 0x5E, 0, 0, 0]));
+    cabMicPositionWritePromise = writePromise;
+    const written = await writePromise;
     render();
+    return written;
   };
 
   // Gate reduction read-back (verified on the pedal 2026-10-08): the state dump's
@@ -1876,10 +2800,60 @@
   // reads 6, one past the range, when the preset plays the item straight from the library. Upstream turns that
   // into capture slot 26 and asks for cab settings of a slot that doesn't exist. The flags are set before the
   // core parse because the core requests the cab settings at its end.
+  function expressionRangeFor(key) {
+    return state.exp.loaded && state.exp.preset === state.selectedPreset
+      ? EXP_RANGES.find(target => target.key === key && state.exp.ranges[key] && state.exp.ranges[key].on) : null;
+  }
+  function noteExpressionLocalOverride(key, kind, value) {
+    if (!state.exp.loaded || state.exp.preset !== state.selectedPreset) return;
+    if (kind === 'bypass') {
+      if (EXP_BYPASS.some(target => target.key === key && state.exp.bypass[key] && state.exp.bypass[key].on)) {
+        ui.expressionLocalOverrides.set('bypass:' + key, { kind, key, value: Boolean(value) });
+      }
+      return;
+    }
+    const target = expressionRangeFor(key);
+    if (!target) return;
+    if (target.block) {
+      const param = NanoLive.expressionAmountParam(state.blocks[target.block]);
+      if (param && kind === 'param' && value && value.index === param.index) {
+        ui.expressionLocalOverrides.set('range:' + key, { kind, key, value: param.value });
+      }
+    } else if (kind === 'range') {
+      ui.expressionLocalOverrides.set('range:' + key, { kind, key, value });
+    }
+  }
+  function restoreExpressionLocalOverrides() {
+    let changed = false;
+    for (const entry of ui.expressionLocalOverrides.values()) {
+      if (entry.kind === 'bypass') {
+        const targetDef = EXP_BYPASS.find(target => target.key === entry.key);
+        const target = targetDef && NanoLive.expressionTargetState(targetDef);
+        if (target && target.get() !== entry.value) { target.set(entry.value); changed = true; }
+      } else if (entry.key === 'level') {
+        if (state.captureVolumeDb !== entry.value) { state.captureVolumeDb = entry.value; changed = true; }
+      } else if (['gain', 'bass', 'mid', 'treble'].includes(entry.key)) {
+        if (state.amp[entry.key] !== entry.value) { state.amp[entry.key] = entry.value; changed = true; }
+      } else if (entry.key === 'gate' && state.gate.params[0] && state.gate.params[0].value !== entry.value) {
+        state.gate.params[0].value = entry.value; changed = true;
+      } else if (state.blocks[entry.key]) {
+        const param = NanoLive.expressionAmountParam(state.blocks[entry.key]);
+        if (param && param.value !== entry.value) { param.value = entry.value; changed = true; }
+      }
+    }
+    return changed;
+  }
+  const coreApplyFXEnabledStates = window.applyFXEnabledStatesFromCurrentState;
+  window.applyFXEnabledStatesFromCurrentState = function (fields) {
+    const result = coreApplyFXEnabledStates.apply(this, arguments);
+    if (applyPendingBypassTargets()) render();
+    return result;
+  };
   const coreParseState = window.parseBufferedCurrentState;
   window.parseBufferedCurrentState = function () {
     const bytes = state.stateBytes.slice();
     let src = null;
+    const presetLoadBoundary = state.protocol.presetLoad;
     try {
       if (bytes.length) {
         const f = parseProtoFields(bytes);
@@ -1906,6 +2880,25 @@
       state.cabIR.selectedSlot = null;
       log('Cab comes straight from the library: ' + (state.currentIR.shortName || 'unknown') + ' (slot ' + src.cab + ')');
     }
+    const pendingIRTarget = ui.pendingIRSlotTarget;
+    if (pendingIRTarget) {
+      if (presetLoadBoundary || Number(state.selectedPreset) !== pendingIRTarget.preset) clearPendingIRSlotTarget(pendingIRTarget);
+      else {
+        // A read queued by an earlier click can report the previous slot. Keep
+        // the newest selection optimistic until the final read-back settles.
+        state.cabIR.fromLibrary = false;
+        state.cabIR.on = pendingIRTarget.slot > 0;
+        state.cabIR.selectedSlot = pendingIRTarget.slot;
+        state.cabIR.stateSlot = pendingIRTarget.slot;
+        if (pendingIRTarget.slot > 0) state.cabIR.lastActiveSlot = pendingIRTarget.slot;
+        if (pendingIRTarget.currentIR) state.currentIR = { ...pendingIRTarget.currentIR };
+      }
+    } else if (src && src.cab >= 1 && src.cab <= 5) {
+      // Field 12 is the exact slot; matching by IR name can select another slot
+      // when the same IR is stored more than once.
+      state.cabIR.selectedSlot = src.cab;
+      state.cabIR.lastActiveSlot = src.cab;
+    }
     try {
       const all = parseProtoFields(bytes);
       const fw = all[24] && all[24][0] && all[24][0].wire === 2 ? new TextDecoder().decode(Uint8Array.from(all[24][0].raw)).trim() : '';
@@ -1920,6 +2913,13 @@
     } catch { /* leave the gate knob as it was */ }
     try { tempoFromDump(parseProtoFields(bytes)); } catch { /* keep the tempo shown */ }
     followExp();   // a new preset (app, footswitch) or a fresh connection: read its expression assignments
+    // After a preset load or a save the dump is the new reference: local edits of expression targets are in it.
+    if (bytes.length && (presetLoadBoundary || ui.clearOverridesOnRead)) {
+      ui.clearOverridesOnRead = false;
+      ui.expressionLocalOverrides.clear();
+    }
+    NanoLive.reapplyExpression();   // the dump has the stored values; the pedal's position is on top of them
+    if (applyPendingBypassTargets()) render();
     return r;
   };
 
@@ -2013,12 +3013,47 @@
   // Picking a slot (or bypassing) moves the preset off a library reference.
   for (const [fn, part] of [['setCapture', 'capture'], ['selectCaptureSlot', 'capture'], ['selectCabIRSlot', 'cabIR']]) {
     const core = window[fn];
-    window[fn] = function () { state[part].fromLibrary = false; return core.apply(this, arguments); };
+    window[fn] = function () {
+      state[part].fromLibrary = false;
+      if (fn !== 'selectCabIRSlot') return core.apply(this, arguments);
+      const slot = Number(arguments[0]);
+      if (!Number.isInteger(slot) || slot < 0 || slot > 5) return core.apply(this, arguments);
+      clearPendingIRSlotTarget();
+      const target = {
+        slot,
+        preset: Number(state.selectedPreset),
+        currentIR: { ...state.currentIR },
+        holdForPreviewStop: Boolean(irAudition.active || irAudition.busy || irAudition.pending),
+      };
+      ui.pendingIRSlotTarget = target;
+      // Current-state replies are untagged; an older read can arrive after a newer click.
+      if (target.holdForPreviewStop) holdIRSlotTargetForPreview();
+      else target.timer = setTimeout(() => settlePendingIRSlotTarget(target), 2500);
+      return core.apply(this, arguments);
+    };
   }
 
   // Core asks which slot a library item should go into; resolves with the slot or null.
+  function noteCabIRLoadSlot(slot) {
+    const job = ui.cabIRLoadActive;
+    if (!job || !slot) return;
+    job.slot = slot;
+    job.phase = 'sending';
+    render();
+  }
+
   window.chooseSlot = function (kind, itemName) {
-    if (ui.slotPreselect) { const s = ui.slotPreselect; ui.slotPreselect = 0; return Promise.resolve(s); }   // "Put a library … in slot N…"
+    if (kind === 'capture' && ui.captureSlotPreselect) {
+      const s = ui.captureSlotPreselect;
+      ui.captureSlotPreselect = 0;
+      return Promise.resolve(s);
+    }
+    if (ui.slotPreselect) {
+      const s = ui.slotPreselect;
+      ui.slotPreselect = 0;
+      if (kind === 'cab') noteCabIRLoadSlot(s);
+      return Promise.resolve(s);
+    }   // "Put a library … in slot N…"
     const isCap = kind === 'capture';
     const count = isCap ? captureSlotCount() : irSlotCount();
     const names = isCap ? state.captureNames : state.irNames;
@@ -2033,14 +3068,71 @@
       title: 'Which slot should hold ' + itemName + '?', wide: true, content: list,
       body: 'Whatever is in that slot on the pedal is replaced' + (ui.usage ? ', for every preset that uses it. Counts show how many presets use each slot (scanned ' + scanTime() + ').' : '.'),
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Load into slot', primary: true }],
-    }).then(choice => (choice === 'ok' ? selected : null));
+    }).then(choice => {
+      const slot = choice === 'ok' ? selected : null;
+      if (kind === 'cab' && slot) noteCabIRLoadSlot(slot);
+      return slot;
+    });
   };
 
+  // The core owns the protocol parsing and state updates. Observe its response to
+  // advance the serialized UI queue as soon as the pedal acknowledges the write.
+  const coreCabinetSlotContentResponse = window.handleCabinetSlotContentResponse;
+  if (coreCabinetSlotContentResponse) {
+    window.handleCabinetSlotContentResponse = function (data) {
+      const pending = state.pendingCabAssignment;
+      const active = ui.cabIRLoadActive;
+      const matchesActive = Boolean(pending && active && pending.slot === active.slot && sameName(pending.name, active.name));
+      const timedOut = !pending && ui.cabIRLoadPaused ? ui.cabIRLoadTimedOut : null;
+      let accepted = false;
+      try {
+        const fields = parseProtoFields(Array.from(data.slice(2, data.length - 4)));
+        accepted = Boolean(fields[3] && fields[3][0] && fields[3][0].value === 1);
+      } catch (err) {
+        log('Could not parse the library cab load response: ' + err.message);
+      }
+
+      const result = coreCabinetSlotContentResponse.apply(this, arguments);
+      if (matchesActive) {
+        active.responseReceived = true;
+        if (accepted) {
+          active.phase = 'activating';
+          render();
+        } else {
+          void finishCabIRLoad(active, false, { acknowledged: true });
+        }
+      } else if (timedOut) {
+        ui.cabIRLoadTimedOut = null;
+        ui.cabIRLoadPaused = false;
+        if (accepted) {
+          state.irNames.set(timedOut.slot, timedOut.name);
+          state.currentIR = { shortName: timedOut.name, fullName: timedOut.name, inBank: true, slot: timedOut.slot };
+          selectCabIRSlot(timedOut.slot);
+          if (ui.demo) demo.pickIR(timedOut.slot);
+          toast('Cab ' + timedOut.name + ' loaded into slot ' + timedOut.slot);
+        } else {
+          toast('The pedal rejected the earlier IR change. You can try again.');
+        }
+        render();
+        startNextCabIRLoad();
+      }
+      return result;
+    };
+  }
+
   function render() {
+    if (ui.knobDragging) {
+      ui.renderAfterKnob = true;
+      return;
+    }
     if (ui.renderQueued) return;
     ui.renderQueued = true;
     requestAnimationFrame(() => {
       ui.renderQueued = false;
+      if (ui.knobDragging) {
+        ui.renderAfterKnob = true;
+        return;
+      }
       renderAll();
     });
   }
@@ -2048,6 +3140,7 @@
   // ------------------------------------------------------------------ rendering
   function renderAll() {
     const fk = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.fk : null;
+    notifyCabIRState();
     renderHead();
     renderSide();
     renderFootswitches();
@@ -2067,11 +3160,12 @@
 
   function renderHead() {
     const t = $('presetTitle');
+    const unknown = state.connected && ui.presetUnknown;
     t.replaceChildren(
-      el('span', { class: 'num', text: state.connected ? 'Preset ' + state.selectedPreset : '' }),
-      el('span', { class: 'name', text: state.connected ? presetName(state.selectedPreset) : '' })
+      el('span', { class: 'num', text: !state.connected ? '' : unknown ? 'Preset ?' : 'Preset ' + state.selectedPreset }),
+      el('span', { class: 'name', text: !state.connected ? '' : unknown ? 'Not known yet' : presetName(state.selectedPreset) })
     );
-    const dirty = (ui.dirty || state.presetDirty) && state.connected;
+    const dirty = pedalDirtyForUI() && state.connected && !unknown;
     $('dirtyMark').hidden = !dirty;
 
     const busy = ui.connecting || /requesting|connecting/i.test(ui.connText);
@@ -2081,25 +3175,145 @@
     cb.disabled = busy && !state.connected;
     cb.className = 'btn' + (!state.connected && !busy ? ' primary' : '');
 
-    $('saveBtn').disabled = !state.connected;
-    $('saveAsBtn').disabled = !state.connected;
+    $('saveBtn').disabled = !state.connected || unknown;
+    $('saveAsBtn').disabled = !state.connected || unknown;
     $('saveBtn').className = 'btn' + (dirty ? ' primary' : '');
     $('discardBtn').hidden = !dirty;
     $('refreshBtn').disabled = !state.connected || ui.demo;
-    $('renameBtn').disabled = !state.connected;
+    $('renameBtn').disabled = !state.connected || unknown;
     $('tunerBtn').disabled = !state.connected;
     $('tunerBtn').classList.toggle('on', state.tuner.open);
+    renderMuteButton();
   }
+
+  function renderMuteButton() {
+    const button = $('muteBtn');
+    if (!button) return;
+    const settings = state.connected && window.__dev && window.__dev.settings;
+    const muted = Boolean(settings && settings.muteInput);
+    button.disabled = !settings;
+    button.classList.toggle('mute-active', muted);
+    button.setAttribute('aria-pressed', String(muted));
+  }
+
+  // ------------------------------------------------------------------ preset reordering (from #14)
+  // Drag a preset row onto another: 143 { 1: 4, 3: from, 4: to } (0-based; an insertion, the presets in between
+  // shift by one), acked by 144 { 1: 6, 3: from, 4: to, 5: 1 }. Then the list and the current state are read back
+  // from the pedal like at connect; nothing about the new order or the current preset is assumed. INVESTIGATION §12.
+  const MSG_PRESET_MOVE = 143, MSG_PRESET_MOVE_REPLY = 144;
+  const PRESET_DRAG_TYPE = 'application/x-nano-preset';   // only drags that start on the preset list
+  let presetDragSource = 0;                                 // the row (1–64) the current drag started on
+  const REORDER_TIMEOUTS = { list: 20000, state: 6000 };
+  window.__reorderTimeouts = REORDER_TIMEOUTS;              // the UX test shortens them
+  const canReorder = () => state.connected && !ui.presetReorderBusy && !ui.scanning;
+  const presetMoveFrame = (from, to) => buildFrame([0x08, 0x04, 0x18, ...encodeVarint(from), 0x20, ...encodeVarint(to)], MSG_PRESET_MOVE);
+
+  // Edits are dropped when the pedal moves presets around (the phone app asks first, too).
+  async function askBeforePresetReorder() {
+    if (!isDirtyNow()) return true;
+    const current = state.selectedPreset;
+    const choice = await modal({
+      title: 'Save changes to ' + presetName(current) + '?',
+      body: 'Reordering presets can discard edits that haven’t been saved to the pedal.',
+      buttons: [
+        { id: 'cancel', label: 'Cancel' },
+        { id: 'discard', label: 'Don’t save' },
+        { id: 'save', label: 'Save and reorder', primary: true },
+      ],
+    });
+    if (choice === 'save') {
+      await doSave();
+      if (pedalDirtyForUI()) { toast('Save the current preset before reordering.'); return false; }
+      return true;
+    }
+    if (choice !== 'discard') return false;
+    const before = NanoLive.stateReads;
+    state.exp.loaded = false;
+    await selectPreset(current);
+    if (ui.demo) demo.load(current);
+    if (!(await waitUntil(() => !state.protocol.presetLoad && NanoLive.stateReads > before, 7000))) {
+      toast('The pedal did not confirm reloading the saved preset.');
+      return false;
+    }
+    return true;
+  }
+
+  // The preset list and the state again, the way a connect reads them (upstream's metadata read, then the state).
+  async function rereadPresetsAfterMove() {
+    const before = NanoLive.stateReads;
+    state.protocol.metadataLoaded = false;
+    await syncMetadataAndState();
+    const listed = await waitUntil(() => !state.connected || state.protocol.metadataLoaded, REORDER_TIMEOUTS.list) && state.connected && state.protocol.metadataLoaded;
+    const read = await waitUntil(() => !state.connected || (NanoLive.stateReads > before && !state.protocol.presetLoad), REORDER_TIMEOUTS.state + 1000) &&
+      state.connected && NanoLive.stateReads > before;
+    if (!read && state.stateMode === 'current' && !state.stateBytes.length) state.stateMode = 'idle';
+    return { listed: !!listed, read: !!read };
+  }
+
+  // Without a state read after a move the editor doesn't know which preset the pedal is on (a move can shift it), so
+  // Save, Save as, Discard and Rename stay off until a read succeeds (Refresh, a preset switch, reconnecting).
+  const PRESET_UNKNOWN = 'The editor doesn’t know which preset the pedal is on. Refresh (or pick a preset) to read it again.';
+  function presetUnknownRefuses() {
+    if (!ui.presetUnknown) return false;
+    toast(PRESET_UNKNOWN);
+    return true;
+  }
+
+  async function movePresetOrder(source, destination) {
+    if (source === destination || ui.presetReorderBusy || !state.connected) return false;
+    if (ui.scanning) { toast('Wait for the slot usage scan to finish before reordering.'); return false; }
+    if (state.stateMode !== 'idle' || state.protocol.presetLoad || state.presetLoadTimer || state.pendingParamBlock || state.paramRefreshQueue.length || state.fileBusy || state.saveBusy ||
+        gattWriteQueue.length || gattWritePumpRunning || ui.uploading || NanoTransfer.busy) {
+      toast('Wait for the current pedal operation to finish before reordering.');
+      return false;
+    }
+    ui.presetReorderBusy = true;
+    ui.sideSig = '';
+    render();
+    try {
+      if (!(await stopAnyAudition('the reorder'))) return false;
+      if (!(await askBeforePresetReorder()) || !state.connected) return false;
+      presetMoveProtocolPending = true;   // the pedal reports 115 dirty, then clean, around a move: not an edit
+      const reply = await writeAndAwait('Move preset ' + (source + 1) + ' to position ' + (destination + 1), presetMoveFrame(source, destination), MSG_PRESET_MOVE_REPLY);
+      const ackOk = Boolean(reply) && fieldValue(reply, 5) === 1 && fieldValue(reply, 3) === source && fieldValue(reply, 4) === destination;
+      log('Preset reorder ' + (ackOk ? 'acknowledged' : 'NOT confirmed') + ': type 144 ' + (reply ? 'source=' + fieldValue(reply, 3) + ' destination=' + fieldValue(reply, 4) + ' status=' + fieldValue(reply, 5) : 'no reply'));
+      // Read back whatever happened, confirmed or not: the pedal's order and its current preset are the truth.
+      const { listed, read } = await rereadPresetsAfterMove();
+      log('Preset reorder read-back: list=' + listed + ', state=' + read);
+      if (!read) { ui.presetUnknown = true; render(); }
+      if (!ackOk) {
+        toast('The pedal did not confirm the move. ' + (listed ? 'The list shows its order as it is now.' : 'Its order could not be read either: Refresh to see it.') + (read ? '' : ' ' + PRESET_UNKNOWN));
+        return false;
+      }
+      if (!listed || !read) {
+        toast('Preset moved, but ' + (!listed ? 'the preset list could not be read again (Refresh to see the order)' : 'the current preset could not be read again') + '. ' + (read ? '' : PRESET_UNKNOWN));
+        return false;
+      }
+      toast('Moved preset ' + (source + 1) + ' to position ' + (destination + 1) + '.');
+      return true;
+    } catch (err) {
+      log('ERROR: preset reorder: ' + err.message);
+      toast('Preset reorder failed: ' + err.message);
+      return false;
+    } finally {
+      presetMoveProtocolPending = false;
+      ui.presetReorderBusy = false;
+      ui.sideSig = '';
+      render();
+    }
+  }
+  window.__movePresetOrder = movePresetOrder;
 
   function renderSide() {
     const q = ui.filter.trim().toLowerCase();
     const names = [];
     for (let i = 1; i <= 64; i++) names.push(presetName(i));
-    const sig = [state.connected, state.selectedPreset, q, names.join('|')].join('#');
+    const sig = [state.connected, state.selectedPreset, ui.presetUnknown, q, canReorder(), names.join('|')].join('#');
     if (sig === ui.sideSig) return;
     ui.sideSig = sig;
 
     const list = $('presetList');
+    list.setAttribute('aria-busy', String(ui.presetReorderBusy));
     $('presetFilter').disabled = !state.connected;
     if (!state.connected) {
       list.replaceChildren(el('div', { class: 'side-empty', text: 'Your presets appear here once the pedal is connected.' }));
@@ -2111,10 +3325,38 @@
       if (q && !name.toLowerCase().includes(q) && String(i) !== q) continue;
       const empty = /^empty$/i.test(name);
       rows.push(el('div', {
+        // Drag a row onto another to move it there. Only drags that started on this list count (a private type plus
+        // the remembered source row): text dropped from elsewhere does nothing.
+        draggable: canReorder() ? 'true' : null,
+        ondragstart: (e) => {
+          if (!canReorder()) { e.preventDefault(); return; }
+          presetDragSource = i;
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData(PRESET_DRAG_TYPE, String(i));
+          e.currentTarget.classList.add('dragging');
+        },
+        ondragover: (e) => {
+          if (!presetDragSource || !canReorder() || !Array.from(e.dataTransfer.types).includes(PRESET_DRAG_TYPE)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          e.currentTarget.classList.add('drop-target');
+        },
+        ondragleave: (e) => e.currentTarget.classList.remove('drop-target'),
+        ondrop: (e) => {
+          const from = presetDragSource;
+          presetDragSource = 0;
+          e.currentTarget.classList.remove('drop-target');
+          if (!from || !Array.from(e.dataTransfer.types).includes(PRESET_DRAG_TYPE) || Number(e.dataTransfer.getData(PRESET_DRAG_TYPE)) !== from) return;
+          e.preventDefault();
+          if (from === i || !canReorder()) return;
+          suppressPresetClickUntil = Date.now() + 350;
+          void movePresetOrder(from - 1, i - 1);
+        },
+        ondragend: () => { presetDragSource = 0; document.querySelectorAll('.preset-row.dragging, .preset-row.drop-target').forEach(r => r.classList.remove('dragging', 'drop-target')); },
         oncontextmenu: (e) => contextMenu(e, [
           { label: i === state.selectedPreset ? 'Current preset' : 'Load', disabled: !state.connected || i === state.selectedPreset, action: () => goToPreset(i) },
-          ...(i === state.selectedPreset ? [{ label: 'Discard edits', disabled: !state.connected || !(ui.dirty || state.presetDirty), action: () => doDiscard() }] : []),
-          { label: 'Rename\u2026', disabled: !state.connected || (i !== state.selectedPreset && ui.dirty), action: async () => { if (i !== state.selectedPreset) await goToPreset(i); if (state.selectedPreset === i) doRename(); } },
+          ...(i === state.selectedPreset ? [{ label: 'Discard edits', disabled: !state.connected || !isDirtyNow(), action: () => doDiscard() }] : []),
+          { label: 'Rename\u2026', disabled: !state.connected || (i !== state.selectedPreset && pedalDirtyForUI()), action: async () => { if (i !== state.selectedPreset) await goToPreset(i); if (state.selectedPreset === i) doRename(); } },
           '-',
           { label: empty ? 'Save current sound here\u2026' : 'Save current sound over this preset\u2026', disabled: !state.connected || i === state.selectedPreset, action: () => doSaveAs(i) },
           '-',
@@ -2122,11 +3364,11 @@
           '-',
           { label: 'Delete\u2026', danger: true, disabled: !state.connected || empty, action: () => doDelete(i) },
         ]),
-        class: 'preset-row' + (state.connected && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : ''),
+        class: 'preset-row' + (state.connected && !ui.presetUnknown && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : '') + (ui.presetReorderBusy ? ' reorder-pending' : ''),
         role: 'option',
-        'aria-selected': String(state.connected && i === state.selectedPreset),
+        'aria-selected': String(state.connected && !ui.presetUnknown && i === state.selectedPreset),
         dataset: { n: i },
-        onclick: () => goToPreset(i),
+        onclick: () => { if (Date.now() > suppressPresetClickUntil) goToPreset(i); },
       }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name })));
     }
     if (!rows.length) rows.push(el('div', { class: 'side-empty', text: 'No presets match “' + ui.filter + '”.' }));
@@ -2177,12 +3419,16 @@
   }
 
   function nodeMenu(s, info) {
-    const items = [{ label: info.on ? 'Bypass' : 'Enable', disabled: !state.connected || info.none, action: () => { toggleStage(s.key); markDirty(); render(); } }];
+    const items = [{ label: info.on ? 'Bypass' : 'Enable', disabled: !state.connected || info.none, action: () => { toggleStage(s.key); render(); } }];
     if (/^(pre|post)\d$/.test(s.key)) {
       items.push({ label: info.none ? 'Add an effect\u2026' : 'Change effect\u2026', disabled: !state.connected, action: () => { select(s.key); render(); requestAnimationFrame(() => { const b = document.querySelector('[data-fk="picker-' + s.key + '"]'); if (b) openModelPicker(s.key, b); }); } });
       items.push({ label: 'Clear slot', disabled: !state.connected || info.none, action: () => { chooseModel(s.key, 'None'); render(); } });
     } else if (s.key === 'capture' || s.key === 'cab') {
-      items.push({ label: s.key === 'capture' ? 'Pick a capture from the library\u2026' : 'Pick a cab from the library\u2026', disabled: !state.connected, action: () => { select(s.key); render(); requestAnimationFrame(() => { const b = document.querySelector('[data-fk="lib-' + s.key + '"]'); if (b) openLibraryPicker(s.key, b); }); } });
+      // Captures: the library picker. Cabs: the inspector's "From the library" list (its search box).
+      items.push({ label: s.key === 'capture' ? 'Pick a capture from the library\u2026' : 'Pick a cab from the library\u2026', disabled: !state.connected, action: () => { select(s.key); render(); requestAnimationFrame(() => {
+        if (s.key === 'cab') { const q = document.querySelector('[data-fk="cab-lib-search"]'); if (q) { q.scrollIntoView({ block: 'center' }); q.focus(); } return; }
+        const b = document.querySelector('[data-fk="lib-' + s.key + '"]'); if (b) openLibraryPicker(s.key, b);
+      }); } });
       if (s.key === 'capture') { const slot = activeCaptureSlot(); items.push({ label: 'Info\u2026', disabled: !state.connected || !slot, action: () => openCaptureInfo(slot, document.querySelector('[data-fk="node-capture"]')) }); }
     }
     return items;
@@ -2198,12 +3444,7 @@
         'aria-label': (info.on ? 'Bypass ' : 'Turn on ') + s.title,
         'aria-pressed': String(!!info.on),
         disabled: !state.connected,
-        onclick: (e) => {
-          e.stopPropagation();
-          if (!info.canToggle) select(s.key); // empty slot: show where to pick an effect
-          toggleStage(s.key);
-        },
-        dataset: { fk: 'stomp-' + s.key },
+        dataset: { fk: 'stomp-' + s.key, stage: s.key },
       }, el('i'));
       return el('div', {
         class: 'node' + (ui.selected === s.key ? ' selected' : '') + (info.on ? '' : ' off') + (info.none ? ' none' : '') + (info.unknown ? ' unknown' : ''),
@@ -2212,14 +3453,97 @@
         'aria-pressed': String(ui.selected === s.key),
         title: s.title + ' (' + (idx + 1) + ')',
         dataset: { fk: 'node-' + s.key, stage: s.key },
-        onclick: () => select(s.key),
-        oncontextmenu: (e) => contextMenu(e, nodeMenu(s, info)),
         onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(s.key); } },
       },
         el('div', { class: 'top' }, el('span', { class: 'stage', text: s.title }), stomp),
         el('div', { class: 'model', text: info.model }),
         el('div', { class: 'sub', title: info.sub || null, text: info.sub || ' ' }));
     }));
+  }
+
+  function stageButtonFromEvent(e) {
+    const button = e.target && e.target.closest ? e.target.closest('.stomp') : null;
+    if (!button || !$('chain').contains(button)) return null;
+    const key = button.dataset.stage;
+    return key && stage(key) ? { button, key } : null;
+  }
+
+  function stageNodeFromEvent(e, allowStomp = false) {
+    const target = e.target;
+    const node = target && target.closest ? target.closest('.node') : null;
+    if (!node || !$('chain').contains(node) || (!allowStomp && target.closest && target.closest('.stomp'))) return null;
+    const key = node.dataset.stage;
+    return key && stage(key) ? { node, key } : null;
+  }
+
+  // The chain is redrawn when the pedal reports a change. If that happens
+  // between a mouse-down and mouse-up, the pressed button is detached and the
+  // browser drops its click. Apply physical pointer clicks at mouse-down on
+  // the stable chain, then swallow the matching click if one still arrives.
+  function onStagePointerDown(e) {
+    if (e.button === 2) {
+      const node = stageNodeFromEvent(e, true);
+      if (!node) return;
+      e.preventDefault();
+      ui.stageContextNativePending = true;
+      contextMenu(e, nodeMenu(stage(node.key), stageInfo(node.key)));
+      setTimeout(() => { ui.stageContextNativePending = false; }, 1000);
+      return;
+    }
+    if (e.button !== 0) return;
+    const hit = stageButtonFromEvent(e);
+    if (hit) {
+      if (hit.button.disabled) return;
+      const stamp = Date.now();
+      ui.stagePointerClicks.set(hit.key, stamp);
+      setTimeout(() => {
+        if (ui.stagePointerClicks.get(hit.key) === stamp) ui.stagePointerClicks.delete(hit.key);
+      }, 1000);
+      if (!stageInfo(hit.key).canToggle) select(hit.key); // empty slot: show where to pick an effect
+      toggleStage(hit.key);
+      return;
+    }
+    const node = stageNodeFromEvent(e);
+    if (!node) return;
+    select(node.key);
+  }
+
+  function onStageContextMenu(e) {
+    const node = stageNodeFromEvent(e, true);
+    if (!node) return;
+    e.preventDefault();
+    e.stopPropagation();
+    // Physical right-clicks are opened on pointerdown so a redraw cannot lose
+    // them. Suppress the browser's follow-up event; keyboard context-menu
+    // commands still arrive here without a menu.
+    if (ctx) {
+      ui.stageContextNativePending = false;
+      return;
+    }
+    contextMenu(e, nodeMenu(stage(node.key), stageInfo(node.key)));
+  }
+
+  function onStageClick(e) {
+    const hit = stageButtonFromEvent(e);
+    if (hit) {
+      const stamp = ui.stagePointerClicks.get(hit.key);
+      if (stamp && e.detail > 0 && Date.now() - stamp < 1000) {
+        ui.stagePointerClicks.delete(hit.key);
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      ui.stagePointerClicks.delete(hit.key);
+      e.stopPropagation();
+      const info = stageInfo(hit.key);
+      if (!info.canToggle) select(hit.key); // empty slot: show where to pick an effect
+      toggleStage(hit.key);
+      return;
+    }
+    const node = stageNodeFromEvent(e);
+    if (!node) return;
+    e.stopPropagation();
+    select(node.key);
   }
 
   function renderExpPill() {
@@ -2258,9 +3582,43 @@
       class: 'switch' + (on ? ' on' : ''),
       role: 'switch', 'aria-checked': String(!!on),
       disabled: !enabled || !state.connected,
-      onclick: () => toggleStage(key),
-      dataset: { fk: 'switch-' + key },
+      dataset: { fk: 'switch-' + key, stage: key },
     }, el('span', { class: 'track' }), on ? 'On' : 'Bypassed');
+  }
+
+  function inspectorSwitchFromEvent(e) {
+    const target = e.target;
+    const button = target && target.closest ? target.closest('.switch[data-stage]') : null;
+    if (!button || !$('inspector').contains(button)) return null;
+    const key = button.dataset.stage;
+    return key && stage(key) ? { button, key } : null;
+  }
+
+  function onInspectorPointerDown(e) {
+    if (e.button !== 0) return;
+    const hit = inspectorSwitchFromEvent(e);
+    if (!hit || hit.button.disabled) return;
+    const stamp = Date.now();
+    ui.bypassPointerClicks.set(hit.key, stamp);
+    setTimeout(() => {
+      if (ui.bypassPointerClicks.get(hit.key) === stamp) ui.bypassPointerClicks.delete(hit.key);
+    }, 1000);
+    toggleStage(hit.key);
+  }
+
+  function onInspectorClick(e) {
+    const hit = inspectorSwitchFromEvent(e);
+    if (!hit) return;
+    const stamp = ui.bypassPointerClicks.get(hit.key);
+    if (stamp && e.detail > 0 && Date.now() - stamp < 1000) {
+      ui.bypassPointerClicks.delete(hit.key);
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    ui.bypassPointerClicks.delete(hit.key);
+    e.stopPropagation();
+    if (!hit.button.disabled) toggleStage(hit.key);
   }
 
   function head(s, extra = [], onSwitch = null) {
@@ -2325,7 +3683,7 @@
         if (locked || idx === p.value) return;
         p.value = idx;
         setFXParam(key, p);
-        markDirty();
+        noteExpressionLocalOverride(key, 'param', p);
         render();
       };
       if (meta.options.length <= 6) {
@@ -2352,8 +3710,9 @@
       scale: isFreq ? 'log' : 'lin',
       get: () => Number(p.value),
       fmt: (v) => paramDisplayValue({ ...p, value: v }),
-      live: (v) => { p.value = v; },
-      commit: (v) => { p.value = v; setFXParam(key, p); markDirty(); render(); },
+      live: (v) => { p.value = v; noteExpressionLocalOverride(key, 'param', p); },
+      send: (v) => { p.value = v; setFXParam(key, p); },
+      commit: (v) => { p.value = v; render(); },
     });
   }
 
@@ -2369,8 +3728,9 @@
         get: () => state.amp[k],
         fmt: (v) => Math.round((v / 255) * 100) + '%',
         parse: (str) => (parseFloat(str) / 100) * 255,
-        live: (v) => { state.amp[k] = v; },
-        commit: (v) => { state.amp[k] = Math.round(v); setAmpKnob(k, state.amp[k]); markDirty(); render(); },
+        live: (v) => { state.amp[k] = v; noteExpressionLocalOverride(k, 'range', v); },
+        send: (v) => { state.amp[k] = Math.round(v); setAmpKnob(k, state.amp[k]); },
+        commit: (v) => { state.amp[k] = Math.round(v); render(); },
       }));
     });
     amp.append(knobControl({
@@ -2378,8 +3738,9 @@
       min: -24, max: 12, step: 0.1, defaultValue: 0,
       get: () => Number(state.captureVolumeDb || 0),
       fmt: (v) => (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' dB',
-      live: (v) => { state.captureVolumeDb = v; },
-      commit: (v) => { state.captureVolumeDb = v; setCaptureVolumeDb(v); markDirty(); render(); },
+      live: (v) => { state.captureVolumeDb = v; noteExpressionLocalOverride('level', 'range', v); },
+      send: (v) => { state.captureVolumeDb = v; setCaptureVolumeDb(v); },
+      commit: (v) => { state.captureVolumeDb = v; render(); },
     }));
     out.push(el('div', { class: 'section' }, el('h3', { text: 'Amp' }), amp));
 
@@ -2390,9 +3751,9 @@
       slots.append(el('button', {
         class: 'slot' + (i === cur ? ' on' : ''), role: 'option', 'aria-selected': String(i === cur),
         dataset: { fk: 'capslot-' + i }, disabled: !state.connected,
-        onclick: () => { if (i !== cur) { setCapture(i); if (ui.demo) demo.pickCapture(i); markDirty(); render(); } },
+        onclick: () => { if (i !== cur) { setCapture(i); if (ui.demo) demo.pickCapture(i); render(); } },
         oncontextmenu: (e) => { const anchor = e.currentTarget; contextMenu(e, [   // currentTarget is gone by the time an item runs
-          { label: i === cur ? 'Loaded in this preset' : 'Load into this preset', disabled: !state.connected || i === cur, action: () => { setCapture(i); if (ui.demo) demo.pickCapture(i); markDirty(); render(); } },
+          { label: i === cur ? 'Loaded in this preset' : 'Load into this preset', disabled: !state.connected || i === cur, action: () => { setCapture(i); if (ui.demo) demo.pickCapture(i); render(); } },
           { label: 'Put a library capture in slot ' + i + '\u2026', disabled: !state.connected, action: () => openLibraryPicker('capture', anchor, i) },
           '-',
           { label: 'Info\u2026', disabled: !state.connected, action: () => openCaptureInfo(i, anchor) },
@@ -2418,26 +3779,35 @@
 
   function inspCab(s) {
     const on = state.cabIR.on;
-    const factory = isFactoryCabIR();
+    const factory = selectedIRIsFactory();
+    const irPreviewing = irAuditioning();
+    const irLoad = ui.cabIRLoadActive;
+    const irLoadBusy = Boolean(irLoad);
+    const micPositionEditable = factory && on && !irPreviewing;
+    const micPositionLockTitle = irPreviewing
+      ? 'Stop the IR preview to change the microphone or position.'
+      : 'Mic and position apply to factory cabs only';
     const out = [head(s, [], bypassSwitch('cab', on))];
 
     const MICS = ['Condenser 184', 'Condenser 414', 'Dynamic 421', 'Dynamic 57', 'Ribbon 160'];
     const micRow = el('div', { class: 'params wide' },
-      el('div', { class: 'choice' + (factory && on ? '' : ' locked'), title: factory ? null : 'Mic and position apply to factory cabs only' },
+      el('div', { class: 'choice' + (micPositionEditable ? '' : ' locked'), title: micPositionEditable ? null : micPositionLockTitle },
         el('span', { class: 'label', text: 'Mic' }),
         el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Mic' },
           MICS.map(m => el('button', {
+            disabled: !micPositionEditable,
             class: sameName(state.cabIR.mic, m) ? 'on' : '', role: 'radio', 'aria-checked': String(sameName(state.cabIR.mic, m)),
             dataset: { fk: 'mic-' + m },
-            onclick: () => { if (!sameName(state.cabIR.mic, m)) { setCabIRMicPosition(m, state.cabIR.position); state.cabIR.mic = m; markDirty(); render(); } },
+            onclick: () => { if (micPositionEditable && !irAuditioning() && !sameName(state.cabIR.mic, m)) { void setCabIRMicPosition(m, state.cabIR.position); } },
           }, m)))),
-      el('div', { class: 'choice' + (factory && on ? '' : ' locked') },
+      el('div', { class: 'choice' + (micPositionEditable ? '' : ' locked'), title: micPositionEditable ? null : micPositionLockTitle },
         el('span', { class: 'label', text: 'Position' }),
         el('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Mic position' },
           [1, 2, 3, 4, 5, 6].map(n => el('button', {
+            disabled: !micPositionEditable,
             class: Number(state.cabIR.position) === n ? 'on' : '', role: 'radio', 'aria-checked': String(Number(state.cabIR.position) === n),
             dataset: { fk: 'pos-' + n },
-            onclick: () => { if (Number(state.cabIR.position) !== n) { setCabIRMicPosition(state.cabIR.mic, n); state.cabIR.position = n; markDirty(); render(); } },
+            onclick: () => { if (micPositionEditable && !irAuditioning() && Number(state.cabIR.position) !== n) { void setCabIRMicPosition(state.cabIR.mic, n); } },
           }, String(n))))));
 
     const knobs = el('div', { class: 'params' },
@@ -2447,7 +3817,8 @@
         get: () => Number(state.cabIR.levelDb),
         fmt: (v) => (v > 0 ? '+' : '') + Number(v).toFixed(1) + ' dB',
         live: (v) => { state.cabIR.levelDb = v; },
-        commit: (v) => { setCabIRLevelDb(v); markDirty(); render(); },
+        send: (v) => { setCabIRLevelDb(v); },
+        commit: (v) => { render(); },
       }),
       knobControl({
         fk: 'cab-hp', label: 'High pass', color: s.color, locked: !on, lockedTip: 'Cab / IR is bypassed',
@@ -2455,7 +3826,8 @@
         get: () => Number(state.cabIR.highPassHz),
         fmt: (v) => Math.round(v) + ' Hz',
         live: (v) => { state.cabIR.highPassHz = v; },
-        commit: (v) => { setCabIRHighPassHz(v); markDirty(); render(); },
+        send: (v) => { setCabIRHighPassHz(v); },
+        commit: (v) => { render(); },
       }),
       knobControl({
         fk: 'cab-lp', label: 'Low pass', color: s.color, locked: !on, lockedTip: 'Cab / IR is bypassed',
@@ -2464,20 +3836,30 @@
         fmt: (v) => (v >= 10000 ? (v / 1000).toFixed(1) + ' kHz' : Math.round(v) + ' Hz'),
         parse: (str) => /k/i.test(str) ? parseFloat(str) * 1000 : parseFloat(str),
         live: (v) => { state.cabIR.lowPassHz = v; },
-        commit: (v) => { setCabIRLowPassHz(v); markDirty(); render(); },
+        send: (v) => { setCabIRLowPassHz(v); },
+        commit: (v) => { render(); },
       }));
 
     out.push(el('div', { class: 'section' }, el('h3', { text: 'Tone' }), knobs));
     out.push(el('div', { class: 'section' }, el('h3', { text: 'Microphone' }),
-      factory ? null : el('p', { class: 'note', text: 'Mic and position only apply to the factory cabs.' }), micRow));
+      irPreviewing
+        ? el('p', { class: 'note', text: 'Stop the IR preview to change the microphone or position.' })
+        : factory ? null : el('p', { class: 'note', text: 'Mic and position only apply to the factory cabs.' }),
+      micRow));
 
     const cur = activeIRSlot();
-    const slots = el('div', { class: 'slots' + (on ? '' : ' disabled'), role: 'listbox', 'aria-label': 'IR slots' });
+    const slots = el('div', {
+      class: 'slots' + (on ? '' : ' disabled') + (irLoadBusy ? ' loading' : ''),
+      role: 'listbox', 'aria-label': 'IR slots', 'aria-busy': String(irLoadBusy),
+    });
     for (let i = 1; i <= irSlotCount(); i++) {
       const name = state.irNames.get(i) || ('IR ' + i);
+      const loadingThisSlot = Boolean(irLoad && irLoad.slot === i && irLoad.phase !== 'choosing');
       slots.append(el('button', {
-        class: 'slot' + (i === cur ? ' on' : ''), role: 'option', 'aria-selected': String(i === cur),
-        dataset: { fk: 'irslot-' + i }, disabled: !state.connected,
+        class: 'slot' + (i === cur ? ' on' : '') + (irAudition.active && i === cur ? ' preview-muted' : '') + (loadingThisSlot ? ' ir-loading' : ''),
+        role: 'option', 'aria-selected': String(i === cur), 'aria-busy': String(loadingThisSlot),
+        title: loadingThisSlot ? 'Loading ' + irLoad.name + ' into this IR slot' : null,
+        dataset: { fk: 'irslot-' + i }, disabled: !state.connected || irLoadBusy,
         oncontextmenu: (e) => { const anchor = e.currentTarget; contextMenu(e, [
           { label: i === cur ? 'Loaded in this preset' : 'Load into this preset', disabled: !state.connected || i === cur, action: () => anchor.click() },
           { label: 'Put a library cab in slot ' + i + '\u2026', disabled: !state.connected, action: () => openLibraryPicker('cab', anchor, i) },
@@ -2487,17 +3869,28 @@
           Object.assign(state.currentIR, { shortName: name, fullName: name, inBank: true, slot: i });
           selectCabIRSlot(i);
           if (ui.demo) demo.pickIR(i);
-          markDirty(); render();
+          render();
         },
-      }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name }), usageBadge('cab', i)));
+      }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name }),
+        loadingThisSlot ? el('span', { class: 'slot-load-pending', text: '…', 'aria-label': 'Loading' }) : usageBadge('cab', i)));
     }
     const cabFromLib = on && state.cabIR.fromLibrary;
-    out.push(el('div', { class: 'section' }, el('div', { class: 'section-head' }, el('h3', { text: 'Cabs and IRs on the pedal' }),
-        el('button', { class: 'btn ghost small', dataset: { fk: 'lib-cab' }, disabled: !state.connected,
-          title: 'Pick a cab or IR from the library stored on the pedal and load it into a slot',
-          onclick: (e) => openLibraryPicker('cab', e.currentTarget) }, 'Load from library…')),
+    const loadStatus = irLoad
+      ? (irLoad.phase === 'choosing'
+        ? 'Choose a slot for ' + irLoad.name + '…'
+        : irLoad.phase === 'sending'
+          ? 'Loading ' + irLoad.name + ' into IR slot ' + irLoad.slot + '…'
+          : 'Activating IR slot ' + irLoad.slot + '…')
+      : ui.cabIRLoadPaused ? 'The last IR change was not confirmed. Reconnect before loading another IR.' : '';
+    const irQueueCount = ui.cabIRLoadQueue.length;
+    out.push(el('div', { class: 'section' }, el('div', { class: 'section-head' }, el('h3', { text: 'Cabs and IRs on the pedal' })),
       cabFromLib ? el('p', { class: 'note', dataset: { fk: 'cab-from-lib' }, text: 'From the library: ' + (state.currentIR.shortName || 'a cab') + '. This preset plays it straight from the pedal\u2019s library, not from a slot.' }) : null,
+      loadStatus ? el('p', { class: 'note ir-load-status', role: 'status', 'aria-live': 'polite', text: loadStatus + (irLoad && irQueueCount ? ' ' + irQueueCount + ' more queued.' : '') }) : null,
       !on ? el('p', { class: 'note', text: 'Turn the cab back on to pick a slot.' }) : null, slots));
+    out.push(el('div', { class: 'section cab-library-section' },
+      el('div', { class: 'section-divider' }, el('h3', { text: 'From the library' })),
+      el('p', { class: 'library-hint', text: 'Click a cab or IR to choose a slot. Preview auditions it without changing any slot.' }),
+      irLibrarySection()));
     return out;
   }
 
@@ -2512,8 +3905,9 @@
           min: 0, max: 100, step: 1, defaultValue: 50,
           get: () => Number(p.value),
           fmt: (v) => Math.round(v) + '%',
-          live: (v) => { p.value = v; },
-          commit: (v) => { p.value = Math.round(v); setGateReduction(p.value); markDirty(); render(); },
+          live: (v) => { p.value = v; noteExpressionLocalOverride('gate', 'range', v); },
+          send: (v) => { p.value = Math.round(v); setGateReduction(p.value); },
+          commit: (v) => { p.value = Math.round(v); render(); },
         }))),
     ];
   }
@@ -2583,7 +3977,6 @@
     const frame = expSaveFrame();
     if (frame.length - 2 > 255) { toast('Too many expression assignments for one message'); render(); return; }
     writeC304('Save expression assignments (preset ' + state.exp.preset + ')', frame, 'exp-save');
-    markDirty();
     render();
   }
   // Assign `x`; when it replaces `old` of the same kind, the row keeps its settings (as in the native app).
@@ -2758,16 +4151,38 @@
     draw();
     if (o.locked) return root;
 
-    const setLive = (v) => { current = snap(v); o.live && o.live(current); draw(); };
+    // `send` is deliberately separate from `commit`: live controls can write every
+    // snapped value through the coalescing BLE queue without rebuilding the inspector
+    // during a drag. Expression-assignment knobs omit `send` because their type-62
+    // message replaces the whole assignment set and should still be committed once.
+    const setLive = (v, force = false) => {
+      const next = snap(v);
+      if (!force && next === current) return false;
+      current = next;
+      o.live && o.live(current);
+      draw();
+      o.send && o.send(current);
+      return true;
+    };
     let pendingCommit = null;
+    let changedSinceCommit = false;
+    const commitNow = () => {
+      clearTimeout(pendingCommit);
+      pendingCommit = null;
+      if (!changedSinceCommit) return;
+      changedSinceCommit = false;
+      o.commit(current);
+    };
     const commitSoon = () => {
       clearTimeout(pendingCommit);
-      pendingCommit = setTimeout(() => o.commit(current), 160);
+      pendingCommit = setTimeout(() => { pendingCommit = null; commitNow(); }, 160);
     };
 
     svg.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
+      ui.knobDragging = true;
+      ui.renderAfterKnob = false;
       root.focus({ preventScroll: true });
       const startY = e.clientY;
       const startN = toNorm(current);
@@ -2778,24 +4193,31 @@
         if (!moved && Math.abs(dy) < 2) return;
         moved = true;
         const scale = ev.shiftKey ? 0.1 : 1;
-        setLive(fromNorm(startN + (dy / 180) * scale));
+        if (setLive(fromNorm(startN + (dy / 180) * scale))) changedSinceCommit = true;
       };
       const up = () => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
         window.removeEventListener('pointercancel', up);
+        window.removeEventListener('blur', up);
         document.body.style.cursor = '';
-        if (moved) o.commit(current);
+        ui.knobDragging = false;
+        const renderAfter = ui.renderAfterKnob;
+        ui.renderAfterKnob = false;
+        if (moved) commitNow();
+        if (renderAfter) render();
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
       window.addEventListener('pointercancel', up);
+      window.addEventListener('blur', up, { once: true });
     });
 
     svg.addEventListener('dblclick', () => {
       if (o.defaultValue === undefined) return;
-      setLive(o.defaultValue);
-      o.commit(current);
+      setLive(o.defaultValue, true);
+      changedSinceCommit = true;
+      commitNow();
     });
 
     root.addEventListener('wheel', (e) => {
@@ -2804,7 +4226,7 @@
       const n = toNorm(current) + dir * (e.shiftKey ? 0.002 : 0.012);
       let next = fromNorm(n);
       if (snap(next) === current) next = current + dir * step; // always move at least one step
-      setLive(next);
+      if (setLive(next)) changedSinceCommit = true;
       commitSoon();
     }, { passive: false });
 
@@ -2814,11 +4236,11 @@
       const dn = big ? 0.1 : 0.01;
       let handled = true;
       if (e.key === 'ArrowUp' || e.key === 'ArrowRight' || e.key === 'PageUp') {
-        const next = fromNorm(toNorm(current) + dn); setLive(snap(next) === current ? current + step : next);
+        const next = fromNorm(toNorm(current) + dn); if (setLive(snap(next) === current ? current + step : next)) changedSinceCommit = true;
       } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'PageDown') {
-        const next = fromNorm(toNorm(current) - dn); setLive(snap(next) === current ? current - step : next);
-      } else if (e.key === 'Home') setLive(min);
-      else if (e.key === 'End') setLive(max);
+        const next = fromNorm(toNorm(current) - dn); if (setLive(snap(next) === current ? current - step : next)) changedSinceCommit = true;
+      } else if (e.key === 'Home') { if (setLive(min)) changedSinceCommit = true; }
+      else if (e.key === 'End') { if (setLive(max)) changedSinceCommit = true; }
       else if (e.key === 'Enter') { startEdit(); }
       else handled = false;
       if (handled) { e.preventDefault(); e.stopPropagation(); if (e.key !== 'Enter') commitSoon(); }
@@ -2839,7 +4261,7 @@
         ui.editing = false;
         if (apply) {
           const parsed = o.parse ? o.parse(input.value) : parseFloat(input.value);
-          if (Number.isFinite(parsed)) { setLive(parsed); o.commit(current); }
+          if (Number.isFinite(parsed)) { if (setLive(parsed)) changedSinceCommit = true; commitNow(); }
         }
         const back = el('div', { class: 'val' });
         input.replaceWith(back);
@@ -2875,13 +4297,30 @@
       class: 'ctx-item' + (it.danger ? ' danger' : ''), role: 'menuitem', disabled: it.disabled ? 'true' : null,
       onclick: () => { closeContextMenu(); it.action(); },
     }, it.label)));
-    const bg = el('div', { class: 'ctx-bg', oncontextmenu: (ev) => { ev.preventDefault(); closeContextMenu(); }, onmousedown: (ev) => { if (ev.target === bg) closeContextMenu(); } }, menu);
+    menu.style.visibility = 'hidden';
+    const bg = el('div', { class: 'ctx-bg', oncontextmenu: (ev) => { ev.preventDefault(); if (ui.stageContextNativePending) { ui.stageContextNativePending = false; return; } closeContextMenu(); }, onmousedown: (ev) => { if (ev.target === bg) closeContextMenu(); } }, menu);
     document.body.append(bg); ctx = bg;
-    const r = menu.getBoundingClientRect();
-    menu.style.left = Math.min(e.clientX, window.innerWidth - r.width - 8) + 'px';
-    menu.style.top = Math.min(e.clientY, window.innerHeight - r.height - 8) + 'px';
-    document.addEventListener('keydown', ctxKey, true);
-    const first = menu.querySelector('button:not(:disabled)'); if (first) first.focus();
+    requestAnimationFrame(() => {
+      if (ctx !== bg) return;
+      const bounds = bg.getBoundingClientRect();
+      const margin = 8;
+      const maxWidth = Math.max(0, bounds.width - margin * 2);
+      const maxHeight = Math.max(0, bounds.height - margin * 2);
+      menu.style.setProperty('--ctx-max-width', maxWidth + 'px');
+      menu.style.setProperty('--ctx-max-height', maxHeight + 'px');
+      const r = menu.getBoundingClientRect();
+      const pointerX = e.clientX - bounds.left;
+      const pointerY = e.clientY - bounds.top;
+      const maxLeft = Math.max(margin, bounds.width - r.width - margin);
+      const maxTop = Math.max(margin, bounds.height - r.height - margin);
+      const left = pointerX + r.width > bounds.width - margin ? pointerX - r.width : pointerX;
+      const top = pointerY + r.height > bounds.height - margin ? pointerY - r.height : pointerY;
+      menu.style.left = Math.min(Math.max(left, margin), maxLeft) + 'px';
+      menu.style.top = Math.min(Math.max(top, margin), maxTop) + 'px';
+      menu.style.visibility = '';
+      document.addEventListener('keydown', ctxKey, true);
+      const first = menu.querySelector('button:not(:disabled)'); if (first) first.focus();
+    });
   }
   window.__contextMenu = contextMenu;
   window.__closePopover = closePopover;
@@ -2992,7 +4431,7 @@
     $('bleLed').className = 'led' + (ble ? ' on' : busy ? ' busy' : '');
     $('bleText').textContent = ui.demo ? 'Demo data, nothing is sent' : ble ? 'Connected to Nano Cortex' + (state.firmware ? ' · firmware ' + state.firmware : '') : busy ? 'Connecting…' : 'No pedal';
     // Only speaks up when the pedal itself reports something worth knowing.
-    const note = ble && state.presetDirty ? 'Pedal reports unsaved changes' : '';
+    const note = ble && ui.presetUnknown ? 'Current preset unknown: Refresh to read it' : ble && pedalDirtyForUI() ? 'Pedal reports unsaved changes' : '';
     $('pcText').textContent = note;
     $('pcText').parentElement.hidden = !note;
     // "Sent: <protocol label>" is a developer detail; progress like "Saving preset 3…" is for everyone.
@@ -3228,15 +4667,59 @@
   // ------------------------------------------------------------------ device page + capture info
   // Decoded from the phone app (trace 2026-10-09, docs/INVESTIGATION.md §11). Not in the upstream editor.
   //   46 {1:3 3:unixTime} → 47 {1:1 3:1 4:"" 5:firmware 6:serial 7:hash}            device info
-  //   65 {1:3}            → 66 {1:1 3:1 5:name 6:brightness … 17:usbDb(f32) …}       global settings
+  //   65 {1:3}            → 66 {1:1 3:1 5:name 6:brightness … 15:muteIn 16:muteOut 17:usbDb(f32) …} global settings
   //   67 {1:1 4:brightness 14:usbDb(f32)} → 68 {1:1 3:1}                           write (the app sends both)
+  //   67 {1:1 12:muteIn} → 68 {1:1 3:1}; 67 {1:1 13:muteOut} → 68 {1:1 3:1}    monitoring writes (one field, explicit 0/1)
   //   17 {3:captureSlot−1 5:1} → 18 {1:6 3:1 7:{1,2 author} 8:"" 9:hash 10:name 11:record}   capture details
   //   91 {1:3}            → 92 {1:3 3:1 5:"2.2.1+06d34443" 6:serial 7:name}        keep-alive; full firmware + name
   // Settings writes are global: no Save, and the pedal reports nothing dirty (no 115 after them in the trace).
   const DEV_MSG = { ALIVE_REQ: 91, ALIVE: 92, INFO_REQ: 46, INFO: 47, SETTINGS_REQ: 65, SETTINGS: 66, SET: 67, SET_ACK: 68, CAPTURE_REQ: 17, CAPTURE: 18 };
+  const DEV_MONITOR = Object.freeze({
+    muteInput: { writeField: 12, readField: 15, tag: 0x60, label: 'Mute Input', note: 'Mutes the Guitar Input. USB input remains available.' },
+    muteOutput: { writeField: 13, readField: 16, tag: 0x68, label: 'Mute Outputs 1L/2R', note: 'Mutes processed audio to Outputs 1L/2R. USB playback remains available.' },
+  });
   const USB_DB = { min: -20, max: 0, step: 0.5 };
-  const dev = { info: null, alive: null, settings: null, reading: false, redraw: null, capWait: null };
+  const dev = { info: null, alive: null, settings: null, reading: false, redraw: null, capWait: null,
+    monitorPending: {}, monitorAcks: [], monitorReadTimer: null, muteInputRevision: 0,
+    settingsRequestedForConnection: false };
   window.__dev = dev;
+  // Tuner and Mute Input: the pedal still reports the input muted after the tuner closes, but its audio path needs a
+  // fresh off → on edge to mute again (seen on a pedal, #14). So: note the mute when the tuner opens; when it closes,
+  // wait for the tuner-off write, let the pedal settle 200 ms, then send off and, 100 ms after that write, on again,
+  // unless the user changed the mute meanwhile.
+  let tunerMuteSnapshot = null;
+  const coreOpenTuner = window.openTuner;
+  window.openTuner = function () {
+    tunerMuteSnapshot = state.connected && dev.settings ? { muted: Boolean(dev.settings.muteInput), revision: dev.muteInputRevision } : null;
+    return coreOpenTuner.apply(this, arguments);
+  };
+  const coreCloseTuner = window.closeTuner;
+  window.closeTuner = function () {
+    const wasOpen = state.tuner.open;
+    const snapshot = wasOpen ? tunerMuteSnapshot : null;
+    if (wasOpen) tunerMuteSnapshot = null;
+    const result = coreCloseTuner.apply(this, arguments);
+    if (snapshot && snapshot.muted && state.connected) {
+      // Writes leave in order, so an empty queue means the tuner-off write (if any) has gone out.
+      waitUntil(() => !gattWriteQueue.length && !gattWritePumpRunning, 3000)
+        .then(() => new Promise(r => setTimeout(r, 200)))
+        .then(() => rearmInputMute(snapshot));
+    }
+    return result;
+  };
+  function rearmInputMute(snapshot) {
+    if (!state.connected || state.tuner.open || !dev.settings || dev.muteInputRevision !== snapshot.revision) return;
+    const off = writeMonitorSetting('muteInput', false);
+    const revision = dev.muteInputRevision;
+    if (!off) return;
+    off.then((sent) => {
+      if (!sent) return;
+      setTimeout(() => {
+        if (!state.connected || state.tuner.open || dev.muteInputRevision !== revision) return;
+        writeMonitorSetting('muteInput', true);
+      }, 100);
+    });
+  }
   // Varint that stays exact past 2^31 (the Unix time is close to it).
   const varint = (n) => { const out = []; n = Math.max(0, Math.floor(n)); while (n > 127) { out.push((n % 128) | 128); n = Math.floor(n / 128); } out.push(n); return out; };
   // A typed frame whose body may pass 255 bytes: bit 0 of the flags byte is the length's ninth bit.
@@ -3254,10 +4737,21 @@
   function readDevice() {
     if (!state.connected) return;
     dev.reading = true;
-    writeC304('Read device settings', buildFrame([0x08, 0x03], DEV_MSG.SETTINGS_REQ));
+    requestDeviceSettings();
     writeC304('Read device info', buildFrame([0x08, 0x03, 0x18, ...varint(Date.now() / 1000)], DEV_MSG.INFO_REQ));
     writeC304('Keep-alive', buildFrame([0x08, 0x03], DEV_MSG.ALIVE_REQ));
     if (dev.redraw) dev.redraw();
+  }
+  function requestDeviceSettings() {
+    if (!state.connected) return;
+    writeC304('Read device settings', buildFrame([0x08, 0x03], DEV_MSG.SETTINGS_REQ));
+  }
+  function requestMonitorRead() {
+    clearTimeout(dev.monitorReadTimer);
+    dev.monitorReadTimer = setTimeout(() => {
+      dev.monitorReadTimer = null;
+      requestDeviceSettings();
+    }, 20);
   }
   // One write carries both values, like the app: the one not being changed is resent as it is.
   // Coalesced while a slider is dragged (only the latest queued write goes out).
@@ -3270,6 +4764,38 @@
     Object.assign(s, { brightness: b, usbDb: db });
     writeC304('Device settings: LED brightness ' + b + ', USB playback ' + db.toFixed(1) + ' dB',
       buildFrame([0x08, 0x01, 0x20, ...varint(b), 0x75, ...float32LE(db)], DEV_MSG.SET), 'device-settings');
+  }
+
+  // Monitoring writes are deliberately independent of the brightness/USB write coalescer:
+  // each click is a complete, ordered command and never waits for a pedal reply.
+  function writeMonitorSetting(key, value) {
+    const spec = DEV_MONITOR[key], s = dev.settings;
+    if (!state.connected || !s || !spec) return;
+    if (key === 'muteInput') dev.muteInputRevision++;
+    const previous = Boolean(s[key]);
+    const prior = dev.monitorPending[key];
+    const seq = (prior ? prior.seq : 0) + 1;
+    const pending = { key, value: Boolean(value), previous, seq };
+    dev.monitorPending[key] = pending;
+    s[key] = pending.value;
+    const frame = buildFrame([0x08, 0x01, spec.tag, pending.value ? 1 : 0], DEV_MSG.SET);
+    const ack = { ...pending, sent: false };
+    dev.monitorAcks.push(ack);
+    const writePromise = writeC304('Device monitoring: ' + spec.label + ' ' + (pending.value ? 'ON' : 'OFF'), frame);
+    writePromise.then((ok) => {
+      ack.sent = ok;
+      if (!ok) {
+        const i = dev.monitorAcks.indexOf(ack);
+        if (i >= 0) dev.monitorAcks.splice(i, 1);
+      }
+      if (ok || dev.monitorPending[key] !== pending) return;
+      delete dev.monitorPending[key];
+      s[key] = previous;
+      if (key === 'muteInput') renderMuteButton();
+      if (dev.redraw) dev.redraw();
+    });
+    if (key === 'muteInput') renderMuteButton();
+    return writePromise;
   }
 
   function onDeviceInfo(d) {
@@ -3288,20 +4814,53 @@
       const v = x.wire === 0 ? String(x.value) : x.wire === 5 ? String(Math.round(pf.f32(f, n) * 100) / 100) : x.wire === 2 ? JSON.stringify(pf.str(f, n)) : hex(x.raw);
       return n + '=' + v;
     });
-    // Protobuf leaves out zeros, so an absent field reads 0.
-    dev.settings = { name: pf.str(f, 5), brightness: pf.int(f, 6) || 0, usbDb: pf.f32(f, 17) || 0, raw };
-    log('Device settings: "' + dev.settings.name + '", LED brightness ' + dev.settings.brightness + ', USB playback ' + dev.settings.usbDb.toFixed(1) + ' dB');
+    // Protobuf leaves out zeros, so an absent field reads 0. A pending local
+    // write wins over an older unsolicited/readback report until its value is seen.
+    const next = { name: pf.str(f, 5), brightness: pf.int(f, 6) || 0, usbDb: pf.f32(f, 17) || 0, raw };
+    for (const [key, spec] of Object.entries(DEV_MONITOR)) {
+      const reported = Boolean(pf.int(f, spec.readField) || 0);
+      const pending = dev.monitorPending[key];
+      if (pending && reported !== pending.value) next[key] = pending.value;
+      else {
+        next[key] = reported;
+        if (pending) delete dev.monitorPending[key];
+      }
+    }
+    dev.settings = next;
+    renderMuteButton();
+    log('Device settings: "' + dev.settings.name + '", LED brightness ' + dev.settings.brightness + ', USB playback ' + dev.settings.usbDb.toFixed(1) + ' dB, input mute ' + (dev.settings.muteInput ? 'on' : 'off') + ', output mute ' + (dev.settings.muteOutput ? 'on' : 'off'));
     dev.reading = !dev.info;
     if (dev.redraw) dev.redraw();
   }
   function onAlive(d) {
     const f = bodyOf(d);
     dev.alive = { firmware: pf.str(f, 5), serial: pf.str(f, 6), name: pf.str(f, 7) };
+    if (ui.previewing || irAudition.active) {
+      const accepted = Boolean(f[3] && f[3][0] && f[3][0].value === 1);
+      log('Live preview keep-alive ' + (accepted ? 'acknowledged.' : 'was not accepted.'));
+    }
     if (dev.redraw) dev.redraw();
   }
   function onSettingsAck(d) {
     const ok = pf.int(bodyOf(d), 3) === 1;
     log('Device settings ' + (ok ? 'confirmed' : 'REFUSED: ' + hex(d)));
+    const ack = dev.monitorAcks[0];
+    // A type-68 has no setting discriminator. Do not consume a monitoring
+    // record until its own queued write has completed; this keeps an earlier
+    // brightness/USB ACK from being mistaken for a mute ACK.
+    if (!ack || !ack.sent) return;
+    dev.monitorAcks.shift();
+    const pending = dev.monitorPending[ack.key];
+    if (!ok) {
+      if (pending && pending.seq === ack.seq) {
+        delete dev.monitorPending[ack.key];
+        if (dev.settings) dev.settings[ack.key] = ack.previous;
+        if (ack.key === 'muteInput') renderMuteButton();
+        if (dev.redraw) dev.redraw();
+      }
+      return;
+    }
+    requestMonitorRead();
   }
   function onCaptureDetails(d) {
     const f = bodyOf(d);
@@ -3387,10 +4946,12 @@
       usbNum.addEventListener('change', typed);
       usbNum.addEventListener('focus', () => usbNum.select());
       usbNum.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); typed(); usbNum.select(); } });
+      const muteInput = toggleSwitch('dev-mute-input', 'Mute Input', !!(s && s.muteInput), (v) => writeMonitorSetting('muteInput', v), !can);
+      const muteOutput = toggleSwitch('dev-mute-output', 'Mute Outputs 1L/2R', !!(s && s.muteOutput), (v) => writeMonitorSetting('muteOutput', v), !can);
       const again = el('button', { class: 'btn small', dataset: { fk: 'dev-read' }, disabled: on ? null : 'true', onclick: () => readDevice() }, 'Read again');
       const raw = el('details', { class: 'dev-raw', dataset: { fk: 'dev-raw' } }, el('summary', { text: 'Raw settings' }),
         el('p', { class: 'set-note', text: s ? '66: ' + s.raw.join('  ') : 'Not read yet.' }),
-        el('p', { class: 'set-note', text: 'Read only. These fields are not mapped to settings yet.' }));
+        el('p', { class: 'set-note', text: 'Read only. Other fields are not mapped to settings yet.' }));
       const setting = (title, note, ...ctl) => el('div', { class: 'dev-setting' },
         el('div', { class: 'dev-text' }, el('div', { class: 'dev-title', text: title }), el('div', { class: 'dev-note', text: note })),
         el('div', { class: 'dev-ctl' }, ...ctl));
@@ -3405,6 +4966,10 @@
         el('section', {},
           setting('LED brightness', 'The pedal’s LEDs. The manual’s default is 60%.', bri, briVal),
           setting('USB playback volume', 'Audio from the computer over USB. Default −6.0 dB.', usb, usbNum, el('span', { class: 'set-unit', text: 'dB' }))),
+        el('section', {},
+          el('h3', { text: 'Monitoring' }),
+          setting('Mute Guitar Input', DEV_MONITOR.muteInput.note, muteInput),
+          setting('Mute Guitar Output', DEV_MONITOR.muteOutput.note, muteOutput)),
         el('section', { class: 'dev-only' }, raw),
         el('div', { class: 'dev-foot' }, setNote('Global settings: they apply on the pedal right away, not per preset.'), again)].filter(Boolean));
     };
@@ -3709,6 +5274,15 @@
   $('supportBtn').addEventListener('click', () => openLink(LINKS.support));
   $('renameBtn').addEventListener('click', doRename);
   $('tunerBtn').addEventListener('click', toggleTuner);
+  $('muteBtn').addEventListener('click', () => {
+    if (!state.connected || !dev.settings) return;
+    writeMonitorSetting('muteInput', !dev.settings.muteInput);
+  });
+  $('chain').addEventListener('pointerdown', onStagePointerDown);
+  $('chain').addEventListener('click', onStageClick, true);
+  $('chain').addEventListener('contextmenu', onStageContextMenu, true);
+  $('inspector').addEventListener('pointerdown', onInspectorPointerDown);
+  $('inspector').addEventListener('click', onInspectorClick, true);
   $('presetFilter').addEventListener('input', (e) => { ui.filter = e.target.value; renderSide(); });
   $('presetFilter').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -3757,6 +5331,22 @@
     const FULL_IR = (n) => 'Factory/' + IRS[n - 1].split('/')[1] + '/' + IR_NAME(n);
 
     const saved = new Map(); // preset -> snapshot JSON
+    // Which of the demo's sounds each preset slot holds (a preset move reorders them).
+    const origin = Array.from({ length: 64 }, (_, i) => i + 1);
+    const moved = { names: null, current: 0 };   // what the next metadata / state read reports after a move
+    function movePresets(from, to) {
+      if (!(from >= 0 && from < 64 && to >= 0 && to < 64) || from === to) return;
+      const after = (i) => (i === from ? to : from < to && i > from && i <= to ? i - 1 : from > to && i >= to && i < from ? i + 1 : i);
+      const remap = (map) => { const out = new Map(); for (const [n, v] of map) out.set(after(n - 1) + 1, v); map.clear(); for (const [n, v] of out) map.set(n, v); };
+      const names = Array.from({ length: 64 }, (_, i) => presetName(i + 1));
+      const o = origin.slice();
+      const nextNames = [];
+      for (let i = 0; i < 64; i++) { nextNames[after(i)] = names[i]; origin[after(i)] = o[i]; }
+      [saved, expSaved, expLive].forEach(remap);
+      FS_FIELDS.forEach(([key]) => { fsSlots[key] = after(fsSlots[key]); });
+      moved.names = nextNames;
+      moved.current = after(state.selectedPreset - 1) + 1;
+    }
     // The (demo) pedal's footswitch slots, 0-based preset indices; reported in the state dump as fields 14/15/38/39.
     const fsSlots = { a1: 0, b1: 2, a2: 6, b2: 14 };
     const FS_FIELDS = [['a1', 5], ['b1', 6], ['a2', 7], ['b2', 8]];
@@ -3832,8 +5422,36 @@
     const reply = (frame) => setTimeout(() => handleTypedMessage(frame), 30);
     const notify = (frame) => setTimeout(() => window.onC305({ target: { value: { buffer: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) } } }), 30);
     const reassemble = NanoTransfer.makeReassembler();
+    const hooks = {};   // test hooks (window.__demo.hooks): refuseStop, dropStateReads, quiet115, writeDelay
+    const firstField = (fields, n) => fields[n] && fields[n][0];
+    const textField = (fields, n) => {
+      const x = firstField(fields, n);
+      return x && x.wire === 2 ? new TextDecoder().decode(Uint8Array.from(x.raw)) : '';
+    };
+    const previewReply = (body) => {
+      const f = parseProtoFields(body);
+      const object = firstField(f, 5);
+      const objectFields = object && object.wire === 2 ? parseProtoFields(object.raw) : {};
+      const record = firstField(objectFields, 2);
+      const recordFields = record && record.wire === 2 ? parseProtoFields(record.raw) : {};
+      const name = textField(recordFields, 2) || 'Demo preview';
+      const hash = textField(recordFields, 1);
+      const enc = (s) => Array.from(new TextEncoder().encode(s));
+      const replyRecord = [0x12, enc(name).length, ...enc(name), 0x1A, enc(hash).length, ...enc(hash)];
+      notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, replyRecord.length, ...replyRecord], NanoTransfer.MSG_PREVIEW_CAPTURE_REPLY));
+    };
+    // 15 { 3: { 1: WAV, 2: MD5 }, 4: product id, 5: file name } → 16 { 1: 6, 3: 1, 4: { 1: index, 2: name } }
+    const irDownloadReply = (body) => {
+      const f = parseProtoFields(body);
+      const name = textField(f, 5).replace(/\.wav$/i, '') || 'Cloud IR';
+      const index = LIB.irUser.length;
+      LIB.irUser.push({ index, name });
+      const enc = Array.from(new TextEncoder().encode(name));
+      const record = [0x08, index, 0x12, enc.length, ...enc];
+      notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, record.length, ...record], NanoTransfer.MSG_DOWNLOAD_IR_REPLY));
+    };
     function onWrite(bytes) {
-      // Streamed (multi-write) messages: only capture uploads so far.
+      // Streamed (multi-write) messages: capture uploads and live previews.
       if (bytes.length >= 2 && (bytes[1] & 0xC0) !== 0xC0) {
         const whole = reassemble(bytes);
         if (!whole) return;
@@ -3848,13 +5466,34 @@
           const enc = (s) => Array.from(new TextEncoder().encode(s));
           const record = [0x08, index, 0x12, enc(name).length, ...enc(name), 0x1A, enc(hash).length, ...enc(hash)];
           notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, record.length, ...record], NanoTransfer.MSG_UPLOAD_CAPTURE_REPLY));
-        }
+        } else if (t === NanoTransfer.MSG_PREVIEW_CAPTURE) previewReply(whole.slice(0, whole.length - 4));
+        else if (t === NanoTransfer.MSG_DOWNLOAD_IR) irDownloadReply(Array.from(whole.slice(0, whole.length - 4)));
         return;
       }
       const type = frameType(bytes);
       // State and metadata reads get no reply here; pretend they completed so the
       // core's "one read at a time" guard doesn't block later requests.
       if (state.stateMode === 'current' || state.stateMode === 'metadata') setTimeout(() => { if (state.stateMode !== 'library') state.stateMode = 'idle'; }, 20);
+      // A current-state read (1 {1:3 3:1 4:1 5:1}) completes like the core's parse would end it: the preset load is
+      // over and the read counts (pro/live-sync.js). Test hook: hooks.dropStateReads leaves it unanswered.
+      if (type === 1 && bytes[4] === 0x18 && bytes[5] === 0x01 && !hooks.dropStateReads) {
+        setTimeout(() => {
+          if (state.stateMode === 'current') state.stateMode = 'idle';
+          state.protocol.presetLoad = false;
+          if (moved.current) { state.selectedPreset = moved.current; moved.current = 0; applyStateDump(); }   // field 13 and the footswitches
+          NanoLive.noteStateRead();
+          render();
+        }, 20);
+      }
+      // The metadata read (1 {1:3}): the preset list as the pedal now has it (after a move: in the new order).
+      if (type === 1 && bytes.length === 8 && bytes[4] === 0x01) {
+        setTimeout(() => {
+          if (moved.names) { moved.names.forEach((name, i) => state.presetNames.set(i + 1, name)); moved.names = null; }
+          Object.assign(state.protocol, { feSyncComplete: true, metadataLoaded: true });
+          if (state.stateMode === 'metadata') state.stateMode = 'idle';
+          render();
+        }, 20);
+      }
       if (type === MSG.SetPresetSlotsRequest) {
         // Field 4 = -1 (parsed as a huge number): a footswitch assignment, not a preset change. Keep the slots
         // the next state dump reports, and ack like the pedal did in the trace (31, then 30 via onC305).
@@ -3875,6 +5514,14 @@
         else notify(buildFrame([0x08, 0x01, 0x18, 0x01, 0x2D, ...float32LE(tempoRun)], TEMPO_MSG));   // the echo
       }
       else if (type === MSG.RenamePresetRequest) reply(buildFrame([0x20, 0x01], MSG.RenamePresetResponse));
+      else if (type === MSG_PRESET_MOVE) {
+        // 143 { 1: 4, 3: from, 4: to } → 144 { 1: 6, 3: from, 4: to, 5: 1 }: the demo pedal moves the preset (and what
+        // it stores for it) by insertion; its current preset and footswitches follow the presets.
+        const f = framePayloadFields(bytes);
+        const from = f[3] ? f[3][0].value : 0, to = f[4] ? f[4][0].value : 0;
+        movePresets(from, to);
+        notify(buildFrame([0x08, 0x06, 0x18, from, 0x20, to, 0x28, 0x01], MSG_PRESET_MOVE_REPLY));
+      }
       else if (type === 50) { const idx = bytes[5]; notify(buildFrame([0x08, 0x01], 31)); notify(buildFrame([0x08, 0x06, 0x18, idx, 0x20, 0x01], 51)); }   // via onC305, where the delete ack is read
       else if (type === MSG.RetrieveExpAssignmentsRequest) {
         // 60 {1:3 3:index} → 64 {1:1 3:2} (meaning unknown, seen in the trace) and 61 {1:1, records at field − 1}.
@@ -3891,6 +5538,22 @@
         const dirty = JSON.stringify(recs) !== JSON.stringify(expSaved.get(n) || []);
         reply(buildFrame(dirty ? [0x08, 0x01, 0x18, 0x01] : [0x08, 0x01], MSG.PresetDirtyStateChanged));
       }
+      else if ([26, 28, 31, 94, 99, 136].includes(type)) {
+        // Demo writes model the pedal: edit writes become dirty only through
+        // the simulated pedal's authoritative type-115 report (test hook: hooks.quiet115 leaves it out).
+        if (!hooks.quiet115) notify(buildFrame([0x08, 0x01, 0x18, 0x01], MSG.PresetDirtyStateChanged));
+      }
+      else if (type === NanoLive.MSG.DeleteLibraryIRRequest) {
+        const f = framePayloadFields(bytes);
+        const record = f[4] && f[4][0] ? parseProtoFields(f[4][0].raw) : {};
+        const index = record[1] && record[1][0] ? record[1][0].value : -1;
+        const removed = LIB.irUser.some(item => item.index === index);
+        if (removed) {
+          LIB.irUser = LIB.irUser.filter(item => item.index !== index);
+          LIB.irUser.forEach((item, nextIndex) => { item.index = nextIndex; });
+        }
+        notify(buildFrame([0x08, 0x06, 0x18, removed ? 0x01 : 0x00], NanoLive.MSG.DeleteLibraryIRResponse));
+      }
       else if (type === MSG.SetCaptureSlotContentRequest) reply(buildFrame([0x18, 0x01], MSG.SetCaptureSlotContentResponse));
       else if (type === MSG.SetCabinetSlotContentRequest) reply(buildFrame([0x18, 0x01], MSG.SetCabinetSlotContentResponse));
       else if (type === MSG.RetrieveLibraryContentRequest) {
@@ -3900,13 +5563,32 @@
       } else if (type === MSG.TunerMode) {
         const f = framePayloadFields(bytes);
         tunerDemo(Boolean(f[4] && f[4][0] && f[4][0].value));
+      } else if (type === NanoTransfer.MSG_PREVIEW_CAPTURE) {
+        previewReply(Array.from(bytes.slice(2, bytes.length - 4)));
+      } else if (type === NanoTransfer.MSG_DOWNLOAD_IR) {
+        irDownloadReply(Array.from(bytes.slice(2, bytes.length - 4)));
+      } else if (type === NanoTransfer.MSG_PREVIEW_STOP) {
+        // 148 { 2: transaction, 3 or 4: 0 } → 149 { 1: 1, 2: transaction, 3: 1 }. Test hook: answer a refusal (status 0).
+        const f = framePayloadFields(bytes);
+        const tx = f[2] && f[2][0] ? f[2][0].value : 0;
+        notify(buildFrame([0x08, 0x01, 0x10, ...varint(tx), 0x18, hooks.refuseStop ? 0x00 : 0x01], NanoTransfer.MSG_PREVIEW_STOP_REPLY));
+      } else if (type === MSG_IR_PREVIEW) {
+        // 158 { 3 or 4: { 1: index, 2: name }, 8: 1 } → 159 { 1: 6, 3: 1, 4: { 2: name } } when the item exists.
+        const f = framePayloadFields(bytes);
+        const rec = f[3] ? f[3][0] : f[4] ? f[4][0] : null;
+        const r = rec ? parseProtoFields(rec.raw) : {};
+        const list = f[3] ? LIB.irFactory : LIB.irUser;
+        const name = textField(r, 2);
+        const ok = list.some(x => x.index === (r[1] ? r[1][0].value : 0) && sameName(x.name, name));
+        const enc = Array.from(new TextEncoder().encode(name));
+        notify(buildFrame([0x08, 0x06, 0x18, ok ? 0x01 : 0x00, 0x22, enc.length + 2, 0x12, enc.length, ...enc], MSG_IR_PREVIEW_REPLY));
       } else if (type === DEV_MSG.ALIVE_REQ || type === DEV_MSG.INFO_REQ || type === DEV_MSG.SETTINGS_REQ || type === DEV_MSG.SET || type === DEV_MSG.CAPTURE_REQ) {
         notify(deviceReply(type, framePayloadFields(bytes)));
       }
     }
 
     // Device page and capture info, answered the way the pedal did in the 2026-10-09 trace.
-    const devStore = { brightness: 153, usbDb: -6 };
+    const devStore = { brightness: 153, usbDb: -6, muteInput: false, muteOutput: false };
     const pbStr = (field, text) => { const b = Array.from(new TextEncoder().encode(text)); return [(field << 3) | 2, ...varint(b.length), ...b]; };
     const pbSub = (field, b) => [(field << 3) | 2, ...varint(b.length), ...b];
     const fakeHash = (seed, n) => Array.from({ length: n }, (_, k) => ((seed * 31 + k * 7 + 3) % 16).toString(16)).join('');
@@ -3922,11 +5604,15 @@
       if (type === DEV_MSG.SET) {
         if (f[4]) devStore.brightness = int(4);
         if (f[14] && f[14][0].wire === 5) devStore.usbDb = new DataView(Uint8Array.from(f[14][0].raw).buffer).getFloat32(0, true);
+        if (f[12]) devStore.muteInput = int(12) !== 0;
+        if (f[13]) devStore.muteOutput = int(13) !== 0;
         return longFrame([0x08, 0x01, 0x18, 0x01], DEV_MSG.SET_ACK);
       }
       if (type === DEV_MSG.SETTINGS_REQ) {
         return longFrame([0x08, 0x01, 0x18, 0x01, ...pbStr(5, 'Neural DSP Nano Cortex'), 0x30, ...varint(devStore.brightness), 0x38, 0x01, 0x40, 0x01,
-          0x58, 0x00, 0x60, 0x01, 0x68, 0x81, 0x01, 0x70, 0x01, 0x8D, 0x01, ...float32LE(devStore.usbDb)], DEV_MSG.SETTINGS);
+          0x58, 0x00, 0x60, 0x01, 0x68, 0x81, 0x01, 0x70, 0x01,
+          ...(devStore.muteInput ? [0x78, 0x01] : []), ...(devStore.muteOutput ? [0x80, 0x01] : []),
+          0x8D, 0x01, ...float32LE(devStore.usbDb)], DEV_MSG.SETTINGS);
       }
       // 17 → 18: the slot's capture, with the library's author and kind when the library has it by name.
       const slot = int(3) + 1;
@@ -3944,6 +5630,10 @@
       return longFrame([0x08, 0x06, 0x18, 0x01, ...pbSub(7, by), ...pbStr(8, 'Demo capture in slot ' + slot + '.'), ...pbStr(9, hash), ...pbStr(10, name),
         ...pbSub(11, record)], DEV_MSG.CAPTURE);
     }
+    window.__devDemo = {
+      store: devStore,
+      emitSettings: () => window.handleTypedMessage(deviceReply(DEV_MSG.SETTINGS_REQ, {})),
+    };
     let tunerTimer = null;
     function tunerDemo(on) {
       clearInterval(tunerTimer); tunerTimer = null;
@@ -4029,12 +5719,13 @@
     }
     function load(n) {
       if (!running) return;
-      if (saved.has(n)) applySnapshot(saved.get(n)); else if (n <= 24) fromPreset(n); else blank();
+      if (saved.has(n)) applySnapshot(saved.get(n)); else if (origin[n - 1] <= 24) fromPreset(origin[n - 1]); else blank();
       reportFxModels();
       applyStateDump();
       emitTempo();
       expLive.delete(n);   // a (re)load drops unsaved expression edits, like every other edit
       state.presetDirty = false;   // and the pedal reports the freshly loaded preset clean
+      beginExpressionBoundary();
       render();
       followExp(true);
     }
@@ -4051,7 +5742,8 @@
       for (let i = 1; i <= 64; i++) state.presetNames.set(i, i <= 24 ? PRESETS[(i - 1) % PRESETS.length].name + (i > 10 ? ' ' + Math.ceil(i / 10) : '') : 'Empty');
       CAPTURES.forEach((c, i) => state.captureNames.set(i + 1, c));
       IRS.forEach((_, i) => state.irNames.set(i + 1, IR_NAME(i + 1)));
-      state.c304 = { writeValueWithResponse: async (bytes) => onWrite(bytes) };
+      // Test hook: hooks.writeDelay (ms) keeps each write in flight that long.
+      state.c304 = { writeValueWithResponse: async (bytes) => { onWrite(bytes); if (hooks.writeDelay) await new Promise(r => setTimeout(r, hooks.writeDelay)); } };
       state.firmware = DEMO_FW;
       origWait = window.waitForPresetState;
       window.waitForPresetState = async () => true; // no state read-back without a pedal
@@ -4064,7 +5756,8 @@
       emitTempo();
       followExp(true);
       window.log('Demo mode: writes are logged here but not sent anywhere.');
-      ui.dirty = false;
+      state.presetDirty = false;
+      beginExpressionBoundary();
       toast('Demo data loaded. Nothing is sent to a pedal.');
       render();
       scrollPresetIntoView();
@@ -4079,13 +5772,14 @@
       state.library = { factory: [], user: [], irFactory: [], irUser: [], loaded: false, requested: false };
       state.presetNames.clear(); state.captureNames.clear(); state.irNames.clear();
       blank();
-      ui.dirty = false;
+      state.presetDirty = false;
+      beginExpressionBoundary();
       window.setStatus('Disconnected');
       render();
     }
     const store = (n) => { saved.set(n, snapshot()); expSaved.set(n, expOf(state.selectedPreset)); expLive.delete(n); };
     const erase = (n) => { saved.delete(n); expSaved.delete(n); expLive.delete(n); state.presetNames.set(n, 'Empty'); };
-    return { start, stop, load, store, erase, pickCapture, pickIR, stateDump, get running() { return running; }, get tempo() { return { buf: tempoBuf, run: tempoRun }; } };
+    return { start, stop, load, store, erase, pickCapture, pickIR, stateDump, hooks, get running() { return running; }, get tempo() { return { buf: tempoBuf, run: tempoRun }; } };
   })();
   window.__demo = demo;
 
@@ -4098,6 +5792,11 @@
   if (devTools && pref.get('drawerAtLaunch', false)) toggleDrawer();
   if (shellBridge) shellBridge.setAccent(pref.get('accent', ACCENTS[0].hex), pref.get('dockFollowsAccent', true)).catch(() => {});
   if (shellBridge && shellBridge.setDevTools) shellBridge.setDevTools(devTools).catch(() => {});   // the menu follows the page's setting
+  // A freshly (re)loaded editor runs no preview: tell the Cloud toolbar, which may still show Stop Preview.
+  pushPreviewState();
+  // Outermost notification handler (installed last; connectAll() attaches whatever window.onC305 is): every layer
+  // below, upstream's included, gets a value whose buffer holds exactly the notification.
+  window.onC305 = NanoLive.withExactBytes(window.onC305);
   const startDemo = !navigator.bluetooth || window.__FORCE_DEMO || /[?&]demo\b/.test(location.search);
   // Reconnect at launch: the shell grants the user gesture requestDevice() needs and picks the remembered pedal.
   window.__autoConnect = () => { window.__autoConnect = null; ble.next = { auto: true }; return doConnect(); };

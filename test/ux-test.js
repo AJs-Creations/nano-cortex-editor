@@ -76,6 +76,31 @@ async function click(sel, opts = {}) {
   wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: opts.count || 1 });
   await sleep(40); await frame();
 }
+async function clickWhileReceiving(sel, receive) {
+  const b = await box(sel);
+  const x = Math.round(b.x), y = Math.round(b.y);
+  wc.sendInputEvent({ type: 'mouseMove', x, y });
+  wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  // Deliver the report before the demo write can finish and release the
+  // optimistic target; the redraw itself is allowed to happen while pressed.
+  await receive();
+  await sleep(35); await frame();
+  wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+  await sleep(40); await frame();
+}
+async function rightClickWhileReceiving(sel, receive) {
+  const b = await box(sel);
+  const x = Math.round(b.x), y = Math.round(b.y);
+  wc.sendInputEvent({ type: 'mouseMove', x, y });
+  wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'right', clickCount: 1 });
+  await receive();
+  await sleep(35); await frame();
+  wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'right', clickCount: 1 });
+  const afterRelease = await js('!!document.querySelector(".ctx")');
+  await sleep(40); await frame();
+  const afterWait = await js('!!document.querySelector(".ctx")');
+  return { afterRelease, afterWait };
+}
 async function rightClick(sel) {
   const b = await box(sel);
   const x = Math.round(b.x), y = Math.round(b.y);
@@ -89,7 +114,7 @@ async function dblclick(sel) {
   await click(sel, { count: 1 });
   await click(sel, { count: 2 });
 }
-async function drag(sel, dy, modifiers = []) {
+async function drag(sel, dy, modifiers = [], beforeUp = null) {
   const b = await box(sel);
   const x = Math.round(b.x), y = Math.round(b.y);
   if (!(await hitOk(sel, x, y))) check('drag target not obscured: ' + sel, false, 'something else is on top');
@@ -100,6 +125,7 @@ async function drag(sel, dy, modifiers = []) {
     wc.sendInputEvent({ type: 'mouseMove', x, y: Math.round(y - (dy * i) / steps), modifiers, button: 'left' });
     await sleep(12);
   }
+  if (beforeUp) await beforeUp();
   wc.sendInputEvent({ type: 'mouseUp', x, y: Math.round(y - dy), button: 'left', clickCount: 1 });
   await sleep(60); await frame();
 }
@@ -162,6 +188,11 @@ async function reloadPage() {
   wc.reload();
   await loaded; await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle(); await frame();
 }
+// A typed frame as the Activity log prints it: [len] C0 [payload] [u32 LE type].
+const hexBytes = (bytes) => bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+const frameHex = (payload, type) => { const f = [0, 0xC0, ...payload, type & 255, (type >> 8) & 255, 0, 0]; f[0] = f.length - 2; return hexBytes(f); };
+const utf8 = (text) => [...Buffer.from(text, 'utf8')];
+const toastText = () => js('document.getElementById("toast").textContent');
 // Computed colours come back as rgb(…) or, for color-mix(), as color(srgb r g b) in 0..1.
 const rgbOf = (css) => {
   let m = /^rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/.exec(css || '');
@@ -207,7 +238,7 @@ async function run() {
   await dblclick('[data-fk="amp-gain"] svg');
   await txWait(dn);
   check('dev tools off: the log is still kept, the status bar shows no "Sent: …"', /^Sent: /.test(await js('__ui.lastAction')) && (await js('document.getElementById("lastAction").textContent')) === '' && (await txSince(dn)).length >= 1, await js('document.getElementById("lastAction").textContent'));
-  await js('__ui.dirty = false; render(); document.activeElement.blur()'); await frame();
+  await js('state.presetDirty = false; render(); document.activeElement.blur()'); await frame();
   await key('?'); await waitFor('!!document.querySelector(".modal .keys")');
   check('dev tools off: the shortcuts sheet has no ⌘L or Record row', await js('!!document.querySelector(".modal .keys") && ![...document.querySelectorAll(".modal .keys kbd")].some(k => /^(⌘|Ctrl\\+)L$/.test(k.textContent) || k.textContent === "Record")'));
   await key('Escape');
@@ -274,15 +305,21 @@ async function run() {
   await dblclick('[data-fk="amp-gain"] svg');
   check('double-click resets Gain to 50%', (await js('state.amp.gain')) === 128, String(await js('state.amp.gain')));
   check('reset is sent', (await txWait(n0, tx => tx.some(t => /Amp gain = 128/.test(t)))).some(t => /Amp gain = 128/.test(t)));
-  await js('__ui.dirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
 
   n0 = await mark();
   const gain0 = await js('state.amp.gain');
-  await drag('[data-fk="amp-gain"] svg', 40);
+  await drag('[data-fk="amp-gain"] svg', 40, [], async () => {
+    const live = await waitFor(async () => (await txSince(n0)).some(t => /Amp gain/.test(t)));
+    check('drag sends Gain while the pointer is held', live && (await txSince(n0)).some(t => /Amp gain/.test(t)), JSON.stringify(await txSince(n0)));
+    await js('window.__activeKnob = document.querySelector("[data-fk=amp-gain]"); render()');
+    await frame();
+    check('a readback render waits for the active knob drag', await js('window.__activeKnob === document.querySelector("[data-fk=amp-gain]") && __ui.knobDragging'));
+  });
   const gain1 = await js('state.amp.gain');
   check('dragging Gain up raises it', gain1 > gain0, gain0 + ' → ' + gain1);
   let tx = await txWait(n0);
-  check('drag sends exactly one amp write on release', tx.length === 1 && /Amp gain/.test(tx[0]), JSON.stringify(tx));
+  check('drag sends the final Gain value', tx.some(t => t.includes('Amp gain = ' + gain1 + ':')), JSON.stringify(tx));
   check('edit marks preset dirty', await js('!document.getElementById("dirtyMark").hidden && getComputedStyle(document.getElementById("dirtyMark")).display !== "none"'));
   check('Save button highlights when dirty', await js('document.getElementById("saveBtn").classList.contains("primary")'));
 
@@ -299,16 +336,14 @@ async function run() {
   await settle();
   check('1px wobble is ignored (no write)', (await txSince(n0)).length === 0);
 
-  // wheel: several ticks coalesce. The knob commits 160 ms after the last tick; the ticks go 20 ms apart,
-  // so a desktop Mac sends exactly one write, but a CI VM that stalls for more than 160 ms between two ticks
-  // legitimately commits twice. So: fewer writes than ticks, and the last write carries the final value.
+  // wheel: each changed value is sent live; the 160 ms quiet period only commits the UI edit.
   n0 = await mark();
   const v0 = await js('state.captureVolumeDb');
   await wheel('[data-fk="cap-vol"]', 100, 5); // +deltaY here = scroll up (verified)
   tx = await txWait(n0);
   const v1 = await js('state.captureVolumeDb');
   check('wheel up raises capture volume', v1 > v0, v0 + ' → ' + v1);
-  check('5 wheel ticks → debounced writes (fewer than the ticks, the last one with the final value)', tx.length >= 1 && tx.length < 5 && tx.every(t => /Capture volume/.test(t)) && tx[tx.length - 1].includes('Capture volume ' + v1.toFixed(1) + ' dB'), v1 + ' ' + JSON.stringify(tx));
+  check('5 wheel ticks → live writes with the final value', tx.length >= 1 && tx.every(t => /Capture volume/.test(t)) && tx[tx.length - 1].includes('Capture volume ' + v1.toFixed(1) + ' dB'), v1 + ' ' + JSON.stringify(tx));
 
   // keyboard on knob
   await click('[data-fk="amp-bass"] .label');
@@ -319,7 +354,230 @@ async function run() {
   const b1 = await js('state.amp.bass');
   check('arrow keys adjust focused knob', b1 > b0, b0 + ' → ' + b1);
   check('knob keeps focus after re-render', await js('document.activeElement && document.activeElement.dataset.fk === "amp-bass"'));
-  check('arrow keys send a debounced write', tx.length >= 1);
+  check('arrow keys send a live write', tx.length >= 1);
+
+  // ---------------------------------------------------------------- pedal-originated live parameter reports
+  const rxLiveParameter = (id, raw, omitId = false) => js(`(() => {
+    const value = ${raw};
+    const idField = ${omitId} ? [] : [0x18, ${id}];
+    const payload = [0x08, 0x01, ...idField, ...(value ? [0x20, ...encodeVarint(value)] : []), 0x30, 0x01];
+    const d = buildFrame(payload, 26);
+    window.onC305({ target: { value: { buffer: d.buffer } } });
+  })()`);
+  const ampBeforePedal = await js('({...state.amp})');
+  const capBeforePedal = await js('state.captureVolumeDb');
+  const gateBeforePedal = await js('state.gate.params[0].value');
+  const ampReports = [['gain', 0x00, 201, true], ['level', 0x01, 73], ['bass', 0x02, 182], ['mid', 0x03, 37], ['treble', 0x04, 224]];
+  for (const [key, id, raw, omitId] of ampReports) {
+    await rxLiveParameter(id, raw, omitId); await frame();
+    check('pedal report updates ' + key, (await js(`state.amp.${key}`)) === raw, String(await js(`state.amp.${key}`)));
+  }
+  await rxLiveParameter(0x00, 0, true); await frame();
+  check('pedal zero-gain report updates gain when both zero fields are omitted', await js('state.amp.gain === 0 && document.querySelector("[data-fk=amp-gain]").getAttribute("aria-valuenow") === "0"'));
+  check('pedal MID report redraws the active knob', await js('document.querySelector("[data-fk=amp-mid]").getAttribute("aria-valuenow") === "37" && document.querySelector("[data-fk=amp-mid] .val").textContent === "15%"'));
+  const capRaw = 191;
+  await rxLiveParameter(0x0A, capRaw); await frame();
+  check('pedal report updates capture volume', await js(`Math.abs(state.captureVolumeDb - (((${capRaw} - 128) / 127) * 12)) < 1e-9 && document.querySelector('[data-fk="cap-vol"] .val').textContent === '+6.0 dB'`));
+  await js('__ui.selected = "gate"; render()'); await frame();
+  await rxLiveParameter(0x0B, 158); await frame();
+  check('pedal report updates gate reduction', await js('state.gate.params[0].value === 50 && document.querySelector("[data-fk=gate-red] .val").textContent === "50%"'));
+
+  // Type 99 is the contextual FX parameter report: the block slot and
+  // parameter index identify any effect parameter, while field 5 carries the
+  // pedal's raw 0..255 value as a float32. Keep this test on a non-selected
+  // block so it also verifies that switching to that block later uses the
+  // value received from the pedal.
+  const rxFXParameter = (blockSlot, paramIndex, raw) => js(`(() => {
+    const payload = [0x08, 0x01, ...((${blockSlot}) ? [0x18, ${blockSlot}] : []), ...((${paramIndex}) ? [0x20, ${paramIndex}] : []), ...((${raw}) ? [0x2D, ...float32LE(${raw})] : [])];
+    const d = buildFrame(payload, 99);
+    window.onC305({ target: { value: { buffer: d.buffer } } });
+  })()`);
+  const rxFXEnable = (enableSlot, enabled, includeState = true) => js(`(() => {
+    const payload = [0x08, 0x01, 0x18, ${enableSlot}, ...(${includeState} ? [0x20, ${enabled ? 0 : 1}] : [])];
+    const d = buildFrame(payload, 31);
+    window.onC305({ target: { value: { buffer: d.buffer } } });
+  })()`);
+  const rxPresetDirty = (dirty = true) => js(`(() => {
+    const payload = [0x08, 0x01, ...(${dirty} ? [0x18, 0x01] : [])];
+    const d = buildFrame(payload, 115);
+    window.onC305({ target: { value: { buffer: d.buffer } } });
+  })()`);
+  const fxReportKeys = ['pre1', 'pre2', 'post1', 'post2', 'post3'];
+  const fxBeforePedal = await js(`JSON.stringify(Object.fromEntries(${JSON.stringify(fxReportKeys)}.map(key => [key, { model: state.blocks[key].model, on: state.blocks[key].on, params: state.blocks[key].params }])))`);
+  await js(`(() => {
+    const b = state.blocks.pre2;
+    const m = b.models.find(x => x.name === 'Green 808');
+    b.model = m.name;
+    b.params = structuredClone(m.params);
+    b.on = true;
+    __ui.selected = 'capture';
+    render();
+  })()`);
+  await frame();
+  await js(`(() => { for (const key of ${JSON.stringify(fxReportKeys)}) { const b = state.blocks[key]; const m = b.models.find(x => x.name !== 'None' && x.params && x.params.length); if (m && (!b.params || !b.params.length)) { b.model = m.name; b.params = structuredClone(m.params); } } render(); })()`);
+  await frame();
+  const fxReportRaw = [17, 51, 102, 153, 204];
+  for (let slot = 0; slot < fxReportKeys.length; slot++) {
+    const key = fxReportKeys[slot];
+    const raw = fxReportRaw[slot];
+    await rxFXParameter(slot, 0, raw); await frame();
+    const expected = await js(`normalizedToParamValue(state.blocks.${key}.params[0], ${raw} / 255)`);
+    check('pedal FX report updates ' + key + ' from slot ' + slot, await js(`state.blocks.${key}.params[0].value === ${expected}`), String(await js(`state.blocks.${key}.params[0].value`)));
+  }
+  await rxFXParameter(1, 0, 68); await frame();
+  check('pedal FX report updates a non-selected effect parameter', await js('state.blocks.pre2.params[0].value === 2.7 && __ui.selected === "capture"'), String(await js('state.blocks.pre2.params[0].value')));
+  await rxFXParameter(1, 1, 184); await frame();
+  const expectedFXParam1 = await js('normalizedToParamValue(state.blocks.pre2.params[1], 184 / 255)');
+  check('pedal FX report updates a non-zero parameter index', await js(`state.blocks.pre2.params[1].value === ${expectedFXParam1}`), String(await js('state.blocks.pre2.params[1].value')));
+  await js('__ui.selected = "pre2"; render()'); await frame();
+  check('opening the changed effect shows its pedal values', await js(`document.querySelector('[data-fk="p-pre2-0"]').getAttribute('aria-valuenow') === '2.7' && document.querySelector('[data-fk="p-pre2-1"]').getAttribute('aria-valuenow') === '${expectedFXParam1}'`));
+  n0 = await mark();
+  await rxFXParameter(1, 1, 196); await rxLiveParameter(0x06, 196); await frame(); await sleep(220);
+  tx = await txSince(n0);
+  check('FX parameter companion report does not trigger a full preset refresh', !tx.some(t => /^TX Current preset state request/.test(t)), JSON.stringify(tx));
+  await js('__ui.selected = "capture"; render()'); await frame();
+  n0 = await mark();
+  await rxFXEnable(5, false); await frame();
+  check('pedal FX bypass report updates the matching effect immediately', await js('state.blocks.pre2.on === false && !document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
+  await rxPresetDirty(true); await frame(); await sleep(220);
+  tx = await txSince(n0);
+  check('FX bypass dirty companion preserves the effective pedal state', await js('state.blocks.pre2.on === false && !document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
+  check('contextual FX bypass and dirty companion do not trigger a full preset refresh', !tx.some(t => /^TX Current preset state request/.test(t)), JSON.stringify(tx));
+  // A manual refresh is authoritative once no local bypass target is pending.
+  await js('window.applyFXEnabledStatesFromCurrentState({ 31: [{ wire: 2, raw: [0, 0, 0, 1, 1] }] }); render()');
+  await frame();
+  check('saved preset refresh restores the saved pedal bypass state', await js('state.blocks.pre2.on === true && document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
+  await rxFXEnable(5, true, false); await frame();
+  check('omitted bypass state defaults to enabled', await js('state.blocks.pre2.on === true && document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
+
+  n0 = await mark();
+  await js(`(() => {
+    const report = stateValue => {
+      const payload = [0x08, 0x01, 0x18, 0x05, 0x20, stateValue];
+      const d = buildFrame(payload, 31);
+      window.onC305({ target: { value: { buffer: d.buffer } } });
+    };
+    const toggle = () => document.querySelector('[data-stage=pre2] .stomp').click();
+    toggle();
+    report(0);
+    // A stale state report from the previous write can briefly put the
+    // canonical block back on. The next click must still invert the latest
+    // local target, not that stale value.
+    state.blocks.pre2.on = true;
+    toggle();
+    report(1);
+    toggle();
+  })()`);
+  await frame(); await settle();
+  const rapidBypassTx = (await txSince(n0)).filter(t => /^TX Pre FX 2 (OFF|ON)/.test(t)).map(t => t.match(/^TX Pre FX 2 (OFF|ON)/)[1]);
+  check('rapid off/on/off bypass clicks keep the visible state and writes', rapidBypassTx.join('|') === 'OFF|ON|OFF' && await js('state.blocks.pre2.on === false && document.querySelector("[data-stage=pre2] .stomp").getAttribute("aria-pressed") === "false" && __ui.pendingBypassTargets.size === 0'), JSON.stringify(rapidBypassTx));
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); render()'); await frame(); await settle();
+  n0 = await mark();
+  await clickWhileReceiving('[data-stage=pre2] .stomp', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  await settle();
+  const pressBypassTx = (await txSince(n0)).filter(t => /^TX Pre FX 2 (OFF|ON)/.test(t)).map(t => t.match(/^TX Pre FX 2 (OFF|ON)/)[1]);
+  const pressBypassState = await js('JSON.stringify({ on: state.blocks.pre2.on, aria: document.querySelector("[data-stage=pre2] .stomp").getAttribute("aria-pressed"), pending: __ui.pendingBypassTargets.size })');
+  check('a bypass click survives a redraw during mouse press', pressBypassTx.join('|') === 'OFF' && await js('state.blocks.pre2.on === false && document.querySelector("[data-stage=pre2] .stomp").getAttribute("aria-pressed") === "false"'), JSON.stringify({ tx: pressBypassTx, state: JSON.parse(pressBypassState) }));
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); __ui.selected = "capture"; render()'); await frame(); await settle();
+  await click('[data-stage=pre2] .stomp');
+  await clickWhileReceiving('[data-stage=post3]', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  check('selecting another chain node survives incoming bypass redraws', await js('__ui.selected === "post3"'), await js('__ui.selected'));
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); __ui.selected = "pre2"; render()'); await frame(); await settle();
+  const contextMenuTiming = await rightClickWhileReceiving('[data-fk=node-pre2]', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  check('chain context menu survives an incoming redraw during right-click', contextMenuTiming.afterRelease && contextMenuTiming.afterWait && await js('!!document.querySelector(".ctx")'), JSON.stringify(contextMenuTiming));
+  await key('Escape');
+  await rightClick('[data-stage=pre2] .stomp');
+  check('right-clicking a chain bypass opens the node menu', await js('!!document.querySelector(".ctx") && !!document.querySelector(".ctx-item")'));
+  await key('Escape');
+  await js('state.blocks.pre2.on = true; __ui.pendingBypassTargets.clear(); __ui.selected = "pre2"; render()'); await frame(); await settle();
+  n0 = await mark();
+  await clickWhileReceiving('.inspector .switch', async () => {
+    await rxFXEnable(5, true);
+    await rxFXEnable(5, true);
+  });
+  await settle();
+  const inspectorBypassTx = (await txSince(n0)).filter(t => /^TX Pre FX 2 (OFF|ON)/.test(t)).map(t => t.match(/^TX Pre FX 2 (OFF|ON)/)[1]);
+  check('inspector bypass click survives an incoming redraw', inspectorBypassTx.join('|') === 'OFF' && await js('state.blocks.pre2.on === false && document.querySelector("[data-fk=switch-pre2]").getAttribute("aria-checked") === "false"'), JSON.stringify(inspectorBypassTx));
+  await js(`const before = ${fxBeforePedal}; Object.entries(before).forEach(([key, value]) => Object.assign(state.blocks[key], value)); __ui.selected = "capture"; render()`);
+  await frame();
+
+  await js('__ui.selected = "capture"; render()'); await frame();
+  await js(`Object.assign(state.amp, ${JSON.stringify(ampBeforePedal)}); state.captureVolumeDb = ${capBeforePedal}; state.gate.params[0].value = ${gateBeforePedal}; render()`);
+  await frame();
+
+  n0 = await mark();
+  await js(`(() => { const d = buildFrame([0x08, 0x01], 31); for (let i = 0; i < 3; i++) window.onC305({ target: { value: { buffer: d.buffer } } }); })()`);
+  tx = await txWait(n0, tx => tx.some(t => /^TX Current preset state request/.test(t)));
+  check('pedal state changes trigger one coalesced full refresh', tx.filter(t => /^TX Current preset state request/.test(t)).length === 1, JSON.stringify(tx));
+
+  // Type 64 is the live expression-pedal position report. It must update the
+  // assigned amount and heel/toe bypass state without waiting for Refresh.
+  const pre1BeforeExpression = await js('JSON.stringify({ model: state.blocks.pre1.model, on: state.blocks.pre1.on, params: state.blocks.pre1.params })');
+  const expBeforeExpression = await js('JSON.stringify({ loaded: state.exp.loaded, preset: state.exp.preset, ranges: state.exp.ranges, bypass: state.exp.bypass })');
+  await js(`(() => {
+    const b = state.blocks.pre1;
+    const m = b.models.find(x => x.name === 'Transpose');
+    b.model = m.name;
+    b.params = structuredClone(m.params);
+    b.on = true;
+    state.exp.loaded = true;
+    state.exp.preset = state.selectedPreset;
+    state.exp.pending = null;
+    state.exp.ranges = { pre1: { on: true, inverted: false, min: 0, max: 100 } };
+    state.exp.bypass = { pre1: { on: true, mode: 'heelToe', inverted: false, delay: 600, latch: false } };
+    state.connected = false;
+    __ui.selected = 'capture';
+    render();
+  })()`);
+  await frame();
+  const rxExpressionPosition = raw => js(`(() => {
+    const payload = [0x08, 0x01, 0x18, 0x02, ...(${raw} ? [0x20, ...encodeVarint(${raw})] : [])];
+    window.onC305({ target: { value: { buffer: buildFrame(payload, 64).buffer } } });
+  })()`);
+  await rxExpressionPosition(0); await frame();
+  check('expression heel updates the assigned effect amount', await js('state.blocks.pre1.params[1].value === -12 && document.querySelector("[data-stage=pre1] .stomp").getAttribute("aria-pressed") === "false"'));
+  await rxExpressionPosition(255); await frame();
+  check('expression toe updates the assigned effect amount', await js('state.blocks.pre1.params[1].value === 12 && document.querySelector("[data-stage=pre1] .stomp").getAttribute("aria-pressed") === "true"'));
+  await js(`(() => {
+    Object.assign(state.blocks.pre1, ${pre1BeforeExpression});
+    Object.assign(state.exp, ${expBeforeExpression});
+    state.connected = true;
+    NanoLive.reset();
+    render();
+  })()`);
+  await frame();
+  // Only assigned FX blocks are read back while the pedal moves, and an Amount only moves on screen when its
+  // parameter is known (Mix, Amount, Transpose → Semitones); otherwise the read-back shows the real value.
+  const expSaved2 = await js('JSON.stringify({ loaded: state.exp.loaded, preset: state.exp.preset, ranges: state.exp.ranges, bypass: state.exp.bypass })');
+  const pre2Saved = await js('JSON.stringify({ model: state.blocks.pre2.model, on: state.blocks.pre2.on, params: state.blocks.pre2.params })');
+  await js('state.exp.loaded = true; state.exp.preset = state.selectedPreset; state.exp.pending = null; state.exp.ranges = {}; state.exp.bypass = {}; 0');
+  check('with nothing assigned to the expression pedal there is nothing to read back', JSON.stringify(await js('NanoLive.expressionReadbackKeys()')) === '[]');
+  n0 = await mark();
+  await rxExpressionPosition(200); await settle();
+  check('… so a pedal move sends no parameter reads', !(await txSince(n0)).some(t => /param refresh/.test(t)), JSON.stringify(await txSince(n0)));
+  const vague = await js(`(() => {
+    const b = state.blocks.pre2;
+    const m = b.models.find(x => x.name !== 'None' && x.params && x.params.length && !x.params.some(p => /^(mix|amount)$/i.test(p.name)));
+    b.model = m.name; b.params = structuredClone(m.params); b.on = true;
+    state.exp.ranges = { pre2: { on: true, inverted: false, min: 0, max: 100 } };
+    render();
+    return { model: m.name, values: JSON.stringify(b.params.map(p => p.value)) };
+  })()`);
+  n0 = await mark();
+  await rxExpressionPosition(255);
+  tx = await txWait(n0, t => t.some(x => /^TX Pre FX 2 param refresh/.test(x)));
+  check('an effect whose Amount parameter isn\'t known (' + vague.model + ') is not animated but read back', (await js('JSON.stringify(state.blocks.pre2.params.map(p => p.value))')) === vague.values && JSON.stringify(await js('NanoLive.expressionReadbackKeys()')) === '["pre2"]' && tx.some(t => /^TX Pre FX 2 param refresh/.test(t)), JSON.stringify(tx));
+  await js(`(() => { Object.assign(state.exp, ${expSaved2}); Object.assign(state.blocks.pre2, ${pre2Saved}); NanoLive.reset(); render(); })()`);
+  await settle();
 
   // type exact value
   await click('[data-fk="cap-vol"] .val');
@@ -369,9 +627,12 @@ async function run() {
   await key('8');
   const firstKnob = await js('document.querySelector(".inspector .knob")?.dataset.fk');
   n0 = await mark();
-  await drag(`[data-fk="${firstKnob}"] svg`, 40);
+  await drag(`[data-fk="${firstKnob}"] svg`, 40, [], async () => {
+    const live = await waitFor(async () => (await txSince(n0)).some(t => /Post FX 3 param/.test(t)));
+    check('FX knob sends while the pointer is held', live && (await txSince(n0)).some(t => /Post FX 3 param/.test(t)), JSON.stringify(await txSince(n0)));
+  });
   tx = await txWait(n0);
-  check('FX knob drag sends a param write', tx.length === 1 && /Post FX 3 param/.test(tx[0]), JSON.stringify(tx));
+  check('FX knob drag sends live param writes', tx.length >= 1 && tx.every(t => /Post FX 3 param/.test(t)), JSON.stringify(tx));
 
   // ---------------------------------------------------------------- model picker
   await js('document.activeElement.blur()');
@@ -475,9 +736,15 @@ async function run() {
   await settle();
   check('clicking the current mic sends nothing', (await txSince(n0)).length === 0);
   const lp0 = await js('state.cabIR.lowPassHz');
-  await drag('[data-fk="cab-lp"] svg', -30);
+  n0 = await mark();
+  await drag('[data-fk="cab-lp"] svg', -30, [], async () => {
+    const live = await waitFor(async () => (await txSince(n0)).some(t => /^TX Cab\/IR low pass/.test(t)));
+    check('cab low pass sends while the pointer is held', live && (await txSince(n0)).some(t => /^TX Cab\/IR low pass/.test(t)), JSON.stringify(await txSince(n0)));
+  });
   const lp1 = await js('state.cabIR.lowPassHz');
   check('low pass drag (log scale) lowers cutoff sensibly', lp1 < lp0 && lp1 > 3000, lp0 + ' → ' + lp1);
+  tx = await txWait(n0);
+  check('low pass drag sends live writes', tx.length >= 1 && tx.every(t => /^TX Cab\/IR low pass/.test(t)), JSON.stringify(tx));
   n0 = await mark();
   await click('[data-fk="irslot-4"]');
   check('IR slot click sends', (await txWait(n0, tx => tx.some(t => /Cab\/IR slot select 4/.test(t)))).some(t => /Cab\/IR slot select 4/.test(t)));
@@ -490,6 +757,20 @@ async function run() {
   n0 = await mark();
   await click('.inspector .switch');
   check('gate switch sends', (await txWait(n0, tx => tx.some(t => /Gate (ON|OFF)/.test(t)))).some(t => /Gate (ON|OFF)/.test(t)));
+  if (!(await js('state.gate.on'))) {
+    n0 = await mark();
+    await click('[data-fk="switch-gate"]');
+    await txWait(n0, tx => tx.some(t => /Gate ON/.test(t)));
+  }
+  const gate0 = await js('state.gate.params[0].value');
+  n0 = await mark();
+  await drag('[data-fk="gate-red"] svg', 20, [], async () => {
+    const live = await waitFor(async () => (await txSince(n0)).some(t => /^TX Gate reduction/.test(t)));
+    check('gate reduction sends while the pointer is held', live && (await txSince(n0)).some(t => /^TX Gate reduction/.test(t)), JSON.stringify(await txSince(n0)));
+  });
+  const gate1 = await js('state.gate.params[0].value');
+  tx = await txWait(n0);
+  check('gate reduction drag sends live writes', gate1 > gate0 && tx.length >= 1 && tx.every(t => /^TX Gate reduction/.test(t)), gate0 + ' → ' + gate1 + ' ' + JSON.stringify(tx));
   await shot('08-gate');
 
   // ---------------------------------------------------------------- preset switching with unsaved changes
@@ -630,7 +911,7 @@ async function run() {
   await checkSoon('the picked capture lands in slot 7 without the slot chooser', async () => libPick !== '' && (await js('state.captureNames.get(7)')) === libPick && await js('!document.querySelector(".modal")'), async () => 'picked=' + JSON.stringify(libPick) + ' slot7=' + await js('state.captureNames.get(7)') + ' modal=' + await js('!!document.querySelector(".modal")'));
   await settle();
   await js('__closePopover(); __ui.slotPreselect = 0'); await key('Escape');
-  await key('s', [MOD]); await waitFor('!__ui.dirty'); await settle();   // the slot load marked the preset dirty; save so the list tests start clean
+  await key('s', [MOD]); await waitFor('!state.presetDirty'); await settle();   // the slot load marked the preset dirty; save so the list tests start clean
   // delete a preset (type 50 → 51), from the row menu, confirmed in a dialog
   await rightClick('.preset-row[data-n="24"]');
   await js(ctxItem('Delete') + '?.click()');
@@ -651,7 +932,7 @@ async function run() {
   const NEG1 = 'FF FF FF FF FF FF FF FF FF 01';
   const fsHex = (slotField, idx) => ['36 C0 18 00 20', NEG1, ...[5, 6, 7, 8].map(f => (f * 8).toString(16).toUpperCase() + ' ' + (f === slotField ? idx.toString(16).toUpperCase().padStart(2, '0') : NEG1)), '48 00 1D 00 00 00'].join(' ');
   check('assignment frame for IA = preset index 14 equals the phone app\'s bytes', (await js('hex(__footswitchFrame("a1", 14))')) === '36 C0 18 00 20 ' + NEG1 + ' 28 0E 30 ' + NEG1 + ' 38 ' + NEG1 + ' 40 ' + NEG1 + ' 48 00 1D 00 00 00' && (await js('hex(__footswitchFrame("b1", 0))')) === fsHex(6, 0), await js('hex(__footswitchFrame("a1", 14))'));
-  await js('__ui.dirty = false; state.presetDirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
   const fsCells = () => js('[...document.querySelectorAll(".fs-cell")].map(c => [...c.children].map(x => x.textContent).join(" ")).join("|")');
   const pn = async (n) => js('state.presetNames.get(' + n + ')');
   check('footswitch strip shows IA, IB, IIA, IIB with the demo presets', (await fsCells()) === ['IA 1 ' + await pn(1), 'IB 3 ' + await pn(3), 'IIA 7 ' + await pn(7), 'IIB 15 ' + await pn(15)].join('|'), await fsCells());
@@ -691,20 +972,20 @@ async function run() {
   check('a preset switch re-reads the slots from the (demo) state dump', (await js('state.selectedPreset')) === 15 && tx.length === 1 && / 48 00 1D 00 00 00$/.test(tx[0]) && (await js('state.presetSlots.b2')) === 6 && (await js('[...document.querySelectorAll(".fs-cell.active")].map(c => c.dataset.fk).join()')) === 'fs-a1', JSON.stringify(tx) + ' ' + JSON.stringify(await js('state.presetSlots')));
 
   // an assignment drops unsaved edits on the pedal, so it asks first like a preset switch
-  await js('__ui.dirty = true; render()'); await frame();
+  await js('state.presetDirty = true; render()'); await frame();
   await rightClick('[data-fk="fs-b1"]');
   await js(ctxItem('Assign current preset') + '.click()'); await waitFor('!!document.querySelector(".modal h2")');
   check('assigning with unsaved edits asks first (Save changes to …?)', (await js('document.querySelector(".modal h2")?.textContent') || '').startsWith('Save changes to ') && (await js('[...document.querySelectorAll(".modal button")].map(b => b.textContent).join("|")')) === 'Cancel|Don’t save|Save and assign', await js('[...document.querySelectorAll(".modal button")].map(b => b.textContent).join("|")'));
   n0 = await mark();
   await key('Escape'); await settle();
-  check('Escape cancels: nothing sent, edits kept', (await txSince(n0)).length === 0 && await js('!document.querySelector(".modal") && __ui.dirty === true') && (await js('state.presetSlots.b1')) === 2, JSON.stringify(await txSince(n0)));
+  check('Escape cancels: nothing sent, edits kept', (await txSince(n0)).length === 0 && await js('!document.querySelector(".modal") && state.presetDirty === true') && (await js('state.presetSlots.b1')) === 2, JSON.stringify(await txSince(n0)));
   await rightClick('[data-fk="fs-b1"]');
   await js(ctxItem('Assign current preset') + '.click()'); await waitFor('!!document.querySelector(".modal button")');
   n0 = await mark();
   await js('[...document.querySelectorAll(".modal button")].find(b => b.textContent === "Don’t save").click()');
   tx = (await txWait(n0, tx => tx.some(t => /^TX Assign/.test(t)))).filter(t => /^TX /.test(t) && !/state request|Expression assignments request/.test(t));
-  await waitFor(async () => (await js('__ui.dirty')) === false && (await js('state.presetSlots.b1')) === 14);
-  check('"Don’t save" sends just the assignment and clears the edits', tx.length === 1 && tx[0] === 'TX Assign preset 15 to footswitch IB: ' + fsHex(6, 14) && (await js('__ui.dirty')) === false && (await js('state.presetSlots.b1')) === 14, JSON.stringify(tx));
+  await waitFor(async () => (await js('state.presetDirty')) === false && (await js('state.presetSlots.b1')) === 14);
+  check('"Don’t save" sends just the assignment and clears the edits', tx.length === 1 && tx[0] === 'TX Assign preset 15 to footswitch IB: ' + fsHex(6, 14) && (await js('state.presetDirty')) === false && (await js('state.presetSlots.b1')) === 14, JSON.stringify(tx));
 
   // ---------------------------------------------------------------- preset list
   await click('.preset-row[data-n="7"]');
@@ -736,6 +1017,11 @@ async function run() {
   check('one connection indicator: none in the header, the status bar LED is on', await js('!document.querySelector(".head .led, #conn, #status, #dot") && document.getElementById("bleLed").className === "led on"'));
   await js('state.presetDirty = true; render()'); await frame();
   check('pedal-reported unsaved changes show in the status bar', await js('!document.getElementById("pcText").parentElement.hidden && /unsaved/.test(document.getElementById("pcText").textContent)'));
+  await click('.preset-row[data-n="6"]');
+  await waitFor('!!document.querySelector(".modal")');
+  check('pedal-reported dirty state also asks before switching', await js('state.selectedPreset === 5 && !!document.querySelector(".modal")'));
+  await key('Escape');
+  await checkSoon('cancelling the pedal-dirty switch keeps the current preset', 'state.selectedPreset === 5 && !document.querySelector(".modal")');
   await js('state.presetDirty = false; render()'); await frame();
   await checkSoon('(demo) pedal confirms the preset change', '__ui.logs.some(l => /Preset change confirmed/.test(l.text))');
 
@@ -773,6 +1059,36 @@ async function run() {
   await click('#tunerClose');
   await checkSoon('Close button ends the tuner and the Tuner button un-lights', '!state.tuner.open && !document.getElementById("tunerBtn").classList.contains("on")');
   await settle();
+
+  // ---------------------------------------------------------------- header Mute and the tuner's mute re-arm
+  // Mute Input is a global setting (67 {1:1 12:0|1}, read back as 66 field 15). The pedal still reports it on after the
+  // tuner closes but needs a fresh off → on to mute again, so closing the tuner sends both (after the tuner-off write).
+  const MUTE_IN = (on) => frameHex([0x08, 0x01, 0x60, on ? 1 : 0], 67);
+  await checkSoon('the header Mute button is ready once the device settings are read at connect', '!document.getElementById("muteBtn").disabled && document.getElementById("muteBtn").getAttribute("aria-pressed") === "false"');
+  n0 = await mark();
+  await click('#muteBtn');
+  tx = await txWait(n0, t => t.some(x => x.endsWith(': ' + MUTE_IN(true))));
+  tx = tx.filter(x => /Mute Input/.test(x));
+  check('header Mute sends Mute Input on, exactly 67 {1:1 12:1}', tx.length === 1 && tx[0] === 'TX Device monitoring: Mute Input ON: ' + MUTE_IN(true), JSON.stringify(tx));
+  await checkSoon('… and turns red, pressed (read back from 66 field 15)', 'document.getElementById("muteBtn").classList.contains("mute-active") && document.getElementById("muteBtn").getAttribute("aria-pressed") === "true" && __dev.settings.muteInput === true');
+  await click('#tunerBtn');
+  await checkSoon('the tuner opens while the input is muted', 'state.tuner.open');
+  n0 = await mark();
+  await click('#tunerClose');
+  tx = (await txWait(n0, t => t.filter(x => /^TX (Tuner off|Device monitoring: Mute Input)/.test(x)).length >= 3)).filter(x => /^TX (Tuner off|Device monitoring: Mute Input)/.test(x)).map(x => x.split(': ').pop());
+  check('closing the tuner re-arms the mute: Tuner off, then Mute Input off and on again', JSON.stringify(tx) === JSON.stringify([frameHex([0x20, 0x00], 127), MUTE_IN(false), MUTE_IN(true)]), JSON.stringify(tx));
+  await checkSoon('the mute is still on afterwards', '__dev.settings.muteInput === true && document.getElementById("muteBtn").classList.contains("mute-active")');
+  n0 = await mark();
+  await click('#muteBtn');
+  tx = await txWait(n0, t => t.some(x => x.endsWith(': ' + MUTE_IN(false))));
+  tx = tx.filter(x => /Mute Input/.test(x));
+  check('header Mute again sends Mute Input off (an explicit 0)', tx.length === 1 && tx[0].endsWith(': ' + MUTE_IN(false)), JSON.stringify(tx));
+  await checkSoon('… and the button is back to normal', '!document.getElementById("muteBtn").classList.contains("mute-active") && __dev.settings.muteInput === false');
+  await click('#tunerBtn'); await checkSoon('tuner up again, input not muted', 'state.tuner.open');
+  n0 = await mark();
+  await click('#tunerClose'); await waitFor('!state.tuner.open');
+  await settle({ quiet: 600 });
+  check('without the mute, closing the tuner sends only Tuner off', JSON.stringify((await txSince(n0)).map(x => x.split(': ')[0])) === JSON.stringify(['TX Tuner off']), JSON.stringify(await txSince(n0)));
 
   // ---------------------------------------------------------------- metronome
   await js('document.activeElement.blur()');
@@ -945,7 +1261,7 @@ async function run() {
     && (await js('Array.from(__tempo.frame(1, 120)).map(b => b.toString(16).toUpperCase().padStart(2, "0")).join(" ")')) === tempoHex(1, 120));
   const tempoTx = (list) => list.filter(t => /^TX (Live|Preset) tempo /.test(t)).map(t => t.split(': ')[1]);
   const tempoVal = () => js('document.querySelector(\'[data-fk="tempo-bpm"]\').value');
-  const cleanSlate = () => js('__ui.dirty = false; state.presetDirty = false; render()');
+  const cleanSlate = () => js('state.presetDirty = false; render()');
   const tempoOrigin = await js('state.selectedPreset');
   await cleanSlate(); await frame();
   await click('.preset-row[data-n="1"]');
@@ -956,11 +1272,11 @@ async function run() {
   await click('[data-fk="tempo-down"]'); await click('[data-fk="tempo-up"]');
   let tt = tempoTx(await waitFor(async () => { const t = await txSince(n0); return tempoTx(t).includes(tempoHex(1, 120)) && t; }) || []);
   check('− / + send live tempo writes (3:1), the last one exactly the live 120 body', tt.length >= 1 && tt[tt.length - 1] === tempoHex(1, 120) && tt.every(h => h.startsWith('0F C0 18 01')), JSON.stringify(tt));
-  check('live writes do not mark the preset dirty', !(await js('__ui.dirty || state.presetDirty')));
+  check('live writes do not mark the preset dirty', !(await js('state.presetDirty')));
   await txWait(n0, tx => tempoTx(tx).includes(tempoHex(0, 120)));
-  await waitFor('__ui.dirty');
+  await waitFor('state.presetDirty');
   tt = tempoTx(await txSince(n0));
-  check('the steps are committed (one 3:0 with 120) about 0.8 s after they settle', tt[tt.length - 1] === tempoHex(0, 120) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('__ui.dirty'), JSON.stringify(tt));
+  check('the steps are committed (one 3:0 with 120) about 0.8 s after they settle', tt[tt.length - 1] === tempoHex(0, 120) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('state.presetDirty'), JSON.stringify(tt));
   await cleanSlate(); await frame();
   // Scrub: drag sideways on the TEMPO label, 1 BPM per 4 px.
   n0 = await mark();
@@ -982,7 +1298,7 @@ async function run() {
   await type('93'); await key('Return');
   tt = tempoTx(await txWait(n0, tx => tempoTx(tx).length >= 2));
   check('Enter sends exactly the preset 93 body (3:0) at once (cancelling the pending scrub commit), after a live 93', tt.length === 2 && tt[0] === tempoHex(1, 93) && tt[1] === tempoHex(0, 93), JSON.stringify(tt));
-  await checkSoon('the commit marks the preset dirty (UI and the pedal\'s 115)', async () => await js('__ui.dirty && state.presetDirty && !document.getElementById("dirtyMark").hidden') && (await tempoVal()) === '93');
+  await checkSoon('the commit marks the preset dirty (the pedal\'s 115)', async () => await js('state.presetDirty && !document.getElementById("dirtyMark").hidden') && (await tempoVal()) === '93');
   await click('[data-fk="tempo-up"]'); await click('[data-fk="tempo-up"]'); await waitFor(async () => (await tempoVal()) === '95');
   await shot('xx-tempo');
   n0 = await txCount();
@@ -990,7 +1306,7 @@ async function run() {
   tx = await txWait(n0, tx => tx.some(t => /^TX save preset 1/.test(t)));
   tt = tempoTx(tx);
   check('Save right after a step commits the tempo first (one 3:0 with 95), then saves', tt.length === 1 && tt[0] === tempoHex(0, 95) && tx.some(t => /^TX save preset 1/.test(t)), JSON.stringify(tx));
-  await checkSoon('after Save the preset is clean and the demo pedal stored 95', '!__ui.dirty && !state.presetDirty && __demo.tempo.buf === 95');
+  await checkSoon('after Save the preset is clean and the demo pedal stored 95', '!state.presetDirty && __demo.tempo.buf === 95');
   await click('.preset-row[data-n="4"]');
   await checkSoon('switching presets updates the field (preset 4: 140)', async () => (await tempoVal()) === '140', tempoVal);
   await settle();
@@ -1030,11 +1346,11 @@ async function run() {
   await js('{ const r = document.getElementById("metroTempo"); r.value = "100"; r.dispatchEvent(new Event("input")); r.dispatchEvent(new Event("change")); }');
   await waitFor(async () => tempoTx(await txSince(n0)).length >= 1);
   tt = tempoTx(await txSince(n0));
-  check('the metronome slider goes live at once (100), nothing into the preset yet', tt.length >= 1 && tt.every(h => h === tempoHex(1, 100)) && !(await js('__ui.dirty')), JSON.stringify(tt));
+  check('the metronome slider goes live at once (100), nothing into the preset yet', tt.length >= 1 && tt.every(h => h === tempoHex(1, 100)) && !(await js('state.presetDirty')), JSON.stringify(tt));
   await txWait(n0, tx => tempoTx(tx).includes(tempoHex(0, 100)));
-  await waitFor('__ui.dirty');
+  await waitFor('state.presetDirty');
   tt = tempoTx(await txSince(n0));
-  check('… and commits 100 into the preset about 1.5 s later', tt[tt.length - 1] === tempoHex(0, 100) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('__ui.dirty'), JSON.stringify(tt));
+  check('… and commits 100 into the preset about 1.5 s later', tt[tt.length - 1] === tempoHex(0, 100) && tt.filter(h => h.startsWith('0F C0 18 00')).length === 1 && await js('state.presetDirty'), JSON.stringify(tt));
   n0 = await txCount();
   await js('__metro.setBpm(104, "trainer")');
   await sleep(1700);   // longer than COMMIT_METRO (1.5 s): proves no commit into the preset follows
@@ -1090,9 +1406,18 @@ async function run() {
   await checkSoon('capture node shows it', async () => (await js('document.querySelector("[data-stage=capture] .model").textContent')) === libName);
   await checkSoon('no popover or dialog left open', '!document.querySelector(".pop") && !document.querySelector(".modal")');
   await key('5'); await frame();
-  await click('[data-fk="lib-cab"]'); await waitFor('document.querySelectorAll(".pop .pop-item").length >= 5');
-  check('cab rows in the library picker stay plain one-line names (no kind icons)', await js('document.querySelectorAll(".pop .pop-item").length >= 5 && !document.querySelector(".pop .pop-item.two, .pop .kind") && document.querySelector(".pop .pop-item").textContent === "412 V30"'), await js('document.querySelector(".pop .pop-item")?.outerHTML'));
-  await key('Escape'); await frame();
+  await waitFor('document.querySelectorAll(".cab-library-section .library-item").length >= 5');
+  check('cab library rows show plain names with preview controls', await js('(() => { const rows = [...document.querySelectorAll(".cab-library-section .library-row")]; return rows.length >= 5 && rows[0].querySelector(".library-item")?.textContent === "412 V30" && rows[0].querySelector(".library-preview")?.getAttribute("aria-label") === "Preview 412 V30" && !rows[0].querySelector(".kind"); })()'), await js('document.querySelector(".cab-library-section .library-row")?.outerHTML'));
+  await js('window.__libNode = document.querySelector(".cab-library-content")');
+  await click('[data-fk="cab-lib-search"]'); await type('412'); await js('render()'); await frame(); await js('render()'); await frame();
+  check('the cab library search keeps focus and its list is not rebuilt by redraws', await js('document.activeElement === document.querySelector("[data-fk=cab-lib-search]") && document.querySelector(".cab-library-content") === window.__libNode && document.activeElement.value === "412" && [...document.querySelectorAll(".cab-library-section .library-row")].filter(r => !r.hidden).length >= 2 && [...document.querySelectorAll(".cab-library-section .library-row")].filter(r => !r.hidden).every(r => /412/.test(r.textContent))'));
+  for (let i = 0; i < 3; i++) await key('Backspace');
+  check('… its caret stayed at the end: three Backspaces clear it and every cab and IR shows again', await js('document.querySelector("[data-fk=cab-lib-search]").value === "" && [...document.querySelectorAll(".cab-library-section .library-row")].every(r => !r.hidden)'), await js('document.querySelector("[data-fk=cab-lib-search]").value + " / hidden " + [...document.querySelectorAll(".cab-library-section .library-row")].filter(r => r.hidden).length'));
+  await js('document.activeElement.blur(); delete window.__libNode'); await frame();
+  await rightClick('[data-fk="node-cab"]');
+  await js(ctxItem('Pick a cab from the library') + '.click()');
+  await checkSoon('the cab node menu\'s "Pick a cab from the library…" goes to the library search', 'document.activeElement === document.querySelector("[data-fk=cab-lib-search]")');
+  await js('document.activeElement.blur()'); await frame();
   await key('4'); await frame();
 
   // ---------------------------------------------------------------- slot usage scan
@@ -1104,7 +1429,7 @@ async function run() {
   await shot('10a-usage-dirty');
   await key('Escape');
   check('Escape closes the usage menu', await js('!document.querySelector(".pop")'));
-  await key('s', [MOD]); await waitFor('!__ui.dirty'); await settle();   // save: the scan may run now
+  await key('s', [MOD]); await waitFor('!state.presetDirty'); await settle();   // save: the scan may run now
   const origin = await js('state.selectedPreset');
   const saved = await js('[...Array(64).keys()].map(i => i + 1).filter(i => !/^empty$/i.test(state.presetNames.get(i))).length');
   // partial: stop it after a few presets
@@ -1134,7 +1459,7 @@ async function run() {
   tx = (await txSince(n0)).filter(t => /^TX Preset change \d+:/.test(t));
   check('scan switches through the presets over Bluetooth and ends on the origin', tx.length === saved && /^TX Preset change (\d+):/.exec(tx[tx.length - 1])[1] === String(origin), tx.length + ' switches: ' + tx.map(t => /change (\d+)/.exec(t)[1]).join(','));
   check('scan returns to the origin preset', (await js('state.selectedPreset')) === origin && (await js('document.querySelector(".preset-title .name").textContent')) === 'Big Lead 5');
-  check('scan leaves no unsaved edits', await js('!__ui.dirty && document.getElementById("dirtyMark").hidden'));
+  check('scan leaves no unsaved edits', await js('!state.presetDirty && document.getElementById("dirtyMark").hidden'));
   check('result says when the scan ran', new RegExp('^Scanned: \\d{1,2}:\\d{2}.*, ' + saved + ' presets$').test(await js('document.querySelector(\'[data-fk="usage-date"]\')?.textContent || ""')), await js('document.querySelector(\'[data-fk="usage-date"]\')?.textContent'));
   check('result lists the presets that use the current capture slot', (await js('document.querySelector(\'[data-fk="usage-feeds"]\')?.textContent')) === 'Slot 9 feeds: 5 Big Lead 5, 12 JP2C Lead 2, 20 Octave Down Riff 2', await js('document.querySelector(\'[data-fk="usage-feeds"]\')?.textContent'));
   // computed from the scan itself: the delete check earlier in the run empties preset 24, which frees its slot
@@ -1156,7 +1481,7 @@ async function run() {
   check('the slot chooser shows the usage counts', (await js('document.querySelector(\'.modal [data-fk="pickslot-9"] .uses\')?.textContent')) === '3' && await js('document.querySelector(\'.modal [data-fk="pickslot-20"] .uses\')?.textContent === "free"'));
   await shot('10c-usage-chooser');
   await key('Escape');
-  await checkSoon('cancelling the chooser loads nothing', '!document.querySelector(".modal") && !__ui.dirty');
+  await checkSoon('cancelling the chooser loads nothing', '!document.querySelector(".modal") && !state.presetDirty');
   // a preset that plays a capture straight from the library
   await click('.preset-row[data-n="9"]');
   await checkSoon('library capture: the node says "From the library", not a slot', async () => (await js('document.querySelector("[data-stage=capture] .sub").textContent')) === 'From the library: Fuzz Face Si', () => js('document.querySelector("[data-stage=capture] .sub").textContent'));
@@ -1234,6 +1559,188 @@ async function run() {
   await checkSoon('upload flow finished cleanly', '!document.querySelector(".modal") && !__ui.uploading');
   await settle();
 
+  // ---------------------------------------------------------------- live capture preview and keep-alive
+  // Use the real preview transfer and timer, with the demo pedal answering the same type 151/149/92 messages.
+  const previewMeta = { hash: 'cd'.repeat(32), name: 'Test Preview', cloudUUID: '00000000-0000-4000-8000-000000000002', authorId: 'x', authorName: 'Tester', deviceType: 'pedal', gainType: 3, instrumentType: 'guitar', version: '1', tags: ['#test'] };
+  const previewSlot = await js('state.capture.selectedSlot');
+  await js(`(() => {
+    const originalSetInterval = window.setInterval;
+    const originalClearInterval = window.clearInterval;
+    window.__previewTimerTest = { originalSetInterval, originalClearInterval, callback: null, ms: null, id: null, cleared: false };
+    window.setInterval = (fn, ms) => { __previewTimerTest.callback = fn; __previewTimerTest.ms = ms; __previewTimerTest.id = 9171; return __previewTimerTest.id; };
+    window.clearInterval = id => { if (id === __previewTimerTest.id) __previewTimerTest.cleared = true; };
+  })()`);
+  n0 = await mark();
+  const previewResult = await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`);
+  await settle();
+  tx = await txSince(n0);
+  check('live preview sends the type-150 transfer', previewResult === true && tx.some(t => /^TX Capture preview "Test Preview" 1\/1: .* 96 00 00 00$/.test(t)), JSON.stringify(tx));
+  check('live preview becomes active without changing the loaded slot', await js('__ui.previewing && !__ui.previewBusy') && (await js('state.capture.selectedSlot')) === previewSlot);
+  check('live preview starts a 20-second keep-alive timer', await js('__previewTimerTest.ms === 20000 && typeof __previewTimerTest.callback === "function"'), await js('String(__previewTimerTest.ms)'));
+  n0 = await mark();
+  await js('__previewTimerTest.callback()');
+  tx = await txWait(n0, t => t.some(x => /^TX Preview keep-alive:/.test(x)));
+  check('keep-alive sends the confirmed type-91 frame', tx.length === 1 && tx[0] === 'TX Preview keep-alive: 06 C0 08 03 5B 00 00 00', JSON.stringify(tx));
+  await checkSoon('keep-alive type-92 response is acknowledged', '__ui.logs.some(l => l.text === "Live preview keep-alive acknowledged.")');
+  n0 = await mark();
+  const stopResult = await js('__stopCapturePreview()');
+  await settle();
+  tx = await txSince(n0);
+  check('stopping preview sends type 148 and receives confirmation', stopResult === true && tx.some(t => /^TX Stop capture preview: .* 94 00 00 00$/.test(t)) && await js('__ui.logs.some(l => /Capture preview stop confirmed/.test(l.text))'), JSON.stringify(tx));
+  check('stopping preview clears the keep-alive timer', await js('__previewTimerTest.cleared && !__ui.previewing && !__ui.previewBusy'));
+  await js('__previewTimerTest.callback()'); await settle();
+  check('a stopped preview does not send another keep-alive', !(await txSince(n0)).some(t => /^TX Preview keep-alive:/.test(t)));
+  await js('window.setInterval = __previewTimerTest.originalSetInterval; window.clearInterval = __previewTimerTest.originalClearInterval; delete window.__previewTimerTest');
+
+  // ---------------------------------------------------------------- streamed transfers: one at a time
+  check('MD5 for the 150/15 messages matches the reference (empty, "abc")', (await js('NanoTransfer.md5Hex(new Uint8Array()) + " " + NanoTransfer.md5Hex(new TextEncoder().encode("abc"))')) === 'd41d8cd98f00b204e9800998ecf8427e 900150983cd24fb0d6963f7d28e17f72');
+  n0 = await mark();
+  const mutex = await js(`(async () => {
+    const meta = ${JSON.stringify(previewMeta)};
+    const preview = NanoTransfer.previewCapture({ cns: new Uint8Array(3000), meta });
+    const busy = NanoTransfer.busy;
+    let err = '';
+    try { await NanoTransfer.downloadImpulseResponse({ wav: new Uint8Array(64), meta: { name: 'Mutex IR', productId: '00000000-0000-4000-8000-000000000003', filename: 'Mutex IR.wav' } }); }
+    catch (e) { err = e.message; }
+    const r = await preview;
+    const stop = await NanoTransfer.stopAudition('capture');
+    return { busy, err, ok: r.ok, stopped: stop.ok, after: NanoTransfer.busy };
+  })()`);
+  tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
+  check('stream mutex: a Cloud IR (15) is refused while a capture preview (150) streams; the 150 completes', mutex.busy === 'capture preview' && /Another transfer to the pedal is still running/.test(mutex.err) && mutex.ok && mutex.stopped && mutex.after === '' && !tx.some(t => /Cloud IR download/.test(t)) && (() => { const parts = tx.filter(t => /^TX Capture preview "Test Preview" \d+\/\d+:/.test(t)); const m = parts.length && /\/(\d+):/.exec(parts[0]); return parts.length > 1 && m && Number(m[1]) === parts.length; })(), JSON.stringify(mutex) + ' ' + JSON.stringify(tx.map(t => t.slice(0, 50))));
+
+  // ---------------------------------------------------------------- Cloud IR checks in the shell (src/cloud-ir.js), no network
+  {
+    const cloudIR = require('../src/cloud-ir');
+    const wavOf = ({ format = 3, channels = 1, rate = 48000, bits = 32, data = 16, fmt = true, extensible = false, cut = 0, riff = 'RIFF' } = {}) => {
+      const fmtLen = extensible ? 40 : 16;
+      const chunks = [];
+      if (fmt) {
+        const f = Buffer.alloc(8 + fmtLen);
+        f.write('fmt ', 0); f.writeUInt32LE(fmtLen, 4);
+        f.writeUInt16LE(extensible ? 0xFFFE : format, 8); f.writeUInt16LE(channels, 10); f.writeUInt32LE(rate, 12);
+        f.writeUInt32LE(rate * channels * bits / 8, 16); f.writeUInt16LE(channels * bits / 8, 20); f.writeUInt16LE(bits, 22);
+        if (extensible) { f.writeUInt16LE(22, 24); f.writeUInt16LE(format, 32); }
+        chunks.push(f);
+      }
+      if (data) { const d = Buffer.alloc(8 + data); d.write('data', 0); d.writeUInt32LE(data + cut, 4); chunks.push(d); }
+      else { const l = Buffer.alloc(8 + 28); l.write('LIST', 0); l.writeUInt32LE(28, 4); chunks.push(l); }
+      const body = Buffer.concat(chunks);
+      const head = Buffer.alloc(12); head.write(riff, 0); head.writeUInt32LE(body.length + 4, 4); head.write('WAVE', 8);
+      return Buffer.concat([head, body]);
+    };
+    const why = (opts) => { try { cloudIR.checkWav(wavOf(opts)); return 'ok'; } catch (e) { return e.message; } };
+    check('Cloud IR check: a mono 48 kHz float WAV (the traced kind) passes', why() === 'ok', why());
+    check('Cloud IR check: 24-bit PCM stereo at 44.1 kHz and WAVE_FORMAT_EXTENSIBLE float pass', why({ format: 1, bits: 24, channels: 2, rate: 44100 }) === 'ok' && why({ extensible: true }) === 'ok', why({ format: 1, bits: 24, channels: 2, rate: 44100 }) + ' / ' + why({ extensible: true }));
+    check('Cloud IR check: a compressed WAV (format 2) is refused with the reason', /not PCM or floating-point audio \(WAV format 2\)/.test(why({ format: 2, bits: 16 })), why({ format: 2, bits: 16 }));
+    check('Cloud IR check: 6 channels are refused', /6 channels; the pedal takes mono or stereo/.test(why({ channels: 6 })), why({ channels: 6 }));
+    check('Cloud IR check: a 4 kHz or 384 kHz sample rate is refused', /sample rate \(4000 Hz\)/.test(why({ rate: 4000 })) && /384000 Hz/.test(why({ rate: 384000 })), why({ rate: 4000 }));
+    check('Cloud IR check: 8-bit PCM is refused', /8-bit PCM samples/.test(why({ format: 1, bits: 8 })), why({ format: 1, bits: 8 }));
+    check('Cloud IR check: no format chunk, no audio, a cut-short chunk or not RIFF are refused', /no format chunk/.test(why({ fmt: false, data: 64 })) && /no audio data/.test(why({ data: 0 })) && /cut short/.test(why({ cut: 100 })) && /not a WAV file/.test(why({ riff: 'RIFX' })), [why({ fmt: false, data: 64 }), why({ data: 0 }), why({ cut: 100 }), why({ riff: 'RIFX' })].join(' / '));
+    const big = (() => { try { cloudIR.decodeIRPayload('A'.repeat(1500000)); return 'ok'; } catch (e) { return e.message; } })();
+    check('Cloud IR check: a payload over 1 MB is refused before decoding', /larger than 1 MB/.test(big) && cloudIR.decodeIRPayload(wavOf().toString('base64')).length === wavOf().length, big);
+  }
+
+  // ---------------------------------------------------------------- Cortex Cloud IR → the pedal's library (15 → 16), and deleting it (82 → 83)
+  // A minimal valid WAV: RIFF/WAVE, fmt (float, mono, 48 kHz), 4 samples.
+  const wav = (() => {
+    const b = Buffer.alloc(44 + 16);
+    b.write('RIFF', 0); b.writeUInt32LE(b.length - 8, 4); b.write('WAVE', 8); b.write('fmt ', 12); b.writeUInt32LE(16, 16);
+    b.writeUInt16LE(3, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(48000, 24); b.writeUInt32LE(48000 * 4, 28); b.writeUInt16LE(4, 32); b.writeUInt16LE(32, 34);
+    b.write('data', 36); b.writeUInt32LE(16, 40);
+    return b.toString('base64');
+  })();
+  const irMeta = { name: 'Demo Cloud IR', productId: '00000000-0000-4000-8000-000000000004', filename: 'Demo Cloud IR.wav' };
+  n0 = await mark();
+  await js(`window.__irDone = __receiveCloudIR({ wav: ${JSON.stringify(wav)}, meta: ${JSON.stringify(irMeta)} }); 0`);
+  await checkSoon('a Cloud IR asks for confirmation first', '!!document.querySelector(".modal") && /Send Demo Cloud IR to the pedal/.test(document.querySelector(".modal h2").textContent)');
+  await key('Return');
+  tx = await txWait(n0, t => t.some(x => /^TX Cloud IR download/.test(x)));
+  const irOutcome = await js('window.__irDone');
+  check('the IR goes out as one type-15 message and the (demo) pedal adds it (16), then the library is read again', tx.some(t => /^TX Cloud IR download "Demo Cloud IR" 1\/1: [0-9A-F]{2} C0 08 06 1A .* 0F 00 00 00$/.test(t)) && irOutcome.ok && irOutcome.refreshed && irOutcome.index === 1 && tx.some(t => /^TX Library content request/.test(t)) && await js('state.library.irUser.some(x => x.name === "Demo Cloud IR" && x.index === 1)'), JSON.stringify(irOutcome) + ' ' + JSON.stringify(tx.map(t => t.slice(0, 60))));
+  n0 = await mark();
+  await js(`window.__irAgain = null; __receiveCloudIR({ wav: ${JSON.stringify(wav)}, meta: ${JSON.stringify(irMeta)} }).then(r => { window.__irAgain = r; }); 0`);
+  await waitFor('!!window.__irAgain || !!document.querySelector(".modal")');
+  if (await js('!!document.querySelector(".modal")')) { await key('Escape'); await waitFor('!!window.__irAgain'); }
+  const irAgain = await js('window.__irAgain');
+  await settle();
+  check('sending it again finds it on the pedal by name and sends nothing', irAgain.alreadyOnNano === true && await js('!document.querySelector(".modal")') && !(await txSince(n0)).some(t => /Cloud IR download/.test(t)), JSON.stringify(irAgain));
+
+  // Delete it again: right-click → Delete…; the library is read again right before the 82, which carries the user index and name.
+  await key('5'); await frame();
+  const userRow = '[...document.querySelectorAll(".cab-library-section .library-row")].find(r => r.querySelector(".library-item span")?.textContent === "Demo Cloud IR")';
+  await waitFor(`!!(${userRow})`);
+  await js('state.irNames.set(5, "Demo Cloud IR"); render()'); await frame();
+  await js(`(() => { const r = ${userRow}; r.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 200, clientY: 300 })); })()`);
+  await waitFor('!!document.querySelector(".ctx")');
+  await js(ctxItem('Delete') + '.click()');
+  await checkSoon('Delete asks first and says an IR slot holds that IR', '!!document.querySelector(".modal") && /Delete IR “Demo Cloud IR” from the pedal/.test(document.querySelector(".modal h2").textContent) && /IR slot 5/.test(document.querySelector(".modal").textContent)', () => js('document.querySelector(".modal")?.textContent'));
+  n0 = await mark();
+  await key('Return');
+  tx = (await txWait(n0, t => t.some(x => /^TX Delete IR/.test(x)))).filter(t => /^TX (Library content request|Delete IR)/.test(t));
+  const del82 = frameHex([0x08, 0x02, 0x22, 2 + 2 + utf8('Demo Cloud IR').length, 0x08, 0x01, 0x12, utf8('Demo Cloud IR').length, ...utf8('Demo Cloud IR')], 82);
+  check('IR delete: the library is read right before, then 82 carries the user index and name (exact bytes)', tx.length >= 2 && /^TX Library content request/.test(tx[0]) && tx[1] === 'TX Delete IR Demo Cloud IR: ' + del82, JSON.stringify(tx) + ' expected ' + del82);
+  await checkSoon('the (demo) pedal confirms (83) and the IR is gone from the list', async () => (await toastText()) === 'Demo Cloud IR deleted from the pedal IR library.' && await js('!state.library.irUser.some(x => x.name === "Demo Cloud IR")'));
+  await js('state.irNames.set(5, "212 Blue"); render()'); await settle();
+
+  // ---------------------------------------------------------------- IR audition (158 → 159), and every audition stops before Save or a switch
+  await waitFor('document.querySelectorAll(".cab-library-section .library-preview").length >= 6');
+  const firstPreview = '.cab-library-section .library-row .library-preview';
+  n0 = await mark();
+  await click(firstPreview);
+  tx = await txWait(n0, t => t.some(x => /^TX Preview IR/.test(x)));
+  const play412 = frameHex([0x1A, 4 + utf8('412 V30').length, 0x08, 0x00, 0x12, utf8('412 V30').length, ...utf8('412 V30'), 0x40, 0x01], 158);
+  check('previewing a factory cab sends 158 with the record in field 3 (exact bytes), nothing else', tx.length === 1 && tx[0] === 'TX Preview IR "412 V30": ' + play412, JSON.stringify(tx));
+  await checkSoon('the (demo) pedal accepts it (159): the row plays, the keep-alive runs', async () => await js('!!document.querySelector(".cab-library-section .library-row.previewing .library-preview.playing")') && await js(`__ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive started/.test(l.text))`));
+  const userPlay = await js('hex(__irPreviewRequest({ kind: "irUser", index: 0, name: "OwnHammer 412 Mix" }))');
+  check('a user IR goes in field 4 instead (exact bytes)', userPlay === frameHex([0x22, 4 + utf8('OwnHammer 412 Mix').length, 0x08, 0x00, 0x12, utf8('OwnHammer 412 Mix').length, ...utf8('OwnHammer 412 Mix'), 0x40, 0x01], 158), userPlay);
+  // Save while it plays: the stop (148 with field 4 = 0, confirmed by a 149 with the same transaction) goes first.
+  await js('state.presetDirty = false; document.activeElement.blur(); render()');
+  n0 = await mark();
+  await key('s', [MOD]);
+  tx = (await txWait(n0, t => t.some(x => /^TX save preset/.test(x)))).filter(t => /^TX (Stop IR preview|save preset|Preview keep-alive)/.test(t));
+  check('Save during an IR audition sends the stop first (148 {2:tx 4:0}), then saves', tx.length === 2 && /^TX Stop IR preview: [0-9A-F]{2} C0 10 ([0-9A-F]{2} )+20 00 94 00 00 00$/.test(tx[0]) && /^TX save preset/.test(tx[1]), JSON.stringify(tx));
+  await checkSoon('… the audition is over: row back to Play, keep-alive stopped', async () => await js('!document.querySelector(".library-preview.playing")') && await js(`__ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive stopped/.test(l.text))`));
+  await settle();
+  // The pedal doesn't confirm the stop: Save and a preset switch are refused and the audition stays shown as playing.
+  n0 = await mark();
+  await click(firstPreview);
+  await checkSoon('previewing again', '!!document.querySelector(".library-preview.playing")');
+  await js('__demo.hooks.refuseStop = true; state.presetDirty = false; render()');
+  n0 = await mark();
+  await key('s', [MOD]);
+  await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+  check('a refused stop refuses Save: nothing saved, the IR still shows as playing, the user is told', !(await txSince(n0)).some(t => /^TX save preset/.test(t)) && await js('!!document.querySelector(".library-preview.playing")') && /did not confirm stopping the preview, so Save did not happen/.test(await toastText()), (await toastText()) + ' ' + JSON.stringify(await txSince(n0)));
+  const presetBefore = await js('state.selectedPreset');
+  const otherPreset = presetBefore === 1 ? 2 : 1;
+  n0 = await mark();
+  await click(`.preset-row[data-n="${otherPreset}"]`);
+  await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+  check('… and refuses a preset switch: no 29 sent, still on the same preset', !(await txSince(n0)).some(t => /^TX Preset change/.test(t)) && (await js('state.selectedPreset')) === presetBefore && /the preset switch did not happen/.test(await toastText()), (await toastText()) + ' ' + JSON.stringify(await txSince(n0)));
+  await js('__demo.hooks.refuseStop = false');
+  n0 = await mark();
+  await click(`.preset-row[data-n="${otherPreset}"]`);
+  tx = (await txWait(n0, t => t.some(x => /^TX Preset change/.test(x)))).filter(t => /^TX (Stop IR preview|Preset change \d)/.test(t));
+  check('once the pedal confirms, the switch goes ahead: stop first, then the preset change', tx.length === 2 && /^TX Stop IR preview/.test(tx[0]) && /^TX Preset change \d+:/.test(tx[1]) && (await js('state.selectedPreset')) === otherPreset, JSON.stringify(tx));
+  await settle();
+  // A preset change on the pedal itself (footswitch) during an audition: it is stopped and forgotten.
+  await click(firstPreview);
+  await checkSoon('previewing once more', '!!document.querySelector(".library-preview.playing")');
+  n0 = await mark();
+  await js('window.onC305({ target: { value: { buffer: buildFrame([0x18, 0x00, 0x20, state.selectedPreset - 1], MSG.SetPresetSlotsRequest).buffer } } })');
+  tx = await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+  await checkSoon('a footswitch preset change ends the audition (stop sent, keep-alive off, row back to Play)', async () => tx.some(t => /^TX Preset change ack/.test(t)) && await js('!document.querySelector(".library-preview.playing")') && await js(`__ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive stopped/.test(l.text))`), () => JSON.stringify(tx));
+  await settle();
+  // Capture preview: a refused stop keeps it honest (still previewing) and the toolbar shows Stop Preview with the error.
+  n0 = await mark();
+  check('capture preview starts', (await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`)) === true && await js('__previewToolbar().active && __previewToolbar().phase === "active"'));
+  await js('__demo.hooks.refuseStop = true');
+  const refusedStop = await js('__stopCapturePreview()');
+  check('a refused capture-preview stop leaves it previewing and the toolbar on Stop Preview, with the reason', refusedStop === false && await js('__ui.previewing && !__ui.previewBusy && __previewToolbar().active && __previewToolbar().phase === "active" && /did not confirm/.test(__previewToolbar().error)'), JSON.stringify(await js('__previewToolbar()')));
+  await js('__demo.hooks.refuseStop = false');
+  check('a confirmed stop sets the toolbar back to idle', (await js('__stopCapturePreview()')) === true && await js('!__ui.previewing && !__previewToolbar().active && __previewToolbar().phase === "idle"'), JSON.stringify(await js('__previewToolbar()')));
+  await key('4'); await frame(); await settle();
+
   // ---------------------------------------------------------------- write coalescing
   // Deterministic: the first write leaves at once, the next five queue behind it under one key and merge.
   n0 = await mark();
@@ -1284,11 +1791,11 @@ async function run() {
   check('the choice is stored (settings.accent)', (await js('JSON.parse(localStorage.getItem("settings.accent"))')) === '#ff7000');
   check('Orange shows as selected', await js('document.querySelector(".swatch.on").getAttribute("aria-label") === "Orange"'));
   await key('Escape'); await waitFor(async () => !(await settingsOpen()));
-  await js('__ui.dirty = true; render()'); await frame();
+  await js('state.presetDirty = true; render()'); await frame();
   check('the Save button\'s background follows the accent', (await js('getComputedStyle(document.getElementById("saveBtn")).backgroundColor')) === 'rgb(255, 112, 0)', await js('getComputedStyle(document.getElementById("saveBtn")).backgroundColor'));
   check('text on the light accent turns dark for contrast', (await js('getComputedStyle(document.getElementById("saveBtn")).color')) === 'rgb(18, 18, 18)', await js('getComputedStyle(document.getElementById("saveBtn")).color'));
   await shot('18-orange-accent');
-  await js('__ui.dirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
   const orangeRow = rgbOf(await js('getComputedStyle(document.querySelector(".preset-row.active")).backgroundColor'));
   check('the active preset row colour follows the accent', !!orangeRow && orangeRow[0] > orangeRow[1] && orangeRow[1] > orangeRow[2] && orangeRow[0] > 50, JSON.stringify(orangeRow));
   const orangeNum = rgbOf(await js('getComputedStyle(document.querySelector(".preset-row.active .n")).color'));
@@ -1360,7 +1867,7 @@ async function run() {
   // Bodies are the phone app's, byte for byte (trace 2026-10-09, docs/INVESTIGATION.md §10): preset 62 = index 0x3D.
   const expTx = async (n) => (await txSince(n)).filter(t => /^TX Save expression assignments/.test(t)).map(t => t.split(': ').pop());
   const expReads = async (n) => (await txSince(n)).filter(t => /^TX Expression assignments request/.test(t)).map(t => t.split(': ').pop());
-  await js('__ui.dirty = false; state.presetDirty = false; render()'); await frame();
+  await js('state.presetDirty = false; render()'); await frame();
   await click('.preset-row[data-n="2"]'); await waitFor('state.selectedPreset === 2'); await settle();
   check('the chain has an EXP pill ahead of In', await js('(() => { const p = document.getElementById("expBtn").getBoundingClientRect(), o = document.querySelector(".chain-row .io").getBoundingClientRect(); return p.right < o.left && Math.abs((p.top + p.bottom) / 2 - (o.top + o.bottom) / 2) < 4; })()'));
   await checkSoon('the EXP pill counts preset 2\'s demo assignment', async () => (await js('document.getElementById("expCount").textContent')) === '1');
@@ -1436,6 +1943,13 @@ async function run() {
   check('Clear all sends the bare preset index (62 {3:61})', JSON.stringify(await expTx(n0)) === JSON.stringify(['06 C0 18 3D 3E 00 00 00']), JSON.stringify(await expTx(n0)));
   await checkSoon('after Clear all the empty state is back', '!!document.querySelector(\'[data-fk="exp-empty"]\')');
   await checkSoon('a cleared set reports the preset clean again (115)', 'state.presetDirty === false');
+  await checkSoon('reverting the expression edits clears the UI dirty state', '!!document.getElementById("dirtyMark").hidden && !!document.getElementById("discardBtn").hidden && !state.presetDirty');
+  const revertedPreset = await js('state.selectedPreset');
+  await click(`.preset-row[data-n="${revertedPreset + 1}"]`);
+  await checkSoon('switching after reverting does not ask for confirmation', async () => (await js('state.selectedPreset')) === revertedPreset + 1 && await js('!document.querySelector(".modal")'));
+  await click(`.preset-row[data-n="${revertedPreset}"]`);
+  await checkSoon('returning after the clean switch restores the preset', async () => (await js('state.selectedPreset')) === revertedPreset);
+  await settle();
 
   n0 = await mark();
   await addTarget('Capture on/off');
@@ -1457,7 +1971,7 @@ async function run() {
   check('B on the Expression panel does nothing (no stage to bypass)', (await js('document.querySelector(".insp-head h1").textContent')) === 'Expression pedal');
 
   // the demo pedal keeps the set per preset until a reload drops unsaved edits
-  await js('__ui.dirty = false; render()'); await frame(); await settle();
+  await js('state.presetDirty = false; render()'); await frame(); await settle();
   await click('.preset-row[data-n="2"]');
   await checkSoon('preset 2 still has its own Gain sweep', async () => JSON.stringify(await js('__exp.assigned()')) === JSON.stringify(['range-gain']), async () => JSON.stringify(await js('__exp.assigned()')));
   await settle();
@@ -1471,6 +1985,8 @@ async function run() {
   // ---------------------------------------------------------------- Settings → Device, capture info
   // Bodies from the phone-app trace 2026-10-09 (docs/INVESTIGATION.md §11).
   const BRIGHT_153 = '0E C0 08 01 20 99 01 75 00 00 C0 C0 43 00 00 00';   // 67 {1:1 4:153 14:-6.0}
+  const MUTE_INPUT_ON = '08 C0 08 01 60 01 43 00 00 00';                    // 67 {1:1 12:1} → 66.15
+  const MUTE_OUTPUT_ON = '08 C0 08 01 68 01 43 00 00 00';                   // 67 {1:1 13:1} → 66.16
   const val = (fk) => js(`document.querySelector('[data-fk="${fk}"]')?.textContent || ''`);
   await js('document.activeElement.blur()');
   n0 = await mark();
@@ -1487,7 +2003,8 @@ async function run() {
   await checkSoon('Device: LED brightness reads 153 = 60 %, USB playback −6.0 dB', () => js('document.querySelector(\'[data-fk="dev-brightness"]\').value === "153" && document.querySelector(\'[data-fk="dev-brightness"]\').nextElementSibling.textContent === "60%" && document.querySelector(\'[data-fk="dev-usb-num"]\').value === "-6.0"'));
   check('Device: Raw settings is collapsed and lists the 66 fields', await js('(() => { const d = document.querySelector(\'[data-fk="dev-raw"]\'); return !d.open && /6=153/.test(d.textContent) && /17=-6(?![\\d.])/.test(d.textContent) && /13=129/.test(d.textContent); })()'), await js('document.querySelector(\'[data-fk="dev-raw"]\').textContent'));
   check('Device: no stray text above About', (await js('document.querySelector(".dev-page").firstChild.tagName')) === 'SECTION');
-  check('Device: only brightness and USB volume are editable', (await js('document.querySelectorAll(".dev-page input").length')) === 3);
+  check('Device: monitoring readback starts unmuted', await js('__dev.settings.muteInput === false && __dev.settings.muteOutput === false && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "false" && document.querySelector(\'[data-fk="dev-mute-output"]\').getAttribute("aria-checked") === "false"'));
+  check('Device: brightness, USB volume and monitoring switches are editable', (await js('document.querySelectorAll(".dev-page input").length')) === 3 && await js('document.querySelectorAll(".dev-page [role=switch]").length === 2 && document.querySelector(\'[data-fk="dev-mute-input"]\').textContent === "Mute Input" && document.querySelector(\'[data-fk="dev-mute-output"]\').textContent === "Mute Outputs 1L/2R"'));
   await shot('xx-device');
   // brightness by keyboard: one step up and back to 153
   await js('document.querySelector(\'[data-fk="dev-brightness"]\').focus()');
@@ -1522,6 +2039,35 @@ async function run() {
   sent = await txWait(n0, tx => tx.length >= 3);
   check('Read again re-sends 65, 46 and the keep-alive 91', sent.length === 3 && /Read device settings/.test(sent[0]) && /Read device info/.test(sent[1]) && /Keep-alive: 06 C0 08 03 5B 00 00 00$/.test(sent[2]), JSON.stringify(sent));
   await checkSoon('the read-back shows the stored values (153, −11.0 dB)', () => js('document.querySelector(\'[data-fk="dev-brightness"]\').value === "153" && document.querySelector(\'[data-fk="dev-usb-num"]\').value === "-11.0"'));
+
+  // Monitoring: one-field writes, ACK-triggered readback, external updates and rapid stale reports.
+  await js('state.presetDirty = false; render()'); await frame();
+  n0 = await mark();
+  await click('[data-fk="dev-mute-input"]');
+  sent = await txWait(n0, tx => tx.some(t => t.endsWith(': ' + MUTE_INPUT_ON)));
+  check('Mute Input writes only field 12 with an explicit 1', sent.some(t => t.endsWith(': ' + MUTE_INPUT_ON)) && sent.some(t => /^TX Device monitoring: Mute Input ON/.test(t)), JSON.stringify(sent));
+  check('Mute Input ACK is logged and does not dirty the preset', await js('__ui.logs.some(l => /Device settings confirmed/.test(l.text)) && state.presetDirty === false'), await js('JSON.stringify({ dirty: state.presetDirty, value: __dev.settings.muteInput })'));
+  await checkSoon('Mute Input readback updates the switch', () => js('__dev.settings.muteInput === true && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "true"'));
+  n0 = await mark();
+  await click('[data-fk="dev-mute-output"]');
+  sent = await txWait(n0, tx => tx.some(t => t.endsWith(': ' + MUTE_OUTPUT_ON)));
+  check('Mute Outputs 1L/2R writes only field 13 with an explicit 1', sent.some(t => t.endsWith(': ' + MUTE_OUTPUT_ON)) && sent.some(t => /^TX Device monitoring: Mute Outputs 1L\/2R ON/.test(t)), JSON.stringify(sent));
+  await checkSoon('Mute Outputs 1L/2R readback updates the switch without dirty state', () => js('__dev.settings.muteOutput === true && document.querySelector(\'[data-fk="dev-mute-output"]\').getAttribute("aria-checked") === "true" && state.presetDirty === false'));
+  n0 = await mark();
+  await click('[data-fk="dev-mute-output"]');
+  sent = await txWait(n0, tx => tx.some(t => t.endsWith(': 08 C0 08 01 68 00 43 00 00 00')));
+  check('Mute Outputs 1L/2R writes an explicit 0 when turned off', sent.some(t => t.endsWith(': 08 C0 08 01 68 00 43 00 00 00')), JSON.stringify(sent));
+
+  // An unsolicited type-66 report is authoritative when no local write is pending.
+  await js('__devDemo.store.muteInput = false; __devDemo.store.muteOutput = false; __devDemo.emitSettings(); 0');
+  await checkSoon('external monitoring updates apply to both switches', () => js('__dev.settings.muteInput === false && __dev.settings.muteOutput === false && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "false" && document.querySelector(\'[data-fk="dev-mute-output"]\').getAttribute("aria-checked") === "false"'));
+
+  // Two clicks and an older incoming report occur synchronously; the stale report must not block or undo the latest click.
+  n0 = await mark();
+  await js('(() => { const b = document.querySelector(\'[data-fk="dev-mute-input"]\'); b.click(); __devDemo.store.muteInput = false; __devDemo.emitSettings(); document.querySelector(\'[data-fk="dev-mute-input"]\').click(); })()');
+  sent = await txWait(n0, tx => tx.filter(t => /^TX Device monitoring: Mute Input /.test(t)).length >= 2);
+  check('rapid Mute Input toggles stay responsive and preserve the latest value', sent.filter(t => /^TX Device monitoring: Mute Input /.test(t)).length === 2 && sent.some(t => t.endsWith(': ' + MUTE_INPUT_ON)) && sent.some(t => t.endsWith(': 08 C0 08 01 60 00 43 00 00 00')) && await js('__dev.settings.muteInput === false && document.querySelector(\'[data-fk="dev-mute-input"]\').getAttribute("aria-checked") === "false"'), JSON.stringify(sent));
+
   await click('[data-fk="dev-usb-num"]');
   n0 = await txCount();
   await key('a', [MOD]); await type('-6'); await key('Return'); await txWait(n0);
@@ -1617,6 +2163,89 @@ async function run() {
   await js('document.activeElement.blur()');
   await key('l', [MOD]);
   check('⌘L does nothing again', await js('!__ui.drawerOpen'));
+  await settle();
+
+  // ---------------------------------------------------------------- unsaved-changes prompts: an edit still on its way counts
+  // The pedal's 115 comes after an edit lands. An edit write queued or in flight, or sent < 300 ms ago without a 115
+  // since, makes the switch prompt ask (the header's mark stays the pedal's).
+  await js('state.presetDirty = false; __demo.hooks.quiet115 = true; render()'); await settle();
+  check('an edit write that just went out counts as unsaved for the prompts, before any 115', await js('(() => { setAmpKnob("bass", 141); return __isDirtyForPrompt() && !state.presetDirty; })()'));
+  await sleep(450);
+  check('… and no longer once 300 ms pass without a 115 (the pedal says clean)', await js('!__isDirtyForPrompt() && !state.presetDirty'));
+  await js('__demo.hooks.writeDelay = 1500'); await frame();
+  const latencyFrom = await js('state.selectedPreset');
+  const latencyTo = latencyFrom === 1 ? 2 : 1;
+  await js('__ui.selected = "capture"; render()'); await frame();
+  await click('[data-fk="amp-bass"] .label');
+  n0 = await txCount();
+  await key('Up');
+  await click(`.preset-row[data-n="${latencyTo}"]`);
+  await checkSoon('switching right after an edit (its write still in flight) asks "Save changes to …?"', '!!document.querySelector(".modal h2") && /^Save changes to /.test(document.querySelector(".modal h2").textContent)');
+  await key('Escape');
+  await checkSoon('… Escape keeps the preset', async () => (await js('state.selectedPreset')) === latencyFrom && await js('!document.querySelector(".modal")'));
+  await js('__demo.hooks.writeDelay = 0; __demo.hooks.quiet115 = false; state.presetDirty = false; render()'); await settle();
+  await waitFor('!__isDirtyForPrompt()');   // the held write has landed and its 300 ms are over
+
+  // ---------------------------------------------------------------- preset reordering (143 → 144, then list and state read back)
+  // Synthetic drag events (Chromium's DataTransfer); the list only takes drags that started on one of its rows.
+  const dragRow = (from, to, dt = 'new DataTransfer()') => js(`(() => {
+    const dt = ${dt};
+    const src = document.querySelector('.preset-row[data-n="${from}"]'), dst = document.querySelector('.preset-row[data-n="${to}"]');
+    if (${from}) src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    if (${from}) src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+    return true;
+  })()`);
+  const allNames = () => js('[...Array(64).keys()].map(i => state.presetNames.get(i + 1))');
+  const namesBefore = await allNames();
+  await js('document.activeElement.blur()');
+  await js('{ const f = document.getElementById("presetFilter"); f.value = ""; f.dispatchEvent(new Event("input")); f.blur(); }'); await frame();
+  await click('#presetFilter'); await type('Lead'); await frame();
+  const leadRows = await js('[...document.querySelectorAll(".preset-row")].map(r => Number(r.dataset.n))');
+  const mvFrom = leadRows[leadRows.length - 1], mvTo = leadRows[0];
+  check('a filter is active for the drag (several rows match "Lead")', leadRows.length >= 3 && mvFrom > mvTo + 1, JSON.stringify(leadRows));
+  await click(`.preset-row[data-n="${mvFrom}"]`);
+  await checkSoon('(the preset to move is the current one)', `state.selectedPreset === ${mvFrom} && !document.querySelector(".modal")`); await settle();
+  // Text dragged in from elsewhere (not a row of this list) is ignored.
+  n0 = await mark();
+  await dragRow(0, mvTo, '(() => { const d = new DataTransfer(); d.setData("text/plain", "' + mvFrom + '"); return d; })()');
+  await settle();
+  check('an external text drop on a preset row sends nothing', (await txSince(n0)).length === 0, JSON.stringify(await txSince(n0)));
+  // While the slot usage scan runs, rows can't be dragged and a move is refused.
+  await js('__ui.scanning = true; __ui.sideSig = ""; render()'); await frame();
+  n0 = await txCount();
+  const scanMove = await js(`__movePresetOrder(${mvFrom - 1}, ${mvTo - 1})`);
+  check('reordering is refused while the slot scan runs (rows not draggable, nothing sent)', scanMove === false && await js('[...document.querySelectorAll(".preset-row")].every(r => !r.draggable)') && (await txSince(n0)).length === 0 && /scan/.test(await toastText()), await toastText());
+  await js('__ui.scanning = false; __ui.sideSig = ""; render()'); await frame();
+  check('rows are draggable again', await js('[...document.querySelectorAll(".preset-row")].every(r => r.draggable)'));
+  // The move: absolute 0-based indices even with the filter on; then the list and the state are read again.
+  n0 = await mark();
+  await dragRow(mvFrom, mvTo);
+  tx = (await txWait(n0, t => t.some(x => /^TX Current preset state request/.test(x)), { timeout: 10000 })).filter(t => /^TX (Move preset|FE metadata request|Current preset state request)/.test(t));
+  check('the drop sends 143 with absolute 0-based indices (exact bytes), then reads the list and the state', tx.length >= 3 && tx[0] === `TX Move preset ${mvFrom} to position ${mvTo}: ` + frameHex([0x08, 0x04, 0x18, mvFrom - 1, 0x20, mvTo - 1], 143) && /^TX FE metadata request/.test(tx[1]) && /^TX Current preset state request/.test(tx[2]), JSON.stringify(tx));
+  await checkSoon('the moved preset is now at its new position and the others shifted by one (as the pedal listed them)', async () => {
+    const now = await allNames();
+    const want = namesBefore.slice(); const [m] = want.splice(mvFrom - 1, 1); want.splice(mvTo - 1, 0, m);
+    return JSON.stringify(now) === JSON.stringify(want);
+  }, async () => JSON.stringify((await allNames()).slice(0, 26)));
+  await checkSoon('the current preset (the one moved) is where the pedal\'s state read says: the header follows', async () => (await js('state.selectedPreset')) === mvTo && (await js('document.querySelector(".preset-title .num").textContent')) === 'Preset ' + mvTo && /^Moved preset/.test(await toastText()), async () => (await js('state.selectedPreset')) + ' ' + await toastText());
+  await settle();
+  // Moving it back (filter off), but the state read after it fails: the current preset is unknown and Save & co. stay off.
+  await js('{ const f = document.getElementById("presetFilter"); f.value = ""; f.dispatchEvent(new Event("input")); f.blur(); }'); await frame();
+  await js('__reorderTimeouts.state = 700; __reorderTimeouts.list = 4000; __demo.hooks.dropStateReads = true');
+  n0 = await mark();
+  await dragRow(mvTo, mvFrom);
+  await txWait(n0, t => t.some(x => /^TX Move preset/.test(x)));
+  await checkSoon('a failed read after a move marks the current preset unknown (header, status bar, toast)', async () => await js('__ui.presetUnknown && document.querySelector(".preset-title .num").textContent === "Preset ?" && !document.querySelector(".preset-row.active")') && /Current preset unknown/.test(await js('document.getElementById("pcText").textContent')) && /doesn’t know which preset/.test(await toastText()), async () => (await toastText()) + ' | ' + await js('document.getElementById("pcText").textContent'));
+  check('… Save, Save as and Rename are off and Discard hidden', await js('["saveBtn", "saveAsBtn", "renameBtn"].every(id => document.getElementById(id).disabled) && document.getElementById("discardBtn").hidden'));
+  n0 = await txCount();
+  await js('state.presetDirty = true; document.activeElement.blur(); render()');
+  await key('s', [MOD]); await settle();
+  check('… and ⌘S saves nothing', !(await txSince(n0)).some(t => /^TX save preset/.test(t)));
+  await js('__demo.hooks.dropStateReads = false; __reorderTimeouts.state = 6000; __reorderTimeouts.list = 20000; state.presetDirty = false');
+  check('a successful state read clears it', (await js('NanoLive.readCurrentState(3000)')) === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'));
+  await checkSoon('the order is back as it was', async () => JSON.stringify(await allNames()) === JSON.stringify(namesBefore) && (await js('state.selectedPreset')) === mvFrom);
   await settle();
 
   // ---------------------------------------------------------------- disconnected / demo exit
