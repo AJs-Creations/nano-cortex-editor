@@ -2132,6 +2132,68 @@ async function run() {
   check('⌘L does nothing again', await js('!__ui.drawerOpen'));
   await settle();
 
+  // ---------------------------------------------------------------- preset reordering (143 → 144, then list and state read back)
+  // Synthetic drag events (Chromium's DataTransfer); the list only takes drags that started on one of its rows.
+  const dragRow = (from, to, dt = 'new DataTransfer()') => js(`(() => {
+    const dt = ${dt};
+    const src = document.querySelector('.preset-row[data-n="${from}"]'), dst = document.querySelector('.preset-row[data-n="${to}"]');
+    if (${from}) src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    dst.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    if (${from}) src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+    return true;
+  })()`);
+  const allNames = () => js('[...Array(64).keys()].map(i => state.presetNames.get(i + 1))');
+  const namesBefore = await allNames();
+  await js('document.activeElement.blur()');
+  await js('{ const f = document.getElementById("presetFilter"); f.value = ""; f.dispatchEvent(new Event("input")); f.blur(); }'); await frame();
+  await click('#presetFilter'); await type('Lead'); await frame();
+  const leadRows = await js('[...document.querySelectorAll(".preset-row")].map(r => Number(r.dataset.n))');
+  const mvFrom = leadRows[leadRows.length - 1], mvTo = leadRows[0];
+  check('a filter is active for the drag (several rows match "Lead")', leadRows.length >= 3 && mvFrom > mvTo + 1, JSON.stringify(leadRows));
+  await click(`.preset-row[data-n="${mvFrom}"]`);
+  await checkSoon('(the preset to move is the current one)', `state.selectedPreset === ${mvFrom} && !document.querySelector(".modal")`); await settle();
+  // Text dragged in from elsewhere (not a row of this list) is ignored.
+  n0 = await mark();
+  await dragRow(0, mvTo, '(() => { const d = new DataTransfer(); d.setData("text/plain", "' + mvFrom + '"); return d; })()');
+  await settle();
+  check('an external text drop on a preset row sends nothing', (await txSince(n0)).length === 0, JSON.stringify(await txSince(n0)));
+  // While the slot usage scan runs, rows can't be dragged and a move is refused.
+  await js('__ui.scanning = true; __ui.sideSig = ""; render()'); await frame();
+  n0 = await txCount();
+  const scanMove = await js(`__movePresetOrder(${mvFrom - 1}, ${mvTo - 1})`);
+  check('reordering is refused while the slot scan runs (rows not draggable, nothing sent)', scanMove === false && await js('[...document.querySelectorAll(".preset-row")].every(r => !r.draggable)') && (await txSince(n0)).length === 0 && /scan/.test(await toastText()), await toastText());
+  await js('__ui.scanning = false; __ui.sideSig = ""; render()'); await frame();
+  check('rows are draggable again', await js('[...document.querySelectorAll(".preset-row")].every(r => r.draggable)'));
+  // The move: absolute 0-based indices even with the filter on; then the list and the state are read again.
+  n0 = await mark();
+  await dragRow(mvFrom, mvTo);
+  tx = (await txWait(n0, t => t.some(x => /^TX Current preset state request/.test(x)), { timeout: 10000 })).filter(t => /^TX (Move preset|FE metadata request|Current preset state request)/.test(t));
+  check('the drop sends 143 with absolute 0-based indices (exact bytes), then reads the list and the state', tx.length >= 3 && tx[0] === `TX Move preset ${mvFrom} to position ${mvTo}: ` + frameHex([0x08, 0x04, 0x18, mvFrom - 1, 0x20, mvTo - 1], 143) && /^TX FE metadata request/.test(tx[1]) && /^TX Current preset state request/.test(tx[2]), JSON.stringify(tx));
+  await checkSoon('the moved preset is now at its new position and the others shifted by one (as the pedal listed them)', async () => {
+    const now = await allNames();
+    const want = namesBefore.slice(); const [m] = want.splice(mvFrom - 1, 1); want.splice(mvTo - 1, 0, m);
+    return JSON.stringify(now) === JSON.stringify(want);
+  }, async () => JSON.stringify((await allNames()).slice(0, 26)));
+  await checkSoon('the current preset (the one moved) is where the pedal\'s state read says: the header follows', async () => (await js('state.selectedPreset')) === mvTo && (await js('document.querySelector(".preset-title .num").textContent')) === 'Preset ' + mvTo && /^Moved preset/.test(await toastText()), async () => (await js('state.selectedPreset')) + ' ' + await toastText());
+  await settle();
+  // Moving it back (filter off), but the state read after it fails: the current preset is unknown and Save & co. stay off.
+  await js('{ const f = document.getElementById("presetFilter"); f.value = ""; f.dispatchEvent(new Event("input")); f.blur(); }'); await frame();
+  await js('__reorderTimeouts.state = 700; __reorderTimeouts.list = 4000; __demo.hooks.dropStateReads = true');
+  n0 = await mark();
+  await dragRow(mvTo, mvFrom);
+  await txWait(n0, t => t.some(x => /^TX Move preset/.test(x)));
+  await checkSoon('a failed read after a move marks the current preset unknown (header, status bar, toast)', async () => await js('__ui.presetUnknown && document.querySelector(".preset-title .num").textContent === "Preset ?" && !document.querySelector(".preset-row.active")') && /Current preset unknown/.test(await js('document.getElementById("pcText").textContent')) && /doesn’t know which preset/.test(await toastText()), async () => (await toastText()) + ' | ' + await js('document.getElementById("pcText").textContent'));
+  check('… Save, Save as and Rename are off and Discard hidden', await js('["saveBtn", "saveAsBtn", "renameBtn"].every(id => document.getElementById(id).disabled) && document.getElementById("discardBtn").hidden'));
+  n0 = await txCount();
+  await js('state.presetDirty = true; document.activeElement.blur(); render()');
+  await key('s', [MOD]); await settle();
+  check('… and ⌘S saves nothing', !(await txSince(n0)).some(t => /^TX save preset/.test(t)));
+  await js('__demo.hooks.dropStateReads = false; __reorderTimeouts.state = 6000; __reorderTimeouts.list = 20000; state.presetDirty = false');
+  check('a successful state read clears it', (await js('NanoLive.readCurrentState(3000)')) === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'));
+  await checkSoon('the order is back as it was', async () => JSON.stringify(await allNames()) === JSON.stringify(namesBefore) && (await js('state.selectedPreset')) === mvFrom);
+  await settle();
+
   // ---------------------------------------------------------------- disconnected / demo exit
   await click('#connectBtn');
   await checkSoon('Exit demo shows connect screen', '!document.getElementById("veil").hidden');

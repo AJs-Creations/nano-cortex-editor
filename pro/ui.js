@@ -138,6 +138,7 @@
     renderAfterKnob: false,
     sideSig: '',
     presetReorderBusy: false,
+    presetUnknown: false,   // a read after a preset move failed: which preset the pedal is on isn't known
     lastAction: '',
     logs: [],
     logSeq: 0,   // lines ever logged; each entry carries its number, so readers can index past the trim below
@@ -432,6 +433,7 @@
 
   async function doSave() {
     if (!state.connected) { toast('Connect your Nano Cortex to save'); return; }
+    if (presetUnknownRefuses()) return;
     if (!(await stopAnyAudition('Save'))) return;
     flushTempo();
     await savePreset(); // the outcome arrives through showSaveResult()
@@ -441,6 +443,7 @@
   // (the same reload doDelete() uses for the current preset).
   async function doDiscard() {
     if (!state.connected) { toast('Connect your Nano Cortex first'); return; }
+    if (presetUnknownRefuses()) return;
     const n = state.selectedPreset;
     const choice = await modal({
       title: 'Discard edits to ' + presetName(n) + '?',
@@ -463,6 +466,7 @@
   // with the chosen slot and name; verified on the pedal 2026-10-08 from the native app.
   async function doSaveAs(preselect) {
     if (!state.connected) { toast('Connect your Nano Cortex to save'); return; }
+    if (presetUnknownRefuses()) return;
     const from = state.selectedPreset;
     let target = Number.isInteger(preselect) && preselect !== from ? preselect : 0;
     for (let i = 1; !target && i <= 64; i++) if (i !== from && presetName(i) === 'Empty') { target = i; break; }
@@ -596,6 +600,7 @@
 
   async function doRename() {
     if (!state.connected) { toast('Connect your Nano Cortex to rename presets'); return; }
+    if (presetUnknownRefuses()) return;
     const n = state.selectedPreset;
     const input = el('input', { class: 'search', type: 'text', value: presetName(n), maxlength: '64', 'aria-label': 'Preset name', spellcheck: 'false' });
     const choice = await modal({
@@ -1303,6 +1308,7 @@
     return !!pending && pending.preset === Number(state.selectedPreset) && pending.on !== enabled;
   };
   NanoLive.hooks.expressionMoved = () => ui.expressionLocalOverrides.clear();
+  NanoLive.hooks.stateRead = () => { if (ui.presetUnknown) { ui.presetUnknown = false; ui.sideSig = ''; render(); } };
   NanoLive.hooks.afterExpression = () => restoreExpressionLocalOverrides();
 
   function clearPendingIRSlotTarget(target = ui.pendingIRSlotTarget) {
@@ -1861,7 +1867,7 @@
     if (ui.scanning) { toast('Wait for the slot usage scan to finish.'); ui.sideSig = ''; render(); return; }
     ui.pendingPreset = null;
     ui.sideSig = ''; // repaint the list either way (undoes a keyboard highlight if cancelled)
-    if (n === state.selectedPreset && state.connected) { render(); return; }
+    if (n === state.selectedPreset && state.connected && !ui.presetUnknown) { render(); return; }
     if (isDirtyNow() && state.connected) {
       const choice = await modal({
         title: 'Save changes to ' + presetName(state.selectedPreset) + '?',
@@ -2479,6 +2485,7 @@
       state.pendingCabAssignment = null;
       state.presetDirty = false; beginExpressionBoundary();
       NanoLive.reset();
+      ui.presetUnknown = false;
       const d = window.__dev;
       if (d) {
         d.info = null; d.alive = null; d.settings = null; d.reading = false;
@@ -2955,11 +2962,12 @@
 
   function renderHead() {
     const t = $('presetTitle');
+    const unknown = state.connected && ui.presetUnknown;
     t.replaceChildren(
-      el('span', { class: 'num', text: state.connected ? 'Preset ' + state.selectedPreset : '' }),
-      el('span', { class: 'name', text: state.connected ? presetName(state.selectedPreset) : '' })
+      el('span', { class: 'num', text: !state.connected ? '' : unknown ? 'Preset ?' : 'Preset ' + state.selectedPreset }),
+      el('span', { class: 'name', text: !state.connected ? '' : unknown ? 'Not known yet' : presetName(state.selectedPreset) })
     );
-    const dirty = pedalDirtyForUI() && state.connected;
+    const dirty = pedalDirtyForUI() && state.connected && !unknown;
     $('dirtyMark').hidden = !dirty;
 
     const busy = ui.connecting || /requesting|connecting/i.test(ui.connText);
@@ -2969,12 +2977,12 @@
     cb.disabled = busy && !state.connected;
     cb.className = 'btn' + (!state.connected && !busy ? ' primary' : '');
 
-    $('saveBtn').disabled = !state.connected;
-    $('saveAsBtn').disabled = !state.connected;
+    $('saveBtn').disabled = !state.connected || unknown;
+    $('saveAsBtn').disabled = !state.connected || unknown;
     $('saveBtn').className = 'btn' + (dirty ? ' primary' : '');
     $('discardBtn').hidden = !dirty;
     $('refreshBtn').disabled = !state.connected || ui.demo;
-    $('renameBtn').disabled = !state.connected;
+    $('renameBtn').disabled = !state.connected || unknown;
     $('tunerBtn').disabled = !state.connected;
     $('tunerBtn').classList.toggle('on', state.tuner.open);
     renderMuteButton();
@@ -2990,15 +2998,21 @@
     button.setAttribute('aria-pressed', String(muted));
   }
 
-  function presetIndexAfterMove(index, source, destination) {
-    if (index === source) return destination;
-    if (source < destination && index > source && index <= destination) return index - 1;
-    if (source > destination && index >= destination && index < source) return index + 1;
-    return index;
-  }
+  // ------------------------------------------------------------------ preset reordering (from #14)
+  // Drag a preset row onto another: 143 { 1: 4, 3: from, 4: to } (0-based; an insertion, the presets in between
+  // shift by one), acked by 144 { 1: 6, 3: from, 4: to, 5: 1 }. Then the list and the current state are read back
+  // from the pedal like at connect; nothing about the new order or the current preset is assumed. INVESTIGATION §12.
+  const MSG_PRESET_MOVE = 143, MSG_PRESET_MOVE_REPLY = 144;
+  const PRESET_DRAG_TYPE = 'application/x-nano-preset';   // only drags that start on the preset list
+  let presetDragSource = 0;                                 // the row (1–64) the current drag started on
+  const REORDER_TIMEOUTS = { list: 20000, state: 6000 };
+  window.__reorderTimeouts = REORDER_TIMEOUTS;              // the UX test shortens them
+  const canReorder = () => state.connected && !ui.presetReorderBusy && !ui.scanning;
+  const presetMoveFrame = (from, to) => buildFrame([0x08, 0x04, 0x18, ...encodeVarint(from), 0x20, ...encodeVarint(to)], MSG_PRESET_MOVE);
 
+  // Edits are dropped when the pedal moves presets around (the phone app asks first, too).
   async function askBeforePresetReorder() {
-    if (!pedalDirtyForUI()) return true;
+    if (!isDirtyNow()) return true;
     const current = state.selectedPreset;
     const choice = await modal({
       title: 'Save changes to ' + presetName(current) + '?',
@@ -3011,100 +3025,71 @@
     });
     if (choice === 'save') {
       await doSave();
-      if (pedalDirtyForUI()) {
-        toast('Save the current preset before reordering.');
-        return false;
-      }
+      if (pedalDirtyForUI()) { toast('Save the current preset before reordering.'); return false; }
       return true;
     }
     if (choice !== 'discard') return false;
-
     const before = NanoLive.stateReads;
     state.exp.loaded = false;
     await selectPreset(current);
-    const discarded = await waitUntil(() => !state.protocol.presetLoad && NanoLive.stateReads > before, 7000);
-    if (!discarded) {
+    if (ui.demo) demo.load(current);
+    if (!(await waitUntil(() => !state.protocol.presetLoad && NanoLive.stateReads > before, 7000))) {
       toast('The pedal did not confirm reloading the saved preset.');
       return false;
     }
     return true;
   }
 
-  async function refreshPresetNamesAfterMove() {
-    if (!state.connected) return false;
+  // The preset list and the state again, the way a connect reads them (upstream's metadata read, then the state).
+  async function rereadPresetsAfterMove() {
+    const before = NanoLive.stateReads;
     state.protocol.metadataLoaded = false;
-    state.protocol.feSyncComplete = false;
-    state.feBytes = [];
-    state.feLastPacketAt = Date.now();
-    state.stateMode = 'metadata';
-    const sent = await writeC304('Refresh preset list after reorder', buildFrame([
-      0x08, 0x03, 0x18, 0x00, 0x20, 0x01, 0x28, 0x01,
-    ], 1));
-    if (!sent) {
-      if (state.stateMode === 'metadata') state.stateMode = 'idle';
-      return false;
-    }
-    const refreshed = await waitUntil(() => !state.connected || (state.protocol.metadataLoaded && state.stateMode === 'idle'), 20000);
-    if ((!refreshed || !state.connected) && state.stateMode === 'metadata') state.stateMode = 'idle';
-    return state.connected && refreshed && state.protocol.metadataLoaded;
+    await syncMetadataAndState();
+    const listed = await waitUntil(() => !state.connected || state.protocol.metadataLoaded, REORDER_TIMEOUTS.list) && state.connected && state.protocol.metadataLoaded;
+    const read = await waitUntil(() => !state.connected || (NanoLive.stateReads > before && !state.protocol.presetLoad), REORDER_TIMEOUTS.state + 1000) &&
+      state.connected && NanoLive.stateReads > before;
+    if (!read && state.stateMode === 'current' && !state.stateBytes.length) state.stateMode = 'idle';
+    return { listed: !!listed, read: !!read };
   }
 
-  const refreshCurrentPresetAfterMove = () => NanoLive.readCurrentState(10000);
+  // Without a state read after a move the editor doesn't know which preset the pedal is on (a move can shift it), so
+  // Save, Save as, Discard and Rename stay off until a read succeeds (Refresh, a preset switch, reconnecting).
+  const PRESET_UNKNOWN = 'The editor doesn’t know which preset the pedal is on. Refresh (or pick a preset) to read it again.';
+  function presetUnknownRefuses() {
+    if (!ui.presetUnknown) return false;
+    toast(PRESET_UNKNOWN);
+    return true;
+  }
 
   async function movePresetOrder(source, destination) {
-    if (source === destination || ui.presetReorderBusy) return false;
-    if (!state.connected || ui.demo) return false;
+    if (source === destination || ui.presetReorderBusy || !state.connected) return false;
+    if (ui.scanning) { toast('Wait for the slot usage scan to finish before reordering.'); return false; }
     if (state.stateMode !== 'idle' || state.protocol.presetLoad || state.presetLoadTimer || state.pendingParamBlock || state.paramRefreshQueue.length || state.fileBusy || state.saveBusy ||
-        gattWriteQueue.length || gattWritePumpRunning || ui.uploading || ui.previewBusy || ui.previewing || irAudition.active || irAudition.busy) {
+        gattWriteQueue.length || gattWritePumpRunning || ui.uploading || NanoTransfer.busy) {
       toast('Wait for the current pedal operation to finish before reordering.');
       return false;
     }
-
     ui.presetReorderBusy = true;
     ui.sideSig = '';
     render();
     try {
-      if (!(await askBeforePresetReorder())) return false;
-      if (!state.connected) return false;
-
-      const selectedBefore = state.selectedPreset;
-      const selectedName = presetName(selectedBefore);
-      presetMoveProtocolPending = true;
-      const reply = await writeAndAwait('Move preset ' + (source + 1) + ' to position ' + (destination + 1), buildFrame([
-        0x08, 0x04,
-        0x18, ...encodeVarint(source),
-        0x20, ...encodeVarint(destination),
-      ], 143), 144);
-      const ackSource = fieldValue(reply, 3);
-      const ackDestination = fieldValue(reply, 4);
-      const ackOk = Boolean(reply) && fieldValue(reply, 5) === 1 && ackSource === source && ackDestination === destination;
-      log('Preset reorder ' + (ackOk ? 'acknowledged' : 'unconfirmed') + ': type 144 source=' + ackSource + ' destination=' + ackDestination + ' status=' + fieldValue(reply, 5));
-
-      const listRefreshed = await refreshPresetNamesAfterMove();
-      if (listRefreshed) {
-        const nameMatches = Array.from(state.presetNames.entries()).filter(([, name]) => sameName(name, selectedName));
-        const selectedAfter = nameMatches.length === 1
-          ? nameMatches[0][0]
-          : ackOk ? presetIndexAfterMove(selectedBefore - 1, source, destination) + 1 : selectedBefore;
-        state.selectedPreset = selectedAfter;
-      } else {
-        log('Could not confirm the refreshed preset list after reorder.');
-      }
-
-      const stateRefreshed = state.connected && await refreshCurrentPresetAfterMove();
-      log('Preset reorder confirmation: move=' + ackOk + ', list=' + listRefreshed + ', currentState=' + stateRefreshed);
-      if (!listRefreshed) {
-        toast('The pedal’s preset list could not be refreshed after the move. Refresh the preset list to check its order.');
-        return false;
-      }
+      if (!(await stopAnyAudition('the reorder'))) return false;
+      if (!(await askBeforePresetReorder()) || !state.connected) return false;
+      presetMoveProtocolPending = true;   // the pedal reports 115 dirty, then clean, around a move: not an edit
+      const reply = await writeAndAwait('Move preset ' + (source + 1) + ' to position ' + (destination + 1), presetMoveFrame(source, destination), MSG_PRESET_MOVE_REPLY);
+      const ackOk = Boolean(reply) && fieldValue(reply, 5) === 1 && fieldValue(reply, 3) === source && fieldValue(reply, 4) === destination;
+      log('Preset reorder ' + (ackOk ? 'acknowledged' : 'NOT confirmed') + ': type 144 ' + (reply ? 'source=' + fieldValue(reply, 3) + ' destination=' + fieldValue(reply, 4) + ' status=' + fieldValue(reply, 5) : 'no reply'));
+      // Read back whatever happened, confirmed or not: the pedal's order and its current preset are the truth.
+      const { listed, read } = await rereadPresetsAfterMove();
+      log('Preset reorder read-back: list=' + listed + ', state=' + read);
+      if (!read) { ui.presetUnknown = true; render(); }
       if (!ackOk) {
-        toast('The pedal did not confirm the preset move; its current order has been refreshed.');
+        toast('The pedal did not confirm the move. ' + (listed ? 'The list shows its order as it is now.' : 'Its order could not be read either: Refresh to see it.') + (read ? '' : ' ' + PRESET_UNKNOWN));
         return false;
       }
-      if (!stateRefreshed) {
-        log('Preset move and list confirmed, but the current preset state was not refreshed.');
-        toast('Preset moved and the list refreshed, but the current preset details could not be confirmed.');
-        return true;
+      if (!listed || !read) {
+        toast('Preset moved, but ' + (!listed ? 'the preset list could not be read again (Refresh to see the order)' : 'the current preset could not be read again') + '. ' + (read ? '' : PRESET_UNKNOWN));
+        return false;
       }
       toast('Moved preset ' + (source + 1) + ' to position ' + (destination + 1) + '.');
       return true;
@@ -3119,12 +3104,13 @@
       render();
     }
   }
+  window.__movePresetOrder = movePresetOrder;
 
   function renderSide() {
     const q = ui.filter.trim().toLowerCase();
     const names = [];
     for (let i = 1; i <= 64; i++) names.push(presetName(i));
-    const sig = [state.connected, state.selectedPreset, q, ui.presetReorderBusy, names.join('|')].join('#');
+    const sig = [state.connected, state.selectedPreset, ui.presetUnknown, q, canReorder(), names.join('|')].join('#');
     if (sig === ui.sideSig) return;
     ui.sideSig = sig;
 
@@ -3141,30 +3127,34 @@
       if (q && !name.toLowerCase().includes(q) && String(i) !== q) continue;
       const empty = /^empty$/i.test(name);
       rows.push(el('div', {
-        draggable: state.connected && !ui.demo && !ui.presetReorderBusy ? 'true' : null,
+        // Drag a row onto another to move it there. Only drags that started on this list count (a private type plus
+        // the remembered source row): text dropped from elsewhere does nothing.
+        draggable: canReorder() ? 'true' : null,
         ondragstart: (e) => {
-          if (ui.presetReorderBusy || ui.demo || !state.connected) { e.preventDefault(); return; }
+          if (!canReorder()) { e.preventDefault(); return; }
+          presetDragSource = i;
           e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData('text/plain', String(i));
+          e.dataTransfer.setData(PRESET_DRAG_TYPE, String(i));
           e.currentTarget.classList.add('dragging');
         },
         ondragover: (e) => {
-          if (!ui.presetReorderBusy && Array.from(e.dataTransfer.types).includes('text/plain')) {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = 'move';
-            e.currentTarget.classList.add('drop-target');
-          }
+          if (!presetDragSource || !canReorder() || !Array.from(e.dataTransfer.types).includes(PRESET_DRAG_TYPE)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          e.currentTarget.classList.add('drop-target');
         },
         ondragleave: (e) => e.currentTarget.classList.remove('drop-target'),
         ondrop: (e) => {
-          e.preventDefault();
-          const sourceRow = Number(e.dataTransfer.getData('text/plain'));
+          const from = presetDragSource;
+          presetDragSource = 0;
           e.currentTarget.classList.remove('drop-target');
-          if (!Number.isInteger(sourceRow) || sourceRow < 1 || sourceRow > 64 || sourceRow === i) return;
+          if (!from || !Array.from(e.dataTransfer.types).includes(PRESET_DRAG_TYPE) || Number(e.dataTransfer.getData(PRESET_DRAG_TYPE)) !== from) return;
+          e.preventDefault();
+          if (from === i || !canReorder()) return;
           suppressPresetClickUntil = Date.now() + 350;
-          void movePresetOrder(sourceRow - 1, i - 1);
+          void movePresetOrder(from - 1, i - 1);
         },
-        ondragend: () => document.querySelectorAll('.preset-row.dragging, .preset-row.drop-target').forEach(r => r.classList.remove('dragging', 'drop-target')),
+        ondragend: () => { presetDragSource = 0; document.querySelectorAll('.preset-row.dragging, .preset-row.drop-target').forEach(r => r.classList.remove('dragging', 'drop-target')); },
         oncontextmenu: (e) => contextMenu(e, [
           { label: i === state.selectedPreset ? 'Current preset' : 'Load', disabled: !state.connected || i === state.selectedPreset, action: () => goToPreset(i) },
           ...(i === state.selectedPreset ? [{ label: 'Discard edits', disabled: !state.connected || !isDirtyNow(), action: () => doDiscard() }] : []),
@@ -3176,9 +3166,9 @@
           '-',
           { label: 'Delete\u2026', danger: true, disabled: !state.connected || empty, action: () => doDelete(i) },
         ]),
-        class: 'preset-row' + (state.connected && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : '') + (ui.presetReorderBusy ? ' reorder-pending' : ''),
+        class: 'preset-row' + (state.connected && !ui.presetUnknown && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : '') + (ui.presetReorderBusy ? ' reorder-pending' : ''),
         role: 'option',
-        'aria-selected': String(state.connected && i === state.selectedPreset),
+        'aria-selected': String(state.connected && !ui.presetUnknown && i === state.selectedPreset),
         dataset: { n: i },
         onclick: () => { if (Date.now() > suppressPresetClickUntil) goToPreset(i); },
       }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name })));
@@ -4239,7 +4229,7 @@
     $('bleLed').className = 'led' + (ble ? ' on' : busy ? ' busy' : '');
     $('bleText').textContent = ui.demo ? 'Demo data, nothing is sent' : ble ? 'Connected to Nano Cortex' + (state.firmware ? ' · firmware ' + state.firmware : '') : busy ? 'Connecting…' : 'No pedal';
     // Only speaks up when the pedal itself reports something worth knowing.
-    const note = ble && pedalDirtyForUI() ? 'Pedal reports unsaved changes' : '';
+    const note = ble && ui.presetUnknown ? 'Current preset unknown: Refresh to read it' : ble && pedalDirtyForUI() ? 'Pedal reports unsaved changes' : '';
     $('pcText').textContent = note;
     $('pcText').parentElement.hidden = !note;
     // "Sent: <protocol label>" is a developer detail; progress like "Saving preset 3…" is for everyone.
@@ -5025,6 +5015,22 @@
     const FULL_IR = (n) => 'Factory/' + IRS[n - 1].split('/')[1] + '/' + IR_NAME(n);
 
     const saved = new Map(); // preset -> snapshot JSON
+    // Which of the demo's sounds each preset slot holds (a preset move reorders them).
+    const origin = Array.from({ length: 64 }, (_, i) => i + 1);
+    const moved = { names: null, current: 0 };   // what the next metadata / state read reports after a move
+    function movePresets(from, to) {
+      if (!(from >= 0 && from < 64 && to >= 0 && to < 64) || from === to) return;
+      const after = (i) => (i === from ? to : from < to && i > from && i <= to ? i - 1 : from > to && i >= to && i < from ? i + 1 : i);
+      const remap = (map) => { const out = new Map(); for (const [n, v] of map) out.set(after(n - 1) + 1, v); map.clear(); for (const [n, v] of out) map.set(n, v); };
+      const names = Array.from({ length: 64 }, (_, i) => presetName(i + 1));
+      const o = origin.slice();
+      const nextNames = [];
+      for (let i = 0; i < 64; i++) { nextNames[after(i)] = names[i]; origin[after(i)] = o[i]; }
+      [saved, expSaved, expLive].forEach(remap);
+      FS_FIELDS.forEach(([key]) => { fsSlots[key] = after(fsSlots[key]); });
+      moved.names = nextNames;
+      moved.current = after(state.selectedPreset - 1) + 1;
+    }
     // The (demo) pedal's footswitch slots, 0-based preset indices; reported in the state dump as fields 14/15/38/39.
     const fsSlots = { a1: 0, b1: 2, a2: 6, b2: 14 };
     const FS_FIELDS = [['a1', 5], ['b1', 6], ['a2', 7], ['b2', 8]];
@@ -5155,7 +5161,22 @@
       // A current-state read (1 {1:3 3:1 4:1 5:1}) completes like the core's parse would end it: the preset load is
       // over and the read counts (pro/live-sync.js). Test hook: hooks.dropStateReads leaves it unanswered.
       if (type === 1 && bytes[4] === 0x18 && bytes[5] === 0x01 && !hooks.dropStateReads) {
-        setTimeout(() => { if (state.stateMode === 'current') state.stateMode = 'idle'; state.protocol.presetLoad = false; NanoLive.noteStateRead(); }, 20);
+        setTimeout(() => {
+          if (state.stateMode === 'current') state.stateMode = 'idle';
+          state.protocol.presetLoad = false;
+          if (moved.current) { state.selectedPreset = moved.current; moved.current = 0; applyStateDump(); }   // field 13 and the footswitches
+          NanoLive.noteStateRead();
+          render();
+        }, 20);
+      }
+      // The metadata read (1 {1:3}): the preset list as the pedal now has it (after a move: in the new order).
+      if (type === 1 && bytes.length === 8 && bytes[4] === 0x01) {
+        setTimeout(() => {
+          if (moved.names) { moved.names.forEach((name, i) => state.presetNames.set(i + 1, name)); moved.names = null; }
+          Object.assign(state.protocol, { feSyncComplete: true, metadataLoaded: true });
+          if (state.stateMode === 'metadata') state.stateMode = 'idle';
+          render();
+        }, 20);
       }
       if (type === MSG.SetPresetSlotsRequest) {
         // Field 4 = -1 (parsed as a huge number): a footswitch assignment, not a preset change. Keep the slots
@@ -5177,6 +5198,14 @@
         else notify(buildFrame([0x08, 0x01, 0x18, 0x01, 0x2D, ...float32LE(tempoRun)], TEMPO_MSG));   // the echo
       }
       else if (type === MSG.RenamePresetRequest) reply(buildFrame([0x20, 0x01], MSG.RenamePresetResponse));
+      else if (type === MSG_PRESET_MOVE) {
+        // 143 { 1: 4, 3: from, 4: to } → 144 { 1: 6, 3: from, 4: to, 5: 1 }: the demo pedal moves the preset (and what
+        // it stores for it) by insertion; its current preset and footswitches follow the presets.
+        const f = framePayloadFields(bytes);
+        const from = f[3] ? f[3][0].value : 0, to = f[4] ? f[4][0].value : 0;
+        movePresets(from, to);
+        notify(buildFrame([0x08, 0x06, 0x18, from, 0x20, to, 0x28, 0x01], MSG_PRESET_MOVE_REPLY));
+      }
       else if (type === 50) { const idx = bytes[5]; notify(buildFrame([0x08, 0x01], 31)); notify(buildFrame([0x08, 0x06, 0x18, idx, 0x20, 0x01], 51)); }   // via onC305, where the delete ack is read
       else if (type === MSG.RetrieveExpAssignmentsRequest) {
         // 60 {1:3 3:index} → 64 {1:1 3:2} (meaning unknown, seen in the trace) and 61 {1:1, records at field − 1}.
@@ -5374,7 +5403,7 @@
     }
     function load(n) {
       if (!running) return;
-      if (saved.has(n)) applySnapshot(saved.get(n)); else if (n <= 24) fromPreset(n); else blank();
+      if (saved.has(n)) applySnapshot(saved.get(n)); else if (origin[n - 1] <= 24) fromPreset(origin[n - 1]); else blank();
       reportFxModels();
       applyStateDump();
       emitTempo();
