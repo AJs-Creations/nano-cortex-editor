@@ -555,6 +555,29 @@ async function run() {
     render();
   })()`);
   await frame();
+  // Only assigned FX blocks are read back while the pedal moves, and an Amount only moves on screen when its
+  // parameter is known (Mix, Amount, Transpose → Semitones); otherwise the read-back shows the real value.
+  const expSaved2 = await js('JSON.stringify({ loaded: state.exp.loaded, preset: state.exp.preset, ranges: state.exp.ranges, bypass: state.exp.bypass })');
+  const pre2Saved = await js('JSON.stringify({ model: state.blocks.pre2.model, on: state.blocks.pre2.on, params: state.blocks.pre2.params })');
+  await js('state.exp.loaded = true; state.exp.preset = state.selectedPreset; state.exp.pending = null; state.exp.ranges = {}; state.exp.bypass = {}; 0');
+  check('with nothing assigned to the expression pedal there is nothing to read back', JSON.stringify(await js('NanoLive.expressionReadbackKeys()')) === '[]');
+  n0 = await mark();
+  await rxExpressionPosition(200); await settle();
+  check('… so a pedal move sends no parameter reads', !(await txSince(n0)).some(t => /param refresh/.test(t)), JSON.stringify(await txSince(n0)));
+  const vague = await js(`(() => {
+    const b = state.blocks.pre2;
+    const m = b.models.find(x => x.name !== 'None' && x.params && x.params.length && !x.params.some(p => /^(mix|amount)$/i.test(p.name)));
+    b.model = m.name; b.params = structuredClone(m.params); b.on = true;
+    state.exp.ranges = { pre2: { on: true, inverted: false, min: 0, max: 100 } };
+    render();
+    return { model: m.name, values: JSON.stringify(b.params.map(p => p.value)) };
+  })()`);
+  n0 = await mark();
+  await rxExpressionPosition(255);
+  tx = await txWait(n0, t => t.some(x => /^TX Pre FX 2 param refresh/.test(x)));
+  check('an effect whose Amount parameter isn\'t known (' + vague.model + ') is not animated but read back', (await js('JSON.stringify(state.blocks.pre2.params.map(p => p.value))')) === vague.values && JSON.stringify(await js('NanoLive.expressionReadbackKeys()')) === '["pre2"]' && tx.some(t => /^TX Pre FX 2 param refresh/.test(t)), JSON.stringify(tx));
+  await js(`(() => { Object.assign(state.exp, ${expSaved2}); Object.assign(state.blocks.pre2, ${pre2Saved}); NanoLive.reset(); render(); })()`);
+  await settle();
 
   // type exact value
   await click('[data-fk="cap-vol"] .val');
@@ -1385,6 +1408,16 @@ async function run() {
   await key('5'); await frame();
   await waitFor('document.querySelectorAll(".cab-library-section .library-item").length >= 5');
   check('cab library rows show plain names with preview controls', await js('(() => { const rows = [...document.querySelectorAll(".cab-library-section .library-row")]; return rows.length >= 5 && rows[0].querySelector(".library-item")?.textContent === "412 V30" && rows[0].querySelector(".library-preview")?.getAttribute("aria-label") === "Preview 412 V30" && !rows[0].querySelector(".kind"); })()'), await js('document.querySelector(".cab-library-section .library-row")?.outerHTML'));
+  await js('window.__libNode = document.querySelector(".cab-library-content")');
+  await click('[data-fk="cab-lib-search"]'); await type('412'); await js('render()'); await frame(); await js('render()'); await frame();
+  check('the cab library search keeps focus and its list is not rebuilt by redraws', await js('document.activeElement === document.querySelector("[data-fk=cab-lib-search]") && document.querySelector(".cab-library-content") === window.__libNode && document.activeElement.value === "412" && [...document.querySelectorAll(".cab-library-section .library-row")].filter(r => !r.hidden).length >= 2 && [...document.querySelectorAll(".cab-library-section .library-row")].filter(r => !r.hidden).every(r => /412/.test(r.textContent))'));
+  for (let i = 0; i < 3; i++) await key('Backspace');
+  check('… its caret stayed at the end: three Backspaces clear it and every cab and IR shows again', await js('document.querySelector("[data-fk=cab-lib-search]").value === "" && [...document.querySelectorAll(".cab-library-section .library-row")].every(r => !r.hidden)'), await js('document.querySelector("[data-fk=cab-lib-search]").value + " / hidden " + [...document.querySelectorAll(".cab-library-section .library-row")].filter(r => r.hidden).length'));
+  await js('document.activeElement.blur(); delete window.__libNode'); await frame();
+  await rightClick('[data-fk="node-cab"]');
+  await js(ctxItem('Pick a cab from the library') + '.click()');
+  await checkSoon('the cab node menu\'s "Pick a cab from the library…" goes to the library search', 'document.activeElement === document.querySelector("[data-fk=cab-lib-search]")');
+  await js('document.activeElement.blur()'); await frame();
   await key('4'); await frame();
 
   // ---------------------------------------------------------------- slot usage scan
@@ -2131,6 +2164,27 @@ async function run() {
   await key('l', [MOD]);
   check('⌘L does nothing again', await js('!__ui.drawerOpen'));
   await settle();
+
+  // ---------------------------------------------------------------- unsaved-changes prompts: an edit still on its way counts
+  // The pedal's 115 comes after an edit lands. An edit write queued or in flight, or sent < 300 ms ago without a 115
+  // since, makes the switch prompt ask (the header's mark stays the pedal's).
+  await js('state.presetDirty = false; __demo.hooks.quiet115 = true; render()'); await settle();
+  check('an edit write that just went out counts as unsaved for the prompts, before any 115', await js('(() => { setAmpKnob("bass", 141); return __isDirtyForPrompt() && !state.presetDirty; })()'));
+  await sleep(450);
+  check('… and no longer once 300 ms pass without a 115 (the pedal says clean)', await js('!__isDirtyForPrompt() && !state.presetDirty'));
+  await js('__demo.hooks.writeDelay = 1500'); await frame();
+  const latencyFrom = await js('state.selectedPreset');
+  const latencyTo = latencyFrom === 1 ? 2 : 1;
+  await js('__ui.selected = "capture"; render()'); await frame();
+  await click('[data-fk="amp-bass"] .label');
+  n0 = await txCount();
+  await key('Up');
+  await click(`.preset-row[data-n="${latencyTo}"]`);
+  await checkSoon('switching right after an edit (its write still in flight) asks "Save changes to …?"', '!!document.querySelector(".modal h2") && /^Save changes to /.test(document.querySelector(".modal h2").textContent)');
+  await key('Escape');
+  await checkSoon('… Escape keeps the preset', async () => (await js('state.selectedPreset')) === latencyFrom && await js('!document.querySelector(".modal")'));
+  await js('__demo.hooks.writeDelay = 0; __demo.hooks.quiet115 = false; state.presetDirty = false; render()'); await settle();
+  await waitFor('!__isDirtyForPrompt()');   // the held write has landed and its 300 ms are over
 
   // ---------------------------------------------------------------- preset reordering (143 → 144, then list and state read back)
   // Synthetic drag events (Chromium's DataTransfer); the list only takes drags that started on one of its rows.

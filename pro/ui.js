@@ -1371,6 +1371,32 @@
     return coreOnC305ForPresetChange.apply(this, [event, ...rest]);
   };
 
+  // Edits on their way to the pedal. Its dirty report (115) comes after an edit lands, so a prompt right after an
+  // edit would see a clean preset: an edit write queued or in flight, or sent less than 300 ms ago with no 115 since,
+  // counts as unsaved for the "Save changes to …?" prompts (isDirtyNow). The mark in the header stays the pedal's.
+  const EDIT_WRITE_TYPES = new Set([26, 28, 31, 62, 94, 95, 99, 136]);   // knobs, slots, bypass, expression, cab, FX, models
+  const editWrites = { inFlight: 0, lastSentAt: 0, lastReportAt: 0 };
+  const isEditWrite = (p) => {
+    const type = p && p.length >= 6 ? frameType(p) : null;
+    return EDIT_WRITE_TYPES.has(type) || (type === TEMPO_MSG && p[2] === 0x18 && p[3] === 0);   // tempo: the preset's, not the live one
+  };
+  const coreWriteC304 = window.writeC304;
+  window.writeC304 = function (label, payload) {
+    if (!isEditWrite(payload)) return coreWriteC304.apply(this, arguments);
+    editWrites.inFlight++;
+    return coreWriteC304.apply(this, arguments).then((ok) => {
+      editWrites.inFlight--;
+      if (ok) editWrites.lastSentAt = Date.now();
+      return ok;
+    });
+  };
+  const coreTypedForDirty = window.handleTypedMessage;
+  window.handleTypedMessage = function (data) {
+    if (frameType(data) === MSG.PresetDirtyStateChanged) editWrites.lastReportAt = Date.now();
+    return coreTypedForDirty.apply(this, arguments);
+  };
+  const editPending = () => editWrites.inFlight > 0 || (editWrites.lastSentAt > editWrites.lastReportAt && Date.now() - editWrites.lastSentAt < 300);
+
   // A preset switch drops unsaved edits on the pedal, a pending tempo commit included.
   const coreSelectPreset = window.selectPreset;
   window.selectPreset = function () {
@@ -1485,10 +1511,22 @@
     }
   }
 
+  // Built again only when the library or an audition changed (the inspector redraws on every report). The query is
+  // applied to the rows in place, so typing never rebuilds it; the same input keeps its focus and caret.
+  let irLibraryCache = { sig: '', node: null };
   function irLibrarySection() {
+    const lib = state.library;
+    const sig = JSON.stringify([state.connected, lib.loaded, ui.uploading, ui.previewBusy,
+      irAudition.busy, irAudition.stopping, irAudition.active && [irAudition.active.kind, irAudition.active.index],
+      irAudition.pending && [irAudition.pending.kind, irAudition.pending.index],
+      ...['irFactory', 'irUser'].map(k => (lib[k] || []).map(x => x.index + ':' + x.name).join('|'))]);
+    if (irLibraryCache.node && irLibraryCache.sig === sig) return irLibraryCache.node;
+    const old = irLibraryCache.node && irLibraryCache.node.querySelector('.cab-library-search');
+    const caret = old && document.activeElement === old ? [old.selectionStart, old.selectionEnd] : null;
     const root = el('div', { class: 'cab-library-content' });
+    irLibraryCache = { sig, node: root };
     const search = el('input', {
-      class: 'search cab-library-search', type: 'search', placeholder: 'Search cabs and IRs',
+      class: 'search cab-library-search', type: 'search', placeholder: 'Search cabs and IRs', dataset: { fk: 'cab-lib-search' },
       'aria-label': 'Search cabs and IRs', autocomplete: 'off', spellcheck: 'false', value: irLibraryQuery,
       oninput: (e) => { irLibraryQuery = e.currentTarget.value; applyIRLibrarySearch(root); },
     });
@@ -1551,6 +1589,7 @@
     const empty = el('p', { class: 'library-empty' });
     root.append(search, list, empty);
     applyIRLibrarySearch(root);
+    if (caret) search.setSelectionRange(caret[0], caret[1]);   // rebuilt while typing: the caret stays where it was
     return root;
   }
 
@@ -1749,7 +1788,8 @@
   // Parity with the native app: step through every saved preset, note the capture and cab slot each one
   // plays (or that it plays one straight from the library), then go back to the preset we started on.
   // Switching presets discards unsaved edits, so the scan refuses to start while there are any.
-  const isDirtyNow = () => pedalDirtyForUI();
+  const isDirtyNow = () => pedalDirtyForUI() || editPending();
+  window.__isDirtyForPrompt = isDirtyNow;
   const presetLabel = (n) => n + ' ' + presetName(n);
   const usersOf = (kind, slot) => (ui.usage && (kind === 'capture' ? ui.usage.captures : ui.usage.cabs)[slot]) || [];
   const scanTime = () => (ui.usage ? ui.usage.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
@@ -3226,7 +3266,11 @@
       items.push({ label: info.none ? 'Add an effect\u2026' : 'Change effect\u2026', disabled: !state.connected, action: () => { select(s.key); render(); requestAnimationFrame(() => { const b = document.querySelector('[data-fk="picker-' + s.key + '"]'); if (b) openModelPicker(s.key, b); }); } });
       items.push({ label: 'Clear slot', disabled: !state.connected || info.none, action: () => { chooseModel(s.key, 'None'); render(); } });
     } else if (s.key === 'capture' || s.key === 'cab') {
-      items.push({ label: s.key === 'capture' ? 'Pick a capture from the library\u2026' : 'Pick a cab from the library\u2026', disabled: !state.connected, action: () => { select(s.key); render(); requestAnimationFrame(() => { const b = document.querySelector('[data-fk="lib-' + s.key + '"]'); if (b) openLibraryPicker(s.key, b); }); } });
+      // Captures: the library picker. Cabs: the inspector's "From the library" list (its search box).
+      items.push({ label: s.key === 'capture' ? 'Pick a capture from the library\u2026' : 'Pick a cab from the library\u2026', disabled: !state.connected, action: () => { select(s.key); render(); requestAnimationFrame(() => {
+        if (s.key === 'cab') { const q = document.querySelector('[data-fk="cab-lib-search"]'); if (q) { q.scrollIntoView({ block: 'center' }); q.focus(); } return; }
+        const b = document.querySelector('[data-fk="lib-' + s.key + '"]'); if (b) openLibraryPicker(s.key, b);
+      }); } });
       if (s.key === 'capture') { const slot = activeCaptureSlot(); items.push({ label: 'Info\u2026', disabled: !state.connected || !slot, action: () => openCaptureInfo(slot, document.querySelector('[data-fk="node-capture"]')) }); }
     }
     return items;
@@ -5106,7 +5150,7 @@
     const reply = (frame) => setTimeout(() => handleTypedMessage(frame), 30);
     const notify = (frame) => setTimeout(() => window.onC305({ target: { value: { buffer: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) } } }), 30);
     const reassemble = NanoTransfer.makeReassembler();
-    const hooks = {};   // test hooks (window.__demo.hooks): refuseStop, dropStateReads
+    const hooks = {};   // test hooks (window.__demo.hooks): refuseStop, dropStateReads, quiet115, writeDelay
     const firstField = (fields, n) => fields[n] && fields[n][0];
     const textField = (fields, n) => {
       const x = firstField(fields, n);
@@ -5224,8 +5268,8 @@
       }
       else if ([26, 28, 31, 94, 99, 136].includes(type)) {
         // Demo writes model the pedal: edit writes become dirty only through
-        // the simulated pedal's authoritative type-115 report.
-        notify(buildFrame([0x08, 0x01, 0x18, 0x01], MSG.PresetDirtyStateChanged));
+        // the simulated pedal's authoritative type-115 report (test hook: hooks.quiet115 leaves it out).
+        if (!hooks.quiet115) notify(buildFrame([0x08, 0x01, 0x18, 0x01], MSG.PresetDirtyStateChanged));
       }
       else if (type === NanoLive.MSG.DeleteLibraryIRRequest) {
         const f = framePayloadFields(bytes);
@@ -5426,7 +5470,8 @@
       for (let i = 1; i <= 64; i++) state.presetNames.set(i, i <= 24 ? PRESETS[(i - 1) % PRESETS.length].name + (i > 10 ? ' ' + Math.ceil(i / 10) : '') : 'Empty');
       CAPTURES.forEach((c, i) => state.captureNames.set(i + 1, c));
       IRS.forEach((_, i) => state.irNames.set(i + 1, IR_NAME(i + 1)));
-      state.c304 = { writeValueWithResponse: async (bytes) => onWrite(bytes) };
+      // Test hook: hooks.writeDelay (ms) keeps each write in flight that long.
+      state.c304 = { writeValueWithResponse: async (bytes) => { onWrite(bytes); if (hooks.writeDelay) await new Promise(r => setTimeout(r, hooks.writeDelay)); } };
       state.firmware = DEMO_FW;
       origWait = window.waitForPresetState;
       window.waitForPresetState = async () => true; // no state read-back without a pedal
