@@ -73,6 +73,8 @@ npm run docs:screenshots # regenerate docs/images/ in demo mode (needs Python + 
 
 - **Feature parity with the native app** (`../nano-cortex-editor-mac`): every feature Anup asks for lands in both editors unless it genuinely cannot apply to one; he is still deciding between them. This app's CSS is the visual reference for the native one.
 
+- **One version for both editions, always current.** This edition and the native one release together under the same version (1.2.0 was the first shared one). Settings → About shows it, so bump it in both repos in the same round, before tagging: here `package.json` (and `package-lock.json`) plus `pro/links.js` (the UX test checks they match), there `MARKETING_VERSION` in `project.yml`. `release.yml` refuses a tag that differs from `package.json`.
+
 - **Hardware in the loop.** Anup has the pedal. For anything protocol-related, ask him to do the physical step and read the Activity log (⌘L, Developer tools on), rather than guessing byte formats.
 - Before the first write to a real pedal, make sure his presets are backed up in the official app.
 - Edits are live on the pedal; **Save** (⌘S) commits them to the preset. Never save without an explicit user action.

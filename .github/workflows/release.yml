@@ -58,6 +58,20 @@ jobs:
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
     steps:
+      - uses: actions/checkout@v4
+      # The app shows package.json's version (Settings → About, electron-updater compares it), so a release must
+      # carry the same one: refuse a tag push or a release_tag run when they differ.
+      - name: The version matches the tag
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+        run: |
+          [ -z "$TAG" ] && { echo "Dry run: no tag to match"; exit 0; }
+          v=$(node -p "require('./package.json').version")
+          if [ "v$v" != "$TAG" ]; then
+            echo "::error::package.json is $v but the release is $TAG. Bump package.json and pro/links.js first."
+            exit 1
+          fi
+          echo "package.json $v matches $TAG"
       - id: m
         env:
           PLATFORMS: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms || 'all' }}
