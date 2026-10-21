@@ -120,7 +120,7 @@ remembered pedal.
 
 **Header.**
 
-![The header: logo, preset number and name, then Tuner, Metronome, Rename, Save as…, Refresh, Exit demo and Save](images/header.png)
+![The header: logo, preset number and name, then Tuner, Mute, Metronome, Rename, Save as…, Refresh, Exit demo and Save](images/header.png)
 
 From left to right: the current preset's number and name; **Tuner**; **Mute** (the pedal's guitar input, see
 [Monitoring](#monitoring); red while muted); **Metronome**; **Rename**; **Save as…**; **Refresh** (re-reads everything
@@ -275,7 +275,7 @@ Right-click an item for **Preview** and **Load into slot…**; your own IRs also
 from the pedal after you confirm (there is no undo; the dialog says if one of the five slots holds that IR).
 
 
-![The Cab / IR inspector: tone knobs, mic choices and positions 1–6, and the five cab slots](images/inspector-cab.png)
+![The Cab / IR inspector: tone knobs, mic choices and positions 1–6, the five cab slots, and From the library with a search box, factory cabs and your IRs, each with a ▶ button](images/inspector-cab.png)
 
 ## 6. Footswitches
 
@@ -391,7 +391,7 @@ The **Cortex Cloud** tab (⌘2) shows Neural DSP's own Cortex Cloud website insi
 **Sending a capture to the pedal.** Open a capture's page on the site (for example from Discover → Neural Captures).
 **Send to Nano Cortex** in the toolbar lights up:
 
-![Our toolbar on the Cortex Cloud tab: Editor and Cortex Cloud tabs, back, forward, reload, Home and the highlighted Send to Nano Cortex button](images/cloud-toolbar.png)
+![Our toolbar on the Cortex Cloud tab: Editor and Cortex Cloud tabs, back, forward, reload, Home, IRs, the highlighted Send to Nano Cortex and Live Preview buttons, the IR: Off indicator and Sign out](images/cloud-toolbar.png)
 
 Click it. The app fetches the capture with your Cortex Cloud login and switches to the Editor, which asks you to
 confirm:
@@ -453,7 +453,7 @@ closes the Activity drawer. The log file (**Help → Show Log File**) is written
 
 **Device** reads the pedal's own settings each time you open it.
 
-![Settings, Device tab: name, firmware and serial, LED brightness and USB playback volume](images/settings-device.png)
+![Settings, Device tab: name, firmware and serial, LED brightness and USB playback volume, and Monitoring with the Mute Input and Mute Outputs 1L/2R switches](images/settings-device.png)
 
 - **About**: the pedal's name, firmware and serial number (and, with Developer tools on, the device hash).
 - **LED brightness** (the manual's default is 60 %) and **USB playback volume** (audio from the computer over USB,
