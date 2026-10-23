@@ -220,6 +220,11 @@ async function run() {
   check('64 presets listed', (await js('document.querySelectorAll(".preset-row").length')) === 64);
   check('active preset row highlighted', (await js('document.querySelector(".preset-row.active .t").textContent')) === 'JP2C Lead');
   check('default inspector is Capture', (await js('document.querySelector(".insp-head h1").textContent')) === 'Capture');
+  // Effect slots take their category's colour; Reverb is soft pink, so a delay next to a reverb no longer looks the same.
+  const nodeColour = (k) => js(`(() => { const n = document.querySelector('[data-fk="node-${k}"]'); return n ? [n.style.getPropertyValue('--c').trim().toLowerCase(), getComputedStyle(n.querySelector('.stage')).color, n.querySelector('.model').textContent] : null; })()`);
+  const delayNode = await nodeColour('post2'), reverbNode = await nodeColour('post3');
+  check('a reverb\'s chain node is soft pink (#f570d6), the delay next to it stays #00ffdd', reverbNode && reverbNode[0] === '#f570d6' && reverbNode[1] === 'rgb(245, 112, 214)' && delayNode && delayNode[0] === '#00ffdd' && delayNode[1] === 'rgb(0, 255, 221)', JSON.stringify([delayNode, reverbNode]));
+  check('every reverb model takes the reverb colour (the category map, not a model list)', await js(`state.blocks.post3.models.filter(m => m.category === 'Reverb').length > 3 && (() => { const b = state.blocks.post3, was = b.model; const ok = b.models.filter(m => m.category === 'Reverb').every(m => { b.model = m.name; return __stageColor('post3') === '#f570d6'; }); b.model = was; return ok; })()`));
   await shot('01-capture');
 
   // ---------------------------------------------------------------- developer tools: off by default
@@ -1385,6 +1390,7 @@ async function run() {
   check('kind icons are inline 14 px line drawings', await js(`(() => { const s = ${rowOf('Plexi 1959 SLP')}.querySelector(".sub .kind svg"); const r = s.getBoundingClientRect(); return s.getAttribute("viewBox") === "0 0 16 16" && s.getAttribute("fill") === "none" && Math.round(r.width) === 14 && Math.round(r.height) === 14; })()`));
   check('combo, pedal, preamp and bass get their own icons', (await kinds('AC30 TB Normal')) === 'Combo|Guitar/Neural DSP' && (await kinds('King of Tone')) === 'Pedal|Guitar/Neural DSP' && (await kinds('Bedroom Clean')) === 'Preamp|Guitar/You' && (await kinds('SVT CL Bass')) === 'Amp head|Bass/Neural DSP', [await kinds('AC30 TB Normal'), await kinds('King of Tone'), await kinds('Bedroom Clean'), await kinds('SVT CL Bass')].join(', '));
   check('a default / instrument_not_set capture has no icons, just the author', (await kinds('My Plexi Lead')) === '/You', await kinds('My Plexi Lead'));
+  check('an amp_combo capture (a real pedal\'s word for a combo) gets the combo icon, labelled Combo, and logs nothing', (await kinds('Deluxe Reverb Clean')) === 'Combo|Guitar/Neural DSP' && (await js(`${rowOf('Deluxe Reverb Clean')}.querySelector(".sub .kind").innerHTML === ${rowOf('AC30 TB Normal')}.querySelector(".sub .kind").innerHTML`)) && (await js('__kindDebug.filter(l => /amp_combo/.test(l)).length')) === 0, await kinds('Deluxe Reverb Clean'));
   check('an unknown type word: no icon, raw word in the row tooltip, logged once', (await kinds('Zz Mystery')) === 'Guitar/Tester' && /mystery_box/.test(await js(`${rowOf('Zz Mystery')}.title`)) && (await js('__kindDebug.filter(l => /unknown capture kind mystery_box/.test(l)).length')) === 1, await js(`${rowOf('Zz Mystery')}?.title`) + ' ' + await js('JSON.stringify(__kindDebug)'));
   check('every capture row has a subtitle line', await js('document.querySelectorAll(".pop .pop-item.two").length === document.querySelectorAll(".pop .pop-item").length'));
   await shot('xx-library-kinds');
@@ -2344,6 +2350,23 @@ async function run() {
   await shot('xx-capture-info');
   await key('Escape');
   await checkSoon('Esc closes capture info', '!document.querySelector(".cap-info")');
+  // Slot 2 answers "null" for its description, as a real pedal does for a capture without one: nothing is shown.
+  await rightClick('[data-fk="capslot-2"]');
+  await js(ctxItem('Info') + '.click()');
+  await waitFor('!!document.querySelector(\'[data-fk="cap-author"]\') && !!document.querySelector(\'[data-fk="cap-tags"] .chip\')');
+  check('a capture whose description is "null" shows no description (no empty paragraph either)', await js('!document.querySelector(\'[data-fk="cap-desc"]\') && ![...document.querySelectorAll(".cap-info p")].some(p => /null/i.test(p.textContent) || !p.textContent.trim()) && !/null/i.test(document.querySelector(".cap-info").textContent)'), await js('document.querySelector(".cap-info")?.textContent'));
+  await key('Escape'); await waitFor('!document.querySelector(".cap-info")');
+  // Slot 4 answers an empty description, like the traced pedal reply: no "null" either (the panel used to make one).
+  await rightClick('[data-fk="capslot-4"]');
+  await js(ctxItem('Info') + '.click()');
+  await waitFor('!!document.querySelector(\'[data-fk="cap-author"]\') && !!document.querySelector(\'[data-fk="cap-tags"] .chip\')');
+  check('a capture with an empty description shows no description and no stray "null"', await js('!document.querySelector(\'[data-fk="cap-desc"]\') && !/null/i.test(document.querySelector(".cap-info").textContent) && [...document.querySelector(".cap-body").childNodes].every(n => n.nodeType === 1)'), await js('document.querySelector(".cap-info")?.textContent'));
+  await key('Escape'); await waitFor('!document.querySelector(".cap-info")');
+  const descOf = (v) => js(`NanoText.captureDescription(${JSON.stringify(v)})`);
+  check('a description of "null" (any case), blanks or nothing counts as none; real text is kept', (await descOf('null')) === '' && (await descOf(' NULL ')) === '' && (await descOf('Null')) === '' && (await descOf('   ')) === '' && (await descOf(null)) === '' && (await js('NanoText.captureDescription(undefined)')) === '' && (await descOf('Not null at all')) === 'Not null at all' && require('../pro/capture-text').captureDescription(' null ') === '');
+  check('sending a capture never writes "null" as its description (field 5 goes out empty)', await js(`(() => { const m = { hash: 'ab', name: 'N', cloudUUID: 'u', authorId: 'a', authorName: 'b', deviceType: 'pedal', tags: [], instrumentType: 'guitar', version: '1' };
+    const a = NanoTransfer.captureRecord({ ...m, description: 'null' }), b = NanoTransfer.captureRecord({ ...m, description: '' }), c = NanoTransfer.captureRecord({ ...m, description: 'Warm' });
+    return JSON.stringify(a) === JSON.stringify(b) && !new TextDecoder().decode(Uint8Array.from(a)).includes('null') && new TextDecoder().decode(Uint8Array.from(c)).includes('Warm'); })()`));
   const curSlot = await js('state.capture.selectedSlot');
   await rightClick('[data-fk="node-capture"]');
   n0 = await mark();
@@ -2409,19 +2432,107 @@ async function run() {
   await waitFor('!__isDirtyForPrompt()');   // the held write has landed and its 300 ms are over
 
   // ---------------------------------------------------------------- preset reordering (143 → 144, then list and state read back)
-  // Synthetic drag events (Chromium's DataTransfer); the list only takes drags that started on one of its rows.
-  const dragRow = (from, to, dt = 'new DataTransfer()') => js(`(() => {
-    const dt = ${dt};
-    const src = document.querySelector('.preset-row[data-n="${from}"]'), dst = document.querySelector('.preset-row[data-n="${to}"]');
-    if (${from}) src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+  // Real mouse input: press on a row (its name, or with `grip` its ⋮⋮ grip), move in steps, release on another row.
+  // The list is scrolled first so both rows are on screen and clear of the auto-scroll edges.
+  const rowSel = (n, part = '') => `#presetList .preset-row[data-n="${n}"]${part ? ' ' + part : ''}`;
+  const centreOf = (sel) => js(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return null; const b = e.getBoundingClientRect(); return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; })()`);
+  async function dragRow(from, to, { grip = false, beforeUp = null } = {}) {
+    const fit = await js(`(() => {
+      const l = document.getElementById('presetList'), a = l.querySelector('.preset-row[data-n="${from}"]'), b = l.querySelector('.preset-row[data-n="${to}"]');
+      if (!a || !b) return 'missing';
+      const lb = l.getBoundingClientRect(), ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      l.scrollTop += (Math.min(ra.top, rb.top) + Math.max(ra.bottom, rb.bottom)) / 2 - (lb.top + lb.bottom) / 2;
+      // Both rows whole on screen, and their centres (where the pointer goes) out of the auto-scroll edges unless the
+      // list can't scroll that way anyway.
+      const canUp = l.scrollTop > 0, canDown = l.scrollTop < l.scrollHeight - l.clientHeight - 1;
+      const rows = [a, b].map(r => r.getBoundingClientRect());
+      const ok = rows.every(r => r.top >= lb.top - 0.5 && r.bottom <= lb.bottom + 0.5 && (!canUp || r.top + r.height / 2 >= lb.top + 28) && (!canDown || r.top + r.height / 2 <= lb.bottom - 28));
+      return ok ? 'ok' : 'too far apart for the list (' + Math.round(lb.height) + ' px)';
+    })()`);
+    if (fit !== 'ok') check('drag harness: rows ' + from + ' and ' + to + ' fit on screen together', false, fit);
+    await frame();
+    const a = await centreOf(rowSel(from, grip ? '.grip' : '.t')), b = await centreOf(rowSel(to, '.t'));
+    wc.sendInputEvent({ type: 'mouseMove', x: a.x, y: a.y }); await frame();
+    wc.sendInputEvent({ type: 'mouseDown', x: a.x, y: a.y, button: 'left', clickCount: 1 });
+    const steps = 10;
+    for (let k = 1; k <= steps; k++) {
+      wc.sendInputEvent({ type: 'mouseMove', x: Math.round(a.x + (b.x - a.x) * k / steps), y: Math.round(a.y + (b.y - a.y) * k / steps), button: 'left' });
+      await sleep(12);
+    }
+    await frame();
+    if (beforeUp) await beforeUp(b);
+    wc.sendInputEvent({ type: 'mouseUp', x: b.x, y: b.y, button: 'left', clickCount: 1 });
+    await sleep(40); await frame();
+  }
+  // Text dragged in from elsewhere (an HTML5 drop, not a press on a row).
+  const dropText = (to, text) => js(`(() => {
+    const dt = new DataTransfer(); dt.setData('text/plain', ${JSON.stringify(String(text))});
+    const dst = document.querySelector('#presetList .preset-row[data-n="${to}"]');
     dst.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
     dst.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
-    if (${from}) src.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
     return true;
   })()`);
   const allNames = () => js('[...Array(64).keys()].map(i => state.presetNames.get(i + 1))');
   const namesBefore = await allNames();
+  // A taller window for this section: the move back drags row 2 onto row 22 with the filter off, both on screen.
+  win.setContentSize(1400, 1000);
+  await waitFor('innerHeight === 1000'); await frame();
   await js('document.activeElement.blur()');
+  await js('{ const f = document.getElementById("presetFilter"); f.value = ""; f.dispatchEvent(new Event("input")); f.blur(); }'); await frame();
+  // The grip: ⋮⋮ on the row under the mouse only. Rows show the arrow; the open hand only over the grip.
+  const gripInfo = (n) => js(`(() => {
+    const r = document.querySelector('#presetList .preset-row[data-n="${n}"]'), g = r && r.querySelector('.grip'), s = g && g.querySelector('svg');
+    if (!s) return null;
+    const rb = r.getBoundingClientRect(), sb = s.getBoundingClientRect(), gb = g.getBoundingClientRect();
+    return { vis: getComputedStyle(g).visibility, color: getComputedStyle(g).color, row: getComputedStyle(r).cursor, name: getComputedStyle(r.querySelector('.t')).cursor, grip: getComputedStyle(g).cursor,
+      w: Math.round(sb.width), h: Math.round(sb.height), right: Math.round(rb.right - sb.right), dy: Math.round((sb.top + sb.bottom - rb.top - rb.bottom) / 2),
+      hitW: Math.round(gb.width), hitH: Math.round(gb.height), hitRight: Math.round(rb.right - gb.right), nameRight: Math.round(rb.right - r.querySelector('.t').getBoundingClientRect().right) };
+  })()`);
+  await js(`document.getElementById('presetList').scrollTop = 0`); await frame();
+  let pt = await centreOf(rowSel(3, '.t'));
+  wc.sendInputEvent({ type: 'mouseMove', x: pt.x, y: pt.y }); await frame();
+  let gr3 = await gripInfo(3), gr4 = await gripInfo(4);
+  check('preset rows: the ⋮⋮ grip is hidden on a row the mouse is not over', gr4 && gr4.vis === 'hidden', JSON.stringify(gr4));
+  check('preset rows: the grip shows on the row under the mouse: right end (8 px in), 6 × 10, centred, faint', gr3 && gr3.vis === 'visible' && gr3.w === 6 && gr3.h === 10 && gr3.right === 8 && Math.abs(gr3.dy) <= 1 && gr3.color === 'rgb(97, 97, 97)' && gr3.nameRight === 20, JSON.stringify(gr3));
+  check('preset rows: a row shows the arrow cursor, not the pointing hand', gr3.row === 'default' && gr3.name === 'default', JSON.stringify(gr3));
+  pt = await centreOf(rowSel(3, '.grip'));
+  wc.sendInputEvent({ type: 'mouseMove', x: pt.x, y: pt.y }); await frame();
+  gr3 = await gripInfo(3);
+  check('preset rows: the grip shows the open hand (a 20 × 28 target to the row\'s edge) and brightens', gr3.grip === 'grab' && gr3.hitW === 20 && gr3.hitH === 28 && gr3.hitRight === 0 && gr3.color === 'rgb(171, 171, 171)' && (await js(`document.elementFromPoint(${pt.x}, ${pt.y}).closest('.grip') !== null`)), JSON.stringify(gr3));
+  await shot('xx-preset-grip');
+  pt = await centreOf(rowSel(3, '.t'));
+  wc.sendInputEvent({ type: 'mouseMove', x: pt.x, y: pt.y }); await frame();
+  await shot('xx-preset-grip-row');
+  // While dragging: the closed hand everywhere, the source dimmed, a copy of the row under the pointer, the target outlined.
+  n0 = await mark();
+  let during = null;
+  await dragRow(3, 6, { beforeUp: async (b) => {
+    during = await js(`({ html: document.documentElement.classList.contains('preset-dragging'), under: getComputedStyle(document.elementFromPoint(${b.x}, ${b.y})).cursor,
+      body: getComputedStyle(document.body).cursor, drag: __presetDrag(), ghost: !!document.querySelector('.preset-ghost .preset-row'),
+      src: document.querySelector('#presetList .preset-row[data-n="3"]').classList.contains('dragging'), dst: document.querySelector('#presetList .preset-row[data-n="6"]').classList.contains('drop-target'),
+      grips: [...document.querySelectorAll('#presetList .grip')].every(g => getComputedStyle(g).visibility === 'hidden') })`);
+    await key('Escape');
+  } });
+  check('dragging a preset row shows the closed hand (grabbing) all the way, with a copy of the row; the source dims, the target is outlined', during && during.html && during.under === 'grabbing' && during.body === 'grabbing' && during.drag && during.drag.active && during.drag.from === 3 && during.drag.target === 6 && during.ghost && during.src && during.dst && during.grips, JSON.stringify(during));
+  await settle();
+  check('Escape cancels a row drag: nothing sent, no preset loaded, the cursor and the styling are back', (await txSince(n0)).length === 0 && (await js('state.selectedPreset')) !== 6 && await js('!document.documentElement.classList.contains("preset-dragging") && !document.querySelector(".preset-ghost, #presetList .dragging, #presetList .drop-target") && !__presetDrag()'), JSON.stringify(await txSince(n0)));
+  // Near the list's bottom edge it scrolls (the system drag did that too); released outside the rows, nothing moves.
+  await js(`document.getElementById('presetList').scrollTop = 0`); await frame();
+  const scroll0 = await js('document.getElementById("presetList").scrollTop');
+  n0 = await mark();
+  await dragRow(2, 3, { beforeUp: async (b) => {
+    const lb = await js('(() => { const r = document.getElementById("presetList").getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.bottom - 6) }; })()');
+    wc.sendInputEvent({ type: 'mouseMove', x: lb.x, y: lb.y, button: 'left' });
+    await waitFor(async () => (await js('document.getElementById("presetList").scrollTop')) > scroll0 + 40);
+    wc.sendInputEvent({ type: 'mouseMove', x: lb.x + 400, y: lb.y, button: 'left' });   // over the chain, off the list
+    await frame();
+    b.x = lb.x + 400; b.y = lb.y;
+  } });
+  await settle();
+  check('a row dragged to the list\'s bottom edge scrolls the list; dropped off the rows, nothing is sent', (await js('document.getElementById("presetList").scrollTop')) > scroll0 + 40 && (await txSince(n0)).length === 0 && await js('!__presetDrag() && !document.querySelector(".preset-ghost")'), String(await js('document.getElementById("presetList").scrollTop')) + ' ' + JSON.stringify(await txSince(n0)));
+  // No grip without rows (the filter matches nothing).
+  await click('#presetFilter'); await type('zzzz'); await frame();
+  check('no grip on the "No presets match" list', await js('!document.querySelector("#presetList .grip") && !!document.querySelector("#presetList .side-empty")'));
   await js('{ const f = document.getElementById("presetFilter"); f.value = ""; f.dispatchEvent(new Event("input")); f.blur(); }'); await frame();
   await click('#presetFilter'); await type('Lead'); await frame();
   const leadRows = await js('[...document.querySelectorAll(".preset-row")].map(r => Number(r.dataset.n))');
@@ -2431,20 +2542,25 @@ async function run() {
   await checkSoon('(the preset to move is the current one)', `state.selectedPreset === ${mvFrom} && !document.querySelector(".modal")`); await settle();
   // Text dragged in from elsewhere (not a row of this list) is ignored.
   n0 = await mark();
-  await dragRow(0, mvTo, '(() => { const d = new DataTransfer(); d.setData("text/plain", "' + mvFrom + '"); return d; })()');
+  await dropText(mvTo, mvFrom);
   await settle();
   check('an external text drop on a preset row sends nothing', (await txSince(n0)).length === 0, JSON.stringify(await txSince(n0)));
-  // While the slot usage scan runs, rows can't be dragged and a move is refused.
+  // While the slot usage scan runs, rows can't be dragged (no grip, a drag does nothing) and a move is refused.
   await js('__ui.scanning = true; __ui.sideSig = ""; render()'); await frame();
   n0 = await txCount();
+  let scanDrag = null;
+  await dragRow(mvFrom, mvTo, { beforeUp: async (b) => { scanDrag = await js(`({ drag: __presetDrag(), html: document.documentElement.classList.contains('preset-dragging'), grip: getComputedStyle(document.querySelector('#presetList .preset-row[data-n="${mvTo}"] .grip')).visibility })`); } });
   const scanMove = await js(`__movePresetOrder(${mvFrom - 1}, ${mvTo - 1})`);
-  check('reordering is refused while the slot scan runs (rows not draggable, nothing sent)', scanMove === false && await js('[...document.querySelectorAll(".preset-row")].every(r => !r.draggable)') && (await txSince(n0)).length === 0 && /scan/.test(await toastText()), await toastText());
+  check('reordering is refused while the slot scan runs (rows not draggable, nothing sent)', scanMove === false && await js('[...document.querySelectorAll("#presetList .preset-row")].every(r => !r.classList.contains("reorderable"))') && !scanDrag.drag && !scanDrag.html && scanDrag.grip === 'hidden' && (await txSince(n0)).filter(t => /^TX Move preset/.test(t)).length === 0 && /scan/.test(await toastText()), await toastText() + ' ' + JSON.stringify(scanDrag));
   await js('__ui.scanning = false; __ui.sideSig = ""; render()'); await frame();
-  check('rows are draggable again', await js('[...document.querySelectorAll(".preset-row")].every(r => r.draggable)'));
+  check('rows are draggable again', await js('[...document.querySelectorAll("#presetList .preset-row")].every(r => r.classList.contains("reorderable"))'));
+  await click(`.preset-row[data-n="${mvFrom}"]`);   // the drag above loaded nothing, but make sure
+  await checkSoon('(still on the preset to move)', `state.selectedPreset === ${mvFrom} && !document.querySelector(".modal")`); await settle();
   // The move: absolute 0-based indices even with the filter on; then the list and the state are read again.
   n0 = await mark();
   await dragRow(mvFrom, mvTo);
   tx = (await txWait(n0, t => t.some(x => /^TX Current preset state request/.test(x)), { timeout: 10000 })).filter(t => /^TX (Move preset|FE metadata request|Current preset state request)/.test(t));
+  check('a real mouse drag from the row\'s name (not the grip) moves the preset: 143 goes out', tx.some(t => /^TX Move preset/.test(t)), JSON.stringify(tx));
   check('the drop sends 143 with absolute 0-based indices (exact bytes), then reads the list and the state', tx.length >= 3 && tx[0] === `TX Move preset ${mvFrom} to position ${mvTo}: ` + frameHex([0x08, 0x04, 0x18, mvFrom - 1, 0x20, mvTo - 1], 143) && /^TX FE metadata request/.test(tx[1]) && /^TX Current preset state request/.test(tx[2]), JSON.stringify(tx));
   await checkSoon('the moved preset is now at its new position and the others shifted by one (as the pedal listed them)', async () => {
     const now = await allNames();
@@ -2457,8 +2573,9 @@ async function run() {
   await js('{ const f = document.getElementById("presetFilter"); f.value = ""; f.dispatchEvent(new Event("input")); f.blur(); }'); await frame();
   await js('__reorderTimeouts.state = 700; __reorderTimeouts.list = 4000; __demo.hooks.dropStateReads = true');
   n0 = await mark();
-  await dragRow(mvTo, mvFrom);
-  await txWait(n0, t => t.some(x => /^TX Move preset/.test(x)));
+  await dragRow(mvTo, mvFrom, { grip: true });
+  tx = await txWait(n0, t => t.some(x => /^TX Move preset/.test(x)));
+  check('dragging by the ⋮⋮ grip moves a preset too', tx.some(t => t.startsWith(`TX Move preset ${mvTo} to position ${mvFrom}: `)), JSON.stringify(tx));
   await checkSoon('a failed read after a move marks the current preset unknown (header, status bar, toast)', async () => await js('__ui.presetUnknown && document.querySelector(".preset-title .num").textContent === "Preset ?" && !document.querySelector(".preset-row.active")') && /Current preset unknown/.test(await js('document.getElementById("pcText").textContent')) && /doesn’t know which preset/.test(await toastText()), async () => (await toastText()) + ' | ' + await js('document.getElementById("pcText").textContent'));
   check('… Save, Save as and Rename are off and Discard hidden', await js('["saveBtn", "saveAsBtn", "renameBtn"].every(id => document.getElementById(id).disabled) && document.getElementById("discardBtn").hidden'));
   n0 = await txCount();
@@ -2468,6 +2585,8 @@ async function run() {
   await js('__demo.hooks.dropStateReads = false; __reorderTimeouts.state = 6000; __reorderTimeouts.list = 20000; state.presetDirty = false');
   check('a successful state read clears it', (await js('NanoLive.readCurrentState(3000)')) === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'));
   await checkSoon('the order is back as it was', async () => JSON.stringify(await allNames()) === JSON.stringify(namesBefore) && (await js('state.selectedPreset')) === mvFrom);
+  win.setContentSize(1400, 900);
+  await waitFor('innerHeight === 900'); await frame();
   await settle();
 
   // ---------------------------------------------------------------- disconnected / demo exit

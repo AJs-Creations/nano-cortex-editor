@@ -17,7 +17,7 @@
 // The pedal answers with type 14: { 1: 6, 3: status, 4: { 1: userIndex, 2: name, 3: hash } }.
 // The IR download, the audition and the stop are in docs/INVESTIGATION.md §6a and §12 (from #14).
 //
-// Loaded after core.js (needs writeC304, frameType, parseProtoFields, onC305)
+// Loaded after core.js (needs writeC304, frameType, parseProtoFields, onC305) and capture-text.js,
 // and before ui.js.
 (() => {
   'use strict';
@@ -46,7 +46,7 @@
     return [
       ...str(1, m.hash), ...str(2, m.name), ...str(3, m.cloudUUID),
       ...bytes(4, [...str(1, m.authorId), ...str(2, m.authorName)]),
-      ...str(5, m.description || ''),
+      ...str(5, NanoText.captureDescription(m.description)),   // never "null" (pro/capture-text.js)
       ...str(6, m.deviceType || 'default'),
       ...(m.tags || []).flatMap(t => str(7, t)),
       ...int(8, m.gainType),

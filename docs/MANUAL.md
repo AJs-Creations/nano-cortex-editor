@@ -195,7 +195,9 @@ the pedal, after you confirm.
 ![The Discard confirmation](images/discard.png)
 
 **Reordering.** Drag a preset onto another row to move it there; the presets in between shift by one place (an
-insert, not a swap). It works with the filter on, too. With unsaved edits the editor asks first, as for a switch. After
+insert, not a swap). The row under the mouse shows a ⋮⋮ grip at its right end as a hint; you can drag by it or by
+any other part of the row. Escape cancels a drag, and holding it near the top or bottom of the list scrolls the list.
+It works with the filter on, too. With unsaved edits the editor asks first, as for a switch. After
 the move it reads the preset list and the current preset back from the pedal, so what you see is the pedal's order. If
 that read fails, the header shows **Preset ?** and Save, Save as, Rename and Discard stay off until a read succeeds
 (**Refresh**, or pick a preset). Check your footswitch assignments after moving presets. Reordering is off while a

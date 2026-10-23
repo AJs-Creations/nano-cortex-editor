@@ -14,6 +14,7 @@ const fs = require('fs');
 const zlib = require('zlib');
 const { renderAccentIcon, normHex, DEFAULT_ACCENT } = require('./accent-icon');
 const LINKS = require('../pro/links');   // repo, manual, issues, support: the same constants the editor page uses
+const { captureDescription } = require('../pro/capture-text');   // "null" / blank = no description, as in the page
 const { menuTemplate, menuLabels } = require('./menu');
 const { createActivityLog } = require('./activity-log');
 const { randomUUID } = require('crypto');
@@ -575,7 +576,7 @@ async function fetchCaptureBundle(id) {
     cns: files[cnsName].toString('base64'),
     meta: {
       hash: m.hash || cnsName.replace(/\.cns$/, ''), name: m.name || json.name, cloudUUID: m.cloudUUID || id,
-      authorId: m.authorId, authorName: m.authorName, description: m.description || '', deviceType: m.deviceType,
+      authorId: m.authorId, authorName: m.authorName, description: captureDescription(m.description), deviceType: m.deviceType,
       tags: m.tags || [], gainType: m.gainType, instrumentType: m.instrumentType, version: m.version,
     },
   };
