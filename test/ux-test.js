@@ -3053,6 +3053,77 @@ async function run() {
     check('Help → Check for Updates…', /Show Log File,-,Check for Updates…,Support the Project…/.test(help), help);
   }
 
+  // ---------------------------------------------------------------- dev remote hardening (src/dev-remote.js)
+  // No window involved: who the remote answers (not a browser, not another Host name) and where /shot may write.
+  {
+    const { devRemoteRequestAllowed, refuseBrowserRequest, devShotPath, shotRoots } = require('../src/dev-remote');
+    const http = require('http');
+    const os = require('os');
+    const curl = { host: '127.0.0.1:4848', 'user-agent': 'curl/8.7.1', accept: '*/*' };
+    const ok = (extra, port = 4848, base = curl) => devRemoteRequestAllowed({ ...base, ...extra }, port);
+    check('dev remote: a plain curl (127.0.0.1 or localhost, with the right port) is allowed',
+      ok({}) && ok({ host: 'localhost:4848' }) && ok({ host: 'LocalHost:4848' }) && ok({ 'content-type': 'application/x-www-form-urlencoded' }));
+    check('dev remote: any Origin header is refused, whatever its value or spelling',
+      !ok({ origin: 'https://example.com' }) && !ok({ Origin: 'https://example.com' }) && !ok({ ORIGIN: 'null' }) && !ok({ origin: '' }) && !ok({ origin: 'http://127.0.0.1:4848' }));
+    check('dev remote: any Sec-Fetch-Site / -Mode / -Dest header is refused (an <img> or a no-cors fetch carries them)',
+      !ok({ 'sec-fetch-site': 'cross-site' }) && !ok({ 'Sec-Fetch-Mode': 'no-cors' }) && !ok({ 'SEC-FETCH-DEST': 'image' }) && !ok({ 'sec-fetch-site': 'same-origin' }));
+    check('dev remote: a Host that is not exactly 127.0.0.1:<port> or localhost:<port> is refused (DNS rebinding)',
+      !ok({ host: 'attacker.example:4848' }) && !ok({ host: 'attacker.example' }) && !ok({ host: '127.0.0.1' }) && !ok({ host: '127.0.0.1:4849' }) && !ok({ host: 'localhost' })
+      && !ok({ host: '127.0.0.1.attacker.example:4848' }) && !ok({ host: 'localhost.attacker.example:4848' }) && !ok({ host: '127.0.0.1:4848.attacker.example' })
+      && !ok({ host: '[::1]:4848' }) && !ok({ host: '0.0.0.0:4848' }) && !ok({ host: '' }) && !ok({ host: ['127.0.0.1:4848', 'attacker.example'] })
+      && !devRemoteRequestAllowed({ 'user-agent': 'curl' }, 4848) && !devRemoteRequestAllowed(undefined, 4848));
+    check('dev remote: the port in Host must be the remote\'s own', ok({ host: '127.0.0.1:4881' }, 4881) && !ok({ host: '127.0.0.1:4848' }, 4881));
+
+    // The same rules over a real socket: Node's own client sends exactly the headers given.
+    const server = http.createServer((req, res) => {
+      if (refuseBrowserRequest(req, res, server.address().port)) return;
+      res.setHeader('Content-Type', 'application/json'); res.end('{"ok":true,"ran":true}');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const call = (headers, method = 'GET') => new Promise((resolve, reject) => {
+      const rq = http.request({ host: '127.0.0.1', port, path: '/eval', method, headers }, (res) => {
+        let body = ''; res.on('data', (c) => { body += c; }); res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      rq.on('error', reject); rq.end(method === 'POST' ? '1+1' : undefined);
+    });
+    const plain = await call({}), withOrigin = await call({ Origin: 'https://example.com' }, 'POST');
+    const fetchImg = await call({ 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image' });
+    const rebound = await call({ Host: 'attacker.example:' + port }), viaName = await call({ Host: 'localhost:' + port });
+    server.close();
+    check('dev remote over HTTP: a plain request runs; Origin, Sec-Fetch-* and a foreign Host get 403 {ok:false,error:"browser requests are refused"} and nothing runs',
+      plain.status === 200 && JSON.parse(plain.body).ran === true && viaName.status === 200
+      && [withOrigin, fetchImg, rebound].every((r) => r.status === 403 && r.body === '{"ok":false,"error":"browser requests are refused"}'),
+      JSON.stringify([plain, withOrigin, fetchImg, rebound, viaName]));
+
+    // /shot: a .png inside test-output/, docs/images/ or a temp folder, nothing else.
+    const shotBase = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'nano-devshot-')));
+    const repo = path.join(shotBase, 'repo'), outside = path.join(shotBase, 'outside');
+    fs.mkdirSync(path.join(repo, 'test-output'), { recursive: true }); fs.mkdirSync(path.join(repo, 'docs', 'images'), { recursive: true }); fs.mkdirSync(outside);
+    fs.symlinkSync(outside, path.join(repo, 'test-output', 'link-out'));
+    fs.symlinkSync(path.join(outside, 'later.png'), path.join(repo, 'test-output', 'dangling.png'));
+    fs.symlinkSync(path.join(outside, 'target.png'), path.join(repo, 'test-output', 'to-file.png')); fs.writeFileSync(path.join(outside, 'target.png'), 'x');
+    const tmp = path.join(shotBase, 'tmp'); fs.mkdirSync(tmp);
+    // Explicit roots: the real list also has /tmp, which on Linux CI holds this fixture, and the "outside" cases must stay outside.
+    const roots = [path.join(repo, 'test-output'), path.join(repo, 'docs', 'images'), tmp];
+    check('dev remote /shot: the folders are test-output/, docs/images/ and the temp folder (plus /tmp off Windows)',
+      shotRoots(repo, tmp).slice(0, 3).join('|') === roots.join('|') && (process.platform === 'win32' || shotRoots(repo, tmp)[3] === '/tmp'));
+    const sp = (f) => devShotPath(f, repo, roots);
+    check('dev remote /shot: a .png in test-output/, docs/images/ or the temp folder is written (relative paths start at the repo root; not-yet-existing folders are fine)',
+      sp('test-output/a.png') === path.join(repo, 'test-output', 'a.png') && sp(path.join(repo, 'docs', 'images', 'x.PNG')) === path.join(repo, 'docs', 'images', 'x.PNG')
+      && sp(path.join(tmp, 'nano-shot.png')) === path.join(tmp, 'nano-shot.png') && sp('test-output/new-dir/deep/a.png') === path.join(repo, 'test-output', 'new-dir', 'deep', 'a.png')
+      && devShotPath(path.join(os.tmpdir(), 'nano-shot.png'), repo) === path.join(fs.realpathSync(os.tmpdir()), 'nano-shot.png')   // the default roots include the real OS temp folder
+      && (process.platform === 'win32' || devShotPath('/tmp/nano-shot.png', repo) === path.join(fs.realpathSync('/tmp'), 'nano-shot.png')));
+    check('dev remote /shot: not a .png, outside the three folders, or reaching out by ".." or by a symlink is refused (400 in the server)',
+      sp('test-output/a.txt') === null && sp('test-output/a.png.sh') === null && sp('test-output/png') === null && sp('test-output/') === null && sp('') === null && sp(undefined) === null && sp(null) === null
+      && sp('/etc/passwd.png') === null && sp(path.join(outside, 'x.png')) === null && sp('src/main.png') === null && sp('package.png') === null && sp('docs/x.png') === null
+      && sp('test-output/../src/x.png') === null && sp('test-output/../../outside/x.png') === null && sp('../outside/x.png') === null
+      && sp(path.join(repo, 'test-output') + '.png') === null && sp(path.join(repo, 'test-output-evil', 'a.png')) === null
+      && sp('test-output/link-out/x.png') === null && sp('test-output/dangling.png') === null && sp('test-output/to-file.png') === null
+      && sp('test-output/a\0.png') === null && sp(path.join(os.homedir(), 'Desktop', 'x.png')) === null && sp(path.join(os.homedir(), '.ssh', 'authorized_keys.png')) === null);
+    fs.rmSync(shotBase, { recursive: true, force: true });
+  }
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }
 
