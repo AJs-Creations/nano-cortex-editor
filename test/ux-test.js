@@ -3104,7 +3104,10 @@ async function run() {
     fs.symlinkSync(path.join(outside, 'later.png'), path.join(repo, 'test-output', 'dangling.png'));
     fs.symlinkSync(path.join(outside, 'target.png'), path.join(repo, 'test-output', 'to-file.png')); fs.writeFileSync(path.join(outside, 'target.png'), 'x');
     const tmp = path.join(shotBase, 'tmp'); fs.mkdirSync(tmp);
-    const roots = shotRoots(repo, tmp);
+    // Explicit roots: the real list also has /tmp, which on Linux CI holds this fixture, and the "outside" cases must stay outside.
+    const roots = [path.join(repo, 'test-output'), path.join(repo, 'docs', 'images'), tmp];
+    check('dev remote /shot: the folders are test-output/, docs/images/ and the temp folder (plus /tmp off Windows)',
+      shotRoots(repo, tmp).slice(0, 3).join('|') === roots.join('|') && (process.platform === 'win32' || shotRoots(repo, tmp)[3] === '/tmp'));
     const sp = (f) => devShotPath(f, repo, roots);
     check('dev remote /shot: a .png in test-output/, docs/images/ or the temp folder is written (relative paths start at the repo root; not-yet-existing folders are fine)',
       sp('test-output/a.png') === path.join(repo, 'test-output', 'a.png') && sp(path.join(repo, 'docs', 'images', 'x.PNG')) === path.join(repo, 'docs', 'images', 'x.PNG')
