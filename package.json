@@ -1,9 +1,9 @@
 {
   "name": "nano-cortex-editor",
   "productName": "Nano Cortex Editor",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Unofficial desktop editor for the Neural DSP Nano Cortex (macOS, Windows and Linux): presets, every block, captures, footswitches, expression, tempo, tuner, metronome and Cortex Cloud capture transfer over Bluetooth.",
+  "description": "Unofficial desktop editor for the Neural DSP Nano Cortex (macOS, Windows and Linux): presets, every block, captures, footswitches, expression, tempo, tuner, metronome and Cortex Cloud capture/IR transfer over Bluetooth.",
   "main": "src/main.js",
   "license": "MIT",
   "author": "AJs Creations",
@@ -17,13 +17,13 @@
   },
   "scripts": {
     "build:core": "node scripts/build-core.js",
-    "start": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron .",
+    "start": "npm run build:core && node scripts/run-electron.js .",
     "dist": "npm run build:core && npm run build:icon && electron-builder --mac --arm64 --x64",
     "dist:linux": "npm run build:core && electron-builder --linux --x64 --arm64",
     "build:preview": "node scripts/build-core.js && node scripts/build-preview.js",
-    "test:ux": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron test/ux-test.js",
-    "build:icon": "env -u ELECTRON_RUN_AS_NODE electron scripts/build-icon.js",
-    "docs:screenshots": "npm run build:core && env -u ELECTRON_RUN_AS_NODE electron scripts/docs-screenshots.js && python3 scripts/docs-images.py"
+    "test:ux": "npm run build:core && node scripts/run-electron.js test/ux-test.js",
+    "build:icon": "node scripts/run-electron.js scripts/build-icon.js",
+    "docs:screenshots": "npm run build:core && node scripts/run-electron.js scripts/docs-screenshots.js && python3 scripts/docs-images.py"
   },
   "devDependencies": {
     "acorn": "^8.19.0",
@@ -74,6 +74,16 @@
       "icon": "build/icon.icns"
     },
     "copyright": "Copyright © 2026 AJs Creations. Unofficial; not affiliated with or endorsed by Neural DSP.",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "AJs-Creations",
+        "repo": "nano-cortex-editor"
+      }
+    ],
+    "dmg": {
+      "writeUpdateInfo": false
+    },
     "artifactName": "nano-cortex-editor-${version}-${os}-${arch}.${ext}",
     "win": {
       "icon": "build/icon.png",
@@ -134,5 +144,8 @@
     "deb": {
       "artifactName": "nano-cortex-editor_${version}_${arch}.${ext}"
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.10"
   }
 }
