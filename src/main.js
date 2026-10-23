@@ -19,6 +19,7 @@ const { menuTemplate, menuLabels } = require('./menu');
 const { createActivityLog } = require('./activity-log');
 const { randomUUID } = require('crypto');
 const { decodeIRPayload, checkWav } = require('./cloud-ir');
+const { refuseBrowserRequest, devShotPath } = require('./dev-remote');
 
 // Capture pages live under /cloud/discover/… and under pack pages like /cloud/<pack>/…
 const CAPTURE_PAGE = /\/neural-capture\/view\/([0-9a-f-]{36})/i;
@@ -33,7 +34,9 @@ const TOOLBAR_HEIGHT = 44;
 //   NANO_DEV_PORT=4848 npm start
 //   curl -d 'state.selectedPreset' http://127.0.0.1:4848/eval   → runs JS in the editor page
 //   curl 'http://127.0.0.1:4848/log?since=0'                    → mirrored Activity log
-// Localhost only, off unless the variable is set, never in a packaged build.
+// Localhost only, off unless the variable is set, never in a packaged build. Requests a browser made (an Origin or
+// Sec-Fetch-* header, or a Host other than 127.0.0.1:<port> / localhost:<port>) get a 403, and /shot writes only .png
+// files inside test-output/, docs/images/ or the temp folder (src/dev-remote.js).
 const DEV_PORT = app.isPackaged ? 0 : Number(process.env.NANO_DEV_PORT || 0);
 const devLog = [];
 
@@ -387,6 +390,7 @@ function createWindow() {
 
 function startDevRemote() {
   require('http').createServer((req, res) => {
+    if (refuseBrowserRequest(req, res, DEV_PORT)) return;   // before the body is read or anything runs
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', async () => {
@@ -403,8 +407,14 @@ function startDevRemote() {
           show(url.searchParams.get('tab') === 'cloud' ? 'cloud' : 'editor');
           res.end(JSON.stringify({ ok: true, url: cloud.webContents.getURL() }));
         } else if (url.pathname === '/shot') {
+          const file = devShotPath(url.searchParams.get('file') || path.join(app.getPath('temp'), 'nano-shot.png'), path.join(__dirname, '..'));
+          if (!file) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ ok: false, error: 'file must be a .png inside test-output/, docs/images/ or the temp folder' }));
+            return;
+          }
           const img = await target.webContents.capturePage();
-          const file = url.searchParams.get('file') || path.join(app.getPath('temp'), 'nano-shot.png');
+          fs.mkdirSync(path.dirname(file), { recursive: true });
           fs.writeFileSync(file, img.toPNG());
           res.end(JSON.stringify({ ok: true, file, url: target.webContents.getURL() }));
         } else if (url.pathname === '/menu') {
