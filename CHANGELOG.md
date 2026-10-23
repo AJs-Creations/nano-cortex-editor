@@ -2,7 +2,9 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.2.0 — 2026-10-23
+
+This edition and the native Mac edition now share version numbers, so there is no 1.1.0 here.
 
 ### Added
 
@@ -48,7 +50,7 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 - The window's footer is laid out when the content area settles after the window opens (Windows).
 - `npm start` and the other scripts run on Windows too (a Node launcher clears `ELECTRON_RUN_AS_NODE`).
 
-The live sync, Cloud IR, audition, reorder and monitoring entries were contributed by @itsbreaded in #14 and integrated with maintainer changes; they are not yet verified on a pedal.
+The live sync, Cloud IR, audition, reorder and monitoring entries were contributed by @itsbreaded in #14 and integrated with maintainer changes. They are verified on a Nano Cortex (firmware 2.2.1), except Live Preview of a Cloud capture, which is not yet.
 
 ## 1.0.0 — 2026-10-10
 
