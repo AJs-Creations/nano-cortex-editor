@@ -77,6 +77,7 @@
       amp_head: { icon: KIND_ICONS.ampHead, label: 'Amp head' },
       amp: { icon: KIND_ICONS.ampHead, label: 'Amp head' },
       combo: { icon: KIND_ICONS.combo, label: 'Combo' },
+      amp_combo: { icon: KIND_ICONS.combo, label: 'Combo' },   // the word a real pedal reports for combos
       pedal: { icon: KIND_ICONS.pedal, label: 'Pedal' },
       preamp: { icon: KIND_ICONS.rack, label: 'Preamp' },
       rack: { icon: KIND_ICONS.rack, label: 'Rack' },
@@ -245,9 +246,12 @@
     const cat = CATEGORY_KEY[def.category] || 'utility';
     return READABLE[cat] || FX_COLORS[cat] || FX_COLORS.utility;
   }
-  // Two Quad Cortex hues are too dark on a near-black panel; same family, more light.
-  const READABLE = { modulation: '#8f78ff', equalizer: '#4a9eff' };
+  // Two Quad Cortex hues are too dark on a near-black panel; same family, more light. Upstream gives Reverb the
+  // same #00FFDD as Delay, so a delay next to a reverb looked identical: Reverb is soft pink here (both editions).
+  // Every category colour goes through stageColor(), so this map is the one place for them.
+  const READABLE = { modulation: '#8f78ff', equalizer: '#4a9eff', reverb: '#f570d6' };
   STAGES.forEach(s => Object.defineProperty(s, 'color', { get: () => stageColor(s.key) }));
+  window.__stageColor = stageColor;   // the UX test checks every category's colour
 
   const presetName = (n) => state.presetNames.get(n) || ('Preset ' + n);
   const captureSlotCount = () => Math.max(25, ...state.captureNames.keys());
@@ -1705,7 +1709,7 @@
       if (!items.length) continue;
       const grid = el('div', { class: 'library-grid' });
       for (const item of items) {
-        const details = [label, item.type, item.instrument, item.author, item.description, ...(item.tags || [])].filter(Boolean).join(' · ');
+        const details = [label, item.type, item.instrument, item.author, NanoText.captureDescription(item.description), ...(item.tags || [])].filter(Boolean).join(' · ');
         const isActive = () => Boolean(irAudition.active && irAudition.active.kind === kind && irAudition.active.index === item.index);
         const isPending = () => Boolean(irAudition.pending && irAudition.pending.kind === kind && irAudition.pending.index === item.index);
         const row = el('div', {
@@ -3367,8 +3371,6 @@
   // shift by one), acked by 144 { 1: 6, 3: from, 4: to, 5: 1 }. Then the list and the current state are read back
   // from the pedal like at connect; nothing about the new order or the current preset is assumed. INVESTIGATION §12.
   const MSG_PRESET_MOVE = 143, MSG_PRESET_MOVE_REPLY = 144;
-  const PRESET_DRAG_TYPE = 'application/x-nano-preset';   // only drags that start on the preset list
-  let presetDragSource = 0;                                 // the row (1–64) the current drag started on
   const REORDER_TIMEOUTS = { list: 20000, state: 6000 };
   window.__reorderTimeouts = REORDER_TIMEOUTS;              // the UX test shortens them
   const canReorder = () => state.connected && !ui.presetReorderBusy && !ui.scanning;
@@ -3470,6 +3472,123 @@
   }
   window.__movePresetOrder = movePresetOrder;
 
+  // Dragging a row uses pointer events, not HTML5 drag and drop: during a system drag session the OS owns the cursor
+  // (the arrow on macOS), and the closed hand has to show for the whole drag. Press anywhere on a row (the ⋮⋮ grip at
+  // its right end is the affordance, not the only handle), move 4 px, drop it on another row; Escape cancels. Near the
+  // list's top or bottom edge, or with the wheel, the list scrolls. Only a press on a row of this list starts one, so
+  // nothing dropped from elsewhere can move a preset.
+  const PRESET_DRAG_THRESHOLD = 4;
+  const GRIP_SVG = '<svg viewBox="0 0 6 10" width="6" height="10" fill="currentColor" aria-hidden="true"><circle cx="1" cy="1" r="1"/><circle cx="5" cy="1" r="1"/><circle cx="1" cy="5" r="1"/><circle cx="5" cy="5" r="1"/><circle cx="1" cy="9" r="1"/><circle cx="5" cy="9" r="1"/></svg>';
+  let presetDrag = null;   // { from, pointerId, x0, y0, x, y, active, target, ghost, dx, dy, raf }
+  window.__presetDrag = () => presetDrag && { from: presetDrag.from, active: presetDrag.active, target: presetDrag.target };
+  function presetRowAt(x, y) {
+    const hit = document.elementFromPoint(x, y);
+    const row = hit && hit.closest ? hit.closest('.preset-row') : null;
+    return row && $('presetList').contains(row) ? Number(row.dataset.n) : 0;
+  }
+  function markPresetDrag() {
+    const d = presetDrag && presetDrag.active ? presetDrag : null;
+    for (const r of $('presetList').querySelectorAll('.preset-row')) {
+      const n = Number(r.dataset.n);
+      r.classList.toggle('dragging', !!d && n === d.from);
+      r.classList.toggle('drop-target', !!d && n === d.target && n !== d.from);
+    }
+  }
+  function onPresetPointerDown(e) {
+    if (e.button !== 0 || e.ctrlKey) return;   // Control-click is the context menu on a Mac
+    const row = e.target && e.target.closest ? e.target.closest('.preset-row') : null;
+    if (!row || !$('presetList').contains(row) || !canReorder()) return;
+    endPresetDrag();
+    presetDrag = { from: Number(row.dataset.n), pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, target: 0, ghost: null, dx: 0, dy: 0, raf: 0 };
+    document.addEventListener('pointermove', onPresetPointerMove, true);
+    document.addEventListener('pointerup', onPresetPointerUp, true);
+    document.addEventListener('pointercancel', onPresetPointerCancel, true);
+    document.addEventListener('keydown', onPresetDragKey, true);
+    $('presetList').addEventListener('scroll', onPresetDragScroll);
+    window.addEventListener('blur', onPresetPointerCancel);
+  }
+  function beginPresetDrag(d) {
+    d.active = true;
+    document.documentElement.classList.add('preset-dragging');
+    // A copy of the row follows the pointer, held where it was grabbed (what the system drag image did).
+    const row = $('presetList').querySelector('.preset-row[data-n="' + d.from + '"]');
+    if (row) {
+      const r = row.getBoundingClientRect();
+      d.dx = d.x0 - r.left; d.dy = d.y0 - r.top;
+      const copy = row.cloneNode(true);
+      copy.removeAttribute('data-n'); copy.removeAttribute('role'); copy.removeAttribute('aria-selected');
+      copy.classList.remove('dragging', 'drop-target');
+      d.ghost = el('div', { class: 'preset-ghost', 'aria-hidden': 'true', style: 'width:' + r.width + 'px' }, copy);
+      document.body.append(d.ghost);
+    }
+  }
+  function onPresetPointerMove(e) {
+    const d = presetDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    d.x = e.clientX; d.y = e.clientY;
+    if (!d.active) {
+      if (Math.hypot(d.x - d.x0, d.y - d.y0) < PRESET_DRAG_THRESHOLD) return;
+      if (!canReorder()) { endPresetDrag(); return; }
+      beginPresetDrag(d);
+    }
+    e.preventDefault();
+    if (d.ghost) { d.ghost.style.left = (d.x - d.dx) + 'px'; d.ghost.style.top = (d.y - d.dy) + 'px'; }
+    d.target = presetRowAt(d.x, d.y);
+    markPresetDrag();
+    if (!d.raf) d.raf = requestAnimationFrame(presetAutoScroll);
+  }
+  function presetAutoScroll() {
+    const d = presetDrag;
+    if (!d || !d.active) return;
+    d.raf = 0;
+    const list = $('presetList'), r = list.getBoundingClientRect(), EDGE = 28;
+    if (d.x < r.left || d.x > r.right || d.y < r.top - EDGE || d.y > r.bottom + EDGE) return;
+    const v = d.y < r.top + EDGE ? -Math.min(16, Math.ceil((r.top + EDGE - d.y) / 2)) : d.y > r.bottom - EDGE ? Math.min(16, Math.ceil((d.y - r.bottom + EDGE) / 2)) : 0;
+    if (!v) return;
+    const before = list.scrollTop;
+    list.scrollTop += v;
+    if (list.scrollTop !== before) d.raf = requestAnimationFrame(presetAutoScroll);   // the scroll event updates the target
+  }
+  function onPresetDragScroll() {
+    const d = presetDrag;
+    if (!d || !d.active) return;
+    d.target = presetRowAt(d.x, d.y);
+    markPresetDrag();
+  }
+  function onPresetPointerUp(e) {
+    const d = presetDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    const dropped = d.active ? presetRowAt(e.clientX, e.clientY) : 0;
+    const wasDrag = d.active;
+    endPresetDrag();
+    if (!wasDrag) return;   // a plain click: the row's click handler loads the preset
+    e.preventDefault();
+    if (!dropped || dropped === d.from || !canReorder()) return;
+    void movePresetOrder(d.from - 1, dropped - 1);
+  }
+  function onPresetPointerCancel() { endPresetDrag(); }
+  function onPresetDragKey(e) {
+    if (e.key !== 'Escape' || !presetDrag || !presetDrag.active) return;
+    e.preventDefault(); e.stopPropagation();
+    endPresetDrag();
+  }
+  function endPresetDrag() {
+    const d = presetDrag;
+    presetDrag = null;
+    document.removeEventListener('pointermove', onPresetPointerMove, true);
+    document.removeEventListener('pointerup', onPresetPointerUp, true);
+    document.removeEventListener('pointercancel', onPresetPointerCancel, true);
+    document.removeEventListener('keydown', onPresetDragKey, true);
+    $('presetList').removeEventListener('scroll', onPresetDragScroll);
+    window.removeEventListener('blur', onPresetPointerCancel);
+    if (!d) return;
+    if (d.raf) cancelAnimationFrame(d.raf);
+    if (d.ghost) d.ghost.remove();
+    document.documentElement.classList.remove('preset-dragging');
+    if (d.active) suppressPresetClickUntil = Date.now() + 350;   // the click that follows the release loads nothing
+    markPresetDrag();
+  }
+
   function renderSide() {
     const q = ui.filter.trim().toLowerCase();
     const names = [];
@@ -3490,35 +3609,11 @@
       const name = presetName(i);
       if (q && !name.toLowerCase().includes(q) && String(i) !== q) continue;
       const empty = /^empty$/i.test(name);
+      const grip = el('span', { class: 'grip', title: 'Drag to move this preset', 'aria-hidden': 'true' });
+      grip.innerHTML = GRIP_SVG;
       rows.push(el('div', {
-        // Drag a row onto another to move it there. Only drags that started on this list count (a private type plus
-        // the remembered source row): text dropped from elsewhere does nothing.
-        draggable: canReorder() ? 'true' : null,
-        ondragstart: (e) => {
-          if (!canReorder()) { e.preventDefault(); return; }
-          presetDragSource = i;
-          e.dataTransfer.effectAllowed = 'move';
-          e.dataTransfer.setData(PRESET_DRAG_TYPE, String(i));
-          e.currentTarget.classList.add('dragging');
-        },
-        ondragover: (e) => {
-          if (!presetDragSource || !canReorder() || !Array.from(e.dataTransfer.types).includes(PRESET_DRAG_TYPE)) return;
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
-          e.currentTarget.classList.add('drop-target');
-        },
-        ondragleave: (e) => e.currentTarget.classList.remove('drop-target'),
-        ondrop: (e) => {
-          const from = presetDragSource;
-          presetDragSource = 0;
-          e.currentTarget.classList.remove('drop-target');
-          if (!from || !Array.from(e.dataTransfer.types).includes(PRESET_DRAG_TYPE) || Number(e.dataTransfer.getData(PRESET_DRAG_TYPE)) !== from) return;
-          e.preventDefault();
-          if (from === i || !canReorder()) return;
-          suppressPresetClickUntil = Date.now() + 350;
-          void movePresetOrder(from - 1, i - 1);
-        },
-        ondragend: () => { presetDragSource = 0; document.querySelectorAll('.preset-row.dragging, .preset-row.drop-target').forEach(r => r.classList.remove('dragging', 'drop-target')); },
+        // Drag a row (anywhere on it) onto another to move it there: onPresetPointerDown above. `reorderable` shows
+        // the ⋮⋮ grip on the row under the mouse; rows aren't reorderable while a move or the slot scan runs.
         oncontextmenu: (e) => contextMenu(e, [
           { label: i === state.selectedPreset ? 'Current preset' : 'Load', disabled: !state.connected || i === state.selectedPreset, action: () => goToPreset(i) },
           ...(i === state.selectedPreset ? [{ label: 'Discard edits', disabled: !state.connected || !isDirtyNow(), action: () => doDiscard() }] : []),
@@ -3530,15 +3625,16 @@
           '-',
           { label: 'Delete\u2026', danger: true, disabled: !state.connected || empty, action: () => doDelete(i) },
         ]),
-        class: 'preset-row' + (state.connected && !ui.presetUnknown && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : '') + (ui.presetReorderBusy ? ' reorder-pending' : ''),
+        class: 'preset-row' + (state.connected && !ui.presetUnknown && i === state.selectedPreset ? ' active' : '') + (empty ? ' empty' : '') + (ui.presetReorderBusy ? ' reorder-pending' : '') + (canReorder() ? ' reorderable' : ''),
         role: 'option',
         'aria-selected': String(state.connected && !ui.presetUnknown && i === state.selectedPreset),
         dataset: { n: i },
         onclick: () => { if (Date.now() > suppressPresetClickUntil) goToPreset(i); },
-      }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name })));
+      }, el('span', { class: 'n', text: i }), el('span', { class: 't', text: name }), grip));
     }
     if (!rows.length) rows.push(el('div', { class: 'side-empty', text: 'No presets match “' + ui.filter + '”.' }));
     list.replaceChildren(...rows);
+    if (presetDrag && presetDrag.active) markPresetDrag();   // redrawn mid-drag (a pedal report): keep the styling
   }
 
   // Footswitches strip under the preset list: IA IB / IIA IIB, each with the preset it loads in 4-Preset mode.
@@ -5036,7 +5132,7 @@
       ok: pf.int(f, 3) === 1,
       name: pf.str(f, 10) || pf.str(rec, 2),
       author: pf.str(by, 2) || pf.str(by, 1) || pf.str(recBy, 2) || pf.str(recBy, 1),
-      description: pf.str(f, 8),         // unverified: empty in every reply so far
+      description: NanoText.captureDescription(pf.str(f, 8)),   // "", blank or "null": none
       hash: pf.str(f, 9) || pf.str(rec, 1),
       type: pf.str(rec, 6), instrument: pf.str(rec, 10), tags: pf.strs(rec, 7),
     };
@@ -5184,12 +5280,14 @@
       try { await navigator.clipboard.writeText(info.hash); copy.textContent = 'Copied'; } catch { copy.textContent = 'Copy failed'; }
       setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
     } }, 'Copy');
-    box.replaceChildren(
+    // replaceChildren() would turn a left-out part (null) into the text "null": that was the "null" under the tags.
+    box.replaceChildren(...[
       info.author ? el('div', { class: 'cap-by', dataset: { fk: 'cap-author' } }, 'by ' + info.author) : null,
       kinds.length ? el('div', { class: 'cap-kinds' }, kinds) : null,
       info.tags.length ? el('div', { class: 'chips', dataset: { fk: 'cap-tags' } }, info.tags.map(t => el('span', { class: 'chip', text: t }))) : null,
       info.description ? el('p', { class: 'cap-desc', text: info.description, dataset: { fk: 'cap-desc' } }) : null,
-      el('div', { class: 'cap-hash dev-only' }, el('span', { class: 'k', text: 'Hash' }), el('span', { class: 'v', text: shortHash(info.hash) || '—', title: info.hash || null, dataset: { fk: 'cap-hash' } }), copy));
+      el('div', { class: 'cap-hash dev-only' }, el('span', { class: 'k', text: 'Hash' }), el('span', { class: 'v', text: shortHash(info.hash) || '—', title: info.hash || null, dataset: { fk: 'cap-hash' } }), copy),
+    ].filter(Boolean));
     place();
   }
   window.__openCaptureInfo = openCaptureInfo;
@@ -5479,6 +5577,7 @@
   $('chain').addEventListener('contextmenu', onStageContextMenu, true);
   $('inspector').addEventListener('pointerdown', onInspectorPointerDown);
   $('inspector').addEventListener('click', onInspectorClick, true);
+  $('presetList').addEventListener('pointerdown', onPresetPointerDown);
   $('presetFilter').addEventListener('input', (e) => { ui.filter = e.target.value; renderSide(); });
   $('presetFilter').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -5605,7 +5704,7 @@
     // Library stored on the (demo) pedal.
     const cap = (name, index, author, type = 'amp_head', instrument = 'guitar') => ({ index, name, type, tags: [], instrument, author, description: '', corrupted: false });
     // Types vary so the library picker shows its icon set (CAPTURE_KINDS).
-    const FACTORY_TYPES = ['amp_head', 'amp_head', 'amp_head', 'combo', 'combo', 'amp_head', 'pedal', 'pedal'];
+    const FACTORY_TYPES = ['amp_head', 'amp_head', 'amp_head', 'combo', 'amp_combo', 'amp_head', 'pedal', 'pedal'];   // amp_combo: a real pedal's word
     const LIB = {
       factory: ['Plexi 1959 SLP', 'JCM800 2203 Lead', 'Recto Modern Red', 'AC30 TB Normal', 'Deluxe Reverb Clean', 'SVT CL Bass', 'Fuzz Face Si', 'King of Tone']
         .map((n, i) => cap(n, i, 'Neural DSP', FACTORY_TYPES[i], i === 5 ? 'bass' : 'guitar')),
@@ -5823,7 +5922,10 @@
       const by = [...pbStr(1, author), ...pbStr(2, author)];
       const record = [...pbStr(1, hash), ...pbStr(2, name), ...pbSub(4, by), ...pbStr(6, kind), ...tags.flatMap(t => pbStr(7, t)), 0x40, 0x04,
         ...pbStr(10, instrument), 0x58, 0x01, ...pbStr(12, '1')];
-      return longFrame([0x08, 0x06, 0x18, 0x01, ...pbSub(7, by), ...pbStr(8, 'Demo capture in slot ' + slot + '.'), ...pbStr(9, hash), ...pbStr(10, name),
+      // No description: slot 4 answers an empty one (like the traced reply), slot 2 the text "null". (Slot 3 keeps one:
+      // docs/images/capture-info.png shows it.)
+      const desc = slot === 2 ? 'null' : slot === 4 ? '' : 'Demo capture in slot ' + slot + '.';
+      return longFrame([0x08, 0x06, 0x18, 0x01, ...pbSub(7, by), ...pbStr(8, desc), ...pbStr(9, hash), ...pbStr(10, name),
         ...pbSub(11, record)], DEV_MSG.CAPTURE);
     }
     window.__devDemo = {

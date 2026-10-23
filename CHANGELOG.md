@@ -17,14 +17,23 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 - **From the library** in the Cab / IR inspector: factory cabs and your IRs with search, audition and **Delete…** for
   your own IRs.
 - **Reorder presets** by dragging a row onto another (works with the filter on); the order is read back from the pedal.
+  The row under the mouse shows a ⋮⋮ grip at its right end; the hand cursor shows over the grip and while you drag
+  (a row itself keeps the arrow). Escape cancels a drag; near the top or bottom of the list it scrolls.
 - **Monitoring** in Settings → Device: Mute Input and Mute Outputs 1L/2R; a header **Mute** button for the input,
   read from the pedal at connect.
 - Knob drags, the mouse wheel and arrow keys send while you turn, not only when you let go.
 - **Your own metronome sounds**: the accent, the main beat and the subdivisions each play a built-in sound or a sample
   you choose (WAV, AIFF, MP3, M4A/AAC, FLAC or Ogg, up to 5 MB) in Settings → Metronome → Sounds.
 
+### Changed
+
+- Reverbs have their own colour in the signal chain (soft pink), so a delay next to a reverb no longer looks the same.
+
 ### Fixed
 
+- Capture **Info…** showed the word "null" when a capture has no description; now it shows nothing there. A
+  description of "null" is never sent to the pedal either.
+- Combo captures from the pedal (reported as "amp_combo") had no kind icon; they show the combo icon now.
 - Connecting on a computer with many Bluetooth devices ([#15](https://github.com/AJs-Creations/nano-cortex-editor/issues/15)).
   Connect now looks only for devices that offer the Nano Cortex's Bluetooth service and takes the pedal as soon as it
   appears, with or without a name. While it looks, a window repeats how to put the pedal in pairing mode. **Show all

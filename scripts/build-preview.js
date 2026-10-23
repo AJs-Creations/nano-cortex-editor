@@ -15,8 +15,9 @@ const live = read('pro/live-sync.js');
 const transfer = read('pro/transfer.js');
 const ui = read('pro/ui.js');
 const links = read('pro/links.js');
+const text = read('pro/capture-text.js');
 
-for (const [name, src] of [['core.js', core], ['live-sync.js', live], ['links.js', links], ['transfer.js', transfer], ['ui.js', ui]]) {
+for (const [name, src] of [['core.js', core], ['live-sync.js', live], ['links.js', links], ['capture-text.js', text], ['transfer.js', transfer], ['ui.js', ui]]) {
   if (/<\/script/i.test(src)) throw new Error(name + ' contains "</script", which would break inlining');
 }
 
@@ -43,6 +44,9 @@ ${live}
 </script>
 <script>
 ${links}
+</script>
+<script>
+${text}
 </script>
 <script>
 ${transfer}
