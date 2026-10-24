@@ -380,7 +380,10 @@ Normalized frames used by the editor and demo are:
 The 66 ↔ 67 numbering is not a fixed offset (4 ↔ 6 but 14 ↔ 17), so the unexposed 66 fields cannot be matched to
 their 67 field yet. Guesses in our code: a brightness of 0 is sent as an explicit `20 00` (the app never sent 0); the
 USB range −20…0 dB in 0.5 dB steps is ours (the app's slider went at least −13.9…−5.5); type-18 field 8 is shown as
-the description although it was empty in every reply.
+the description although it was empty in every reply. On a real pedal (2026-10-24) some captures carry their Cortex
+Cloud product ID as the whole description (capture "Darkglass MT900V2 1"; the Cloud API knows the ID as a
+`neural_capture`, and `https://cloud.neuraldsp.com/cloud/neural-capture/view/<id>` opens it); the editor offers
+**Open in Cortex Cloud** for those instead of showing the ID (`pro/capture-text.js`).
 
 The 2026-10-09 phone-app session (footswitch assignment, tempo, expression, global settings, capture mode) is decoded in `docs/TRACE-2026-10-09.md`.
 
@@ -427,7 +430,9 @@ The transaction is the app's millisecond clock (a varint past 2³²); the pedal 
 IR), and the editor only takes a stop as confirmed when it does. While anything is auditioned, the app sends
 **91** `{1: 3}` about every 20 s and the pedal answers **92** `{1: 3, 3: 1, …}`; without it the pedal ends the
 audition after about a minute. After a stop the app reads the current state, and the pedal may then report the
-preset dirty (115) even though nothing was edited.
+preset dirty (115) even though nothing was edited. While a capture preview plays, a state read reports the previewed
+capture as the current one (seen in the native edition on the pedal, 2026-10-24: the name stayed after the stop until
+the next read), so the editor reads the state again after every confirmed stop.
 
 **Preset move.** One message moves a preset by insertion (the presets in between shift by one); indices are 0-based:
 

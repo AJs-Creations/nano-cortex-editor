@@ -8,13 +8,13 @@
 //     the session cookie lives in a persistent Chromium profile (encrypted with
 //     the macOS Keychain by Chromium itself).
 
-const { app, BaseWindow, WebContentsView, session, shell, ipcMain, dialog, Menu, nativeImage } = require('electron');
+const { app, BaseWindow, WebContentsView, session, shell, ipcMain, dialog, Menu, nativeImage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const zlib = require('zlib');
 const { renderAccentIcon, normHex, DEFAULT_ACCENT } = require('./accent-icon');
 const LINKS = require('../pro/links');   // repo, manual, issues, support: the same constants the editor page uses
-const { captureDescription } = require('../pro/capture-text');   // "null" / blank = no description, as in the page
+const { storedDescription } = require('../pro/capture-text');   // "null" / blank = no description, as in the page
 const { menuTemplate, menuLabels } = require('./menu');
 const { createActivityLog } = require('./activity-log');
 const { randomUUID } = require('crypto');
@@ -238,11 +238,13 @@ function layout() {
   cloud.setBounds(body);
 }
 
-function show(tab) {
+// cloudURL: a page to load in the Cloud tab as it is shown (capture Info → "Open in Cortex Cloud").
+function show(tab, cloudURL = '') {
   active = tab;
   editor.setVisible(tab === 'editor');
   cloud.setVisible(tab === 'cloud');
-  if (tab === 'cloud' && cloud.webContents.getURL() === '') cloud.webContents.loadURL(CLOUD_URL);
+  if (tab === 'cloud' && cloudURL) cloud.webContents.loadURL(cloudURL).catch(() => {});
+  else if (tab === 'cloud' && cloud.webContents.getURL() === '') cloud.webContents.loadURL(CLOUD_URL);
   toolbar.webContents.send('tab-changed', tab);
 }
 
@@ -322,6 +324,9 @@ function createWindow() {
   grantDevicePermissions(editor.webContents.session);
   wireBluetooth(editor.webContents);
   editor.webContents.on('did-finish-load', () => { if (pendingUpdate && editorFlavor === 'pro') editor.webContents.send('update-event', pendingUpdate); });
+  // A page that reloads, navigates or crashes auditions nothing any more (a new page reports changes from false on).
+  editor.webContents.on('did-start-navigation', (details) => { if (details && details.isMainFrame && !details.isSameDocument) auditionActive = false; });
+  editor.webContents.on('render-process-gone', () => { auditionActive = false; });
   loadEditor('pro');
   editor.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   // The editor's Activity log goes to the log file for everyone (Help → Show Log File). Running from source it is
@@ -382,6 +387,8 @@ function createWindow() {
   win.contentView.addChildView(cloud);
   win.contentView.addChildView(toolbar);
   win.on('resize', layout);
+  // Closing the window quits the app: during an audition the close waits for the stop, like ⌘Q (quitGuard below).
+  win.on('close', (e) => quitGuard.intercept(e));
   // Native content bounds can settle after show (e.g. Windows menus) without a window resize.
   win.contentView.on('bounds-changed', layout);
   layout();
@@ -487,6 +494,15 @@ function openOutside(url) {
   return false;
 }
 ipcMain.handle('open-external', (e, url) => (fromEditor(e) ? openOutside(String(url)) : false));
+// Capture Info → "Open in Cortex Cloud": a capture whose description is its Cortex Cloud product ID. Only a UUID is
+// accepted, and only this page is loaded: CLOUD_URL + 'neural-capture/view/' + id, in the Cloud tab, which is shown.
+ipcMain.handle('open-cloud-capture', (e, id) => {
+  if (!fromEditor(e) || !cloud) return false;
+  id = String(id || '').trim();
+  if (!CLOUD_PRODUCT_ID.test(id)) return false;
+  show('cloud', CLOUD_URL + 'neural-capture/view/' + id.toLowerCase());
+  return true;
+});
 ipcMain.handle('set-accent', async (e, hex, follow) => {
   if (!fromEditor(e)) return null;
   const accent = normHex(hex);
@@ -586,7 +602,7 @@ async function fetchCaptureBundle(id) {
     cns: files[cnsName].toString('base64'),
     meta: {
       hash: m.hash || cnsName.replace(/\.cns$/, ''), name: m.name || json.name, cloudUUID: m.cloudUUID || id,
-      authorId: m.authorId, authorName: m.authorName, description: captureDescription(m.description), deviceType: m.deviceType,
+      authorId: m.authorId, authorName: m.authorName, description: storedDescription(m.description), deviceType: m.deviceType,
       tags: m.tags || [], gainType: m.gainType, instrumentType: m.instrumentType, version: m.version,
     },
   };
@@ -740,6 +756,21 @@ ipcMain.handle('toggle-cab-ir', async (e) => {
     true
   ).catch((err) => ({ ok: false, error: err.message }));
 });
+// ---------- auditions on quit (src/quit-guard.js) ----------
+// The page reports whether anything is auditioned (a Live Preview or a library IR). ⌘Q, the menu's Quit or closing the
+// window then waits until the page has sent the stop (148) and the pedal confirmed it (149), at most 1.5 s, and quits
+// either way. So does the update modal's Restart.
+let auditionActive = false;
+ipcMain.on('audition-state', (e, on) => { if (fromEditor(e)) auditionActive = !!on; });
+const { createQuitGuard } = require('./quit-guard');
+const quitGuard = createQuitGuard({
+  isAuditioning: () => auditionActive && editorFlavor === 'pro' && !!editor && !editor.webContents.isDestroyed(),
+  stopAuditions: () => editor.webContents.executeJavaScript('window.__stopAuditionsForQuit ? window.__stopAuditionsForQuit() : { active: false, ok: true }'),
+  quit: () => app.quit(),
+  log: (line) => { activityLog().write(line); if (!app.isPackaged) console.log('[quit] ' + line); },
+});
+app.on('before-quit', (e) => quitGuard.intercept(e));
+
 ipcMain.on('preview-state', (event, state) => {
   if (editor && event.sender === editor.webContents && toolbar && !toolbar.webContents.isDestroyed()) {
     toolbar.webContents.send('preview-state', state || { active: false });
@@ -808,7 +839,9 @@ ipcMain.handle('update-action', (e, what, version) => {
   if (!fromEditor(e)) return null;
   what = String(what);
   if (what !== 'download') pendingUpdate = null;
-  return updates ? updates.action(what, String(version || '')) : null;
+  if (!updates) return null;
+  if (what === 'restart') return quitGuard.beforeRestart(() => updates.action(what, String(version || ''))).then(() => 'restarting');
+  return updates.action(what, String(version || ''));
 });
 ipcMain.handle('set-auto-update', (e, on) => {
   if (!fromEditor(e)) return null;
@@ -846,6 +879,32 @@ function buildMenu() {
   })));
 }
 
+// ---------- sleep and wake ----------
+// Before the computer sleeps the editor disconnects from the pedal cleanly, so macOS has no link left to hold (a held
+// link kept the pedal from advertising: 2026-10-20→23). On wake, if it was connected and Settings → "Reconnect to the
+// last pedal at launch" is on, the page reconnects the remembered pedal like the launch reconnect (the user gesture
+// requestDevice() needs comes from executeJavaScript). Bluetooth needs a moment after wake, hence the delay.
+const RESUME_RECONNECT_MS = 3000;
+let resumeTimer = null;
+function editorPage() { return editorFlavor === 'pro' && editor && !editor.webContents.isDestroyed() ? editor.webContents : null; }
+function wirePower() {
+  powerMonitor.on('suspend', () => {
+    clearTimeout(resumeTimer); resumeTimer = null;
+    activityLog().write('[power] the computer is going to sleep');
+    const page = editorPage();
+    if (page) page.executeJavaScript('window.__systemSuspend && window.__systemSuspend()', true).catch(() => {});
+  });
+  powerMonitor.on('resume', () => {
+    activityLog().write('[power] the computer woke up');
+    clearTimeout(resumeTimer);
+    resumeTimer = setTimeout(() => {
+      resumeTimer = null;
+      const page = editorPage();
+      if (page) page.executeJavaScript('window.__systemResume && window.__systemResume(' + JSON.stringify({ pedal: !!shellSettings.pedal }) + ')', true).catch(() => {});
+    }, RESUME_RECONNECT_MS);
+  });
+}
+
 app.whenReady().then(() => {
   loadShellSettings();
   // Packaged builds get the icon from build/icon.icns; from source, set the Dock icon by hand.
@@ -855,6 +914,7 @@ app.whenReady().then(() => {
   createWindow();
   applyAppIcon();
   startUpdates();
+  wirePower();
   app.on('activate', () => { if (!win || win.isDestroyed()) createWindow(); });
 });
 app.on('window-all-closed', () => app.quit());

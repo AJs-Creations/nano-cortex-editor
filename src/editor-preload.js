@@ -20,6 +20,12 @@ contextBridge.exposeInMainWorld('nanoShell', {
   saveRecording: (name, json) => ipcRenderer.invoke('save-recording', String(name), String(json)),
   autoConnect: () => ipcRenderer.invoke('auto-connect'),
   previewState: (state) => ipcRenderer.send('preview-state', state),
+  // Whether anything is auditioned on the pedal (a Live Preview or a library IR): the shell then holds a quit until
+  // the page has stopped it (src/quit-guard.js).
+  auditionState: (active) => ipcRenderer.send('audition-state', !!active),
+  // Capture Info → "Open in Cortex Cloud": the shell loads that capture's page in the Cloud tab. Only a Cloud product
+  // ID (a UUID) is accepted.
+  openCloudCapture: (id) => ipcRenderer.invoke('open-cloud-capture', String(id)),
   cabIRState: (state) => ipcRenderer.send('cab-ir-state', state),
   openExternal: (url) => ipcRenderer.invoke('open-external', String(url)),
   onOpenSettings: (fn) => ipcRenderer.on('open-settings', () => fn()),

@@ -2,6 +2,24 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
+## 1.2.1 — 2026-10-24
+
+### Changed
+
+- Capture **Info…**: a capture whose description is only its Cortex Cloud ID shows **Open in Cortex Cloud** instead
+  of the ID; it opens the capture's page in the Cortex Cloud tab. The ID no longer shows up in library lists or
+  searches either.
+
+### Fixed
+
+- Quitting during a Live Preview or an IR audition now stops it on the pedal first (waiting at most a second and a
+  half for the pedal) instead of leaving the pedal to time out.
+- After a Live Preview stops, the editor reads the preset again, so the chain shows the preset's own capture instead
+  of the previewed one.
+- The editor no longer leaves a Bluetooth link to the pedal open after a disconnect, a failed connect, sleep or a long
+  idle spell, which could keep the pedal from showing up for **Connect** until the app quit. It disconnects before
+  the computer sleeps and, with **Reconnect to the last pedal at launch** on, reconnects when it wakes.
+
 ## 1.2.0 — 2026-10-23
 
 This edition and the native Mac edition now share version numbers, so there is no 1.1.0 here.

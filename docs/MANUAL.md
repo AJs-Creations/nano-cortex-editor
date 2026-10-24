@@ -108,8 +108,11 @@ and a simulated pedal; nothing is sent anywhere. The status bar says "Demo data,
 header returns to the connect screen.
 
 **Reconnect at launch.** In [Settings](#12-settings) → Connection, turn on **Reconnect to the last pedal at launch**.
-The app then connects to the pedal it used last as soon as it starts, without the list. **Forget pedal** clears the
-remembered pedal.
+The app then connects to the pedal it used last as soon as it starts, without the list, and again when the computer
+wakes from sleep if it was connected before. **Forget pedal** clears the remembered pedal.
+
+**Sleep.** Before the computer sleeps the editor disconnects from the pedal, so the pedal is free (and visible to
+Connect) afterwards.
 
 ## 3. Tour of the window
 
@@ -260,6 +263,8 @@ Right-click a slot for **Load**, **Put a library capture in slot N…** and **In
 
 **Info…** asks the pedal for the capture's details: author, kind and instrument, tags and description. With
 [Developer tools](#developer-tools) on it also shows the capture's hash (**Copy** puts the full hash on the clipboard).
+Some captures carry only their Cortex Cloud ID as the description; for those, Info shows **Open in Cortex Cloud**
+instead, which opens the capture's page in the Cortex Cloud tab.
 
 ![Capture info: Capture 1C, JP2C Ch3 by Neural DSP, combo and guitar icons, tags and description](images/capture-info.png)
 
@@ -273,6 +278,7 @@ changing them affects every preset that uses that slot.
 **From the library** lists the pedal's factory cabs and your IRs, with a search box. Click an item to choose a slot
 for it. Its **▶** button auditions it: the pedal plays that IR without loading it into a slot (the row lights up and
 the button turns into **■**, which stops it). While an IR is auditioned the microphone and position are locked.
+Quitting the app stops the audition first.
 Right-click an item for **Preview** and **Load into slot…**; your own IRs also have **Delete…**, which removes the IR
 from the pedal after you confirm (there is no undo; the dialog says if one of the five slots holds that IR).
 
@@ -408,7 +414,8 @@ preset changes. The editor then offers to load it into a slot right away (**Choo
 no slot or library item changes. **Stop Preview** ends it. **IR: On / Off** next to it switches the cab / IR of the
 current preset, to hear the capture with or without it. A preview keeps running while you browse; anything that saves
 or changes the preset (Save, switching presets, Discard, Rename, …) stops it first, and if the pedal doesn't confirm
-the stop, that action doesn't happen.
+the stop, that action doesn't happen. Quitting the app stops it too (it waits at most a second and a half for the
+pedal). After a stop the editor reads the preset again, so the chain shows the preset's own capture.
 
 **Sending an IR to the pedal.** Open your profile's **Impulse Responses** list (**IRs** in the toolbar). The app adds
 **Send to Nano** beside each IR. Click it, confirm in the Editor, and the app sends the WAV to the pedal's IR library
