@@ -2107,11 +2107,13 @@
     }
     ui.connectError = '';
     ui.connecting = true;
+    wrapRequestDevice();
     render();
     try {
       await connectAll();
     } finally {
       ui.connecting = false;
+      ble.autoWhy = '';
       closeBleChooser();
       if (ble.restart) { ble.restart = false; if (!state.connected && !ui.demo) doConnect(); }   // Scan again, Show all, or choose again
       else ble.next = null;
@@ -2122,6 +2124,7 @@
   // Turn Web Bluetooth's raw errors into what to do next.
   function friendlyConnectError(msg) {
     const hint = window.__bleHint; window.__bleHint = null; // set by the desktop shell's device picker
+    if (hint === 'auto-none' && ble.autoWhy === 'wake') return 'Your Nano Cortex didn\u2019t show up after the computer woke up. Power it on (and close Cortex Cloud on your phone), then click Connect.';
     if (hint === 'auto-none') return 'Your Nano Cortex didn\u2019t show up at launch. Power it on (and close Cortex Cloud on your phone), then click Connect.';
     if (hint === 'none-found') return 'No Nano Cortex showed up nearby. Check that it\u2019s powered on and that Cortex Cloud on your phone isn\u2019t connected to it, then try again.';
     if (/adapter not available|bluetooth.*(off|unavailable)/i.test(msg)) return 'Bluetooth is off or unavailable on this computer. Turn it on and try again.';
@@ -2149,16 +2152,80 @@
   };
   window.__ble = ble;
   const BLE_SERVICES = typeof SERVICE_UUIDS !== 'undefined' ? SERVICE_UUIDS : [];
-  if (shellBridge && shellBridge.bluetoothRequest && navigator.bluetooth && navigator.bluetooth.requestDevice) {
-    const realRequest = navigator.bluetooth.requestDevice.bind(navigator.bluetooth);
-    navigator.bluetooth.requestDevice = (options) => {
-      const opts = ble.next || {};
-      ble.next = null;
-      ble.mode = shellBridge.bluetoothRequest(opts) === 'all' ? 'all' : 'nano';
-      if (ble.mode === 'all' || !BLE_SERVICES.length) return realRequest(options);
-      return realRequest({ filters: BLE_SERVICES.map(s => ({ services: [s] })), optionalServices: BLE_SERVICES });
-    };
+
+  // ------------------------------------------------------------------ releasing the Bluetooth link
+  // The page lets go of the pedal whenever it decides it is disconnected: the link dropped (gattserverdisconnected),
+  // a write found it gone, an explicit Disconnect, a connect that failed half-way, the computer going to sleep. It
+  // calls gatt.disconnect() on the device it had, even when Chromium already reports it disconnected, and keeps no
+  // reference to it. Before every new requestDevice() an older device object that still reports a connection is
+  // disconnected as well. (2026-10-20→23: the editor showed "Disconnected" for two days while macOS still held a
+  // link to the pedal; the pedal stopped advertising, and Connect found nothing until the app quit.)
+  ble.devices = new Set();   // device objects a requestDevice() returned that may still hold a link
+  ble.requests = [];         // the options of each requestDevice() (`next`), for the UX test
+  function releaseDevice(device) {
+    if (!device) return;
+    try { device.removeEventListener('gattserverdisconnected', window.onDisconnected); } catch { /* not an EventTarget */ }
+    const open = !!(device.gatt && device.gatt.connected);
+    try { if (device.gatt) device.gatt.disconnect(); } catch (err) { log('ERROR: releasing the Bluetooth link: ' + err.message); }
+    const still = !!(device.gatt && device.gatt.connected);
+    if (still) ble.devices.add(device);   // tried again before the next scan
+    else ble.devices.delete(device);
+    log('Bluetooth link to ' + (device.name || 'the device') + ' released' + (still ? ', but it still reports a connection (tried again before the next scan)' : open ? ' (it was still open)' : '') + '.');
   }
+  // The page is disconnected now (setStatus 'Disconnected'): release the device it had and drop every reference.
+  function releaseLink() {
+    const device = state.device;
+    state.device = null; state.server = null; state.c304 = null; state.c305 = null;
+    if (device) releaseDevice(device);
+  }
+  // Right before a scan: any device object from before that still reports a connection.
+  function releaseOldDevices() {
+    if (state.device && !state.connected) releaseLink();
+    for (const device of [...ble.devices]) {
+      if (device === state.device) continue;
+      if (device.gatt && device.gatt.connected) releaseDevice(device);
+      else ble.devices.delete(device);
+    }
+  }
+  // A write that failed because the link is gone (no gattserverdisconnected came, or not yet): disconnected, and
+  // released like any other disconnect. A write refused while the link is still up changes nothing.
+  let writeFailPending = false;
+  function writeFailed(err) {
+    if (ui.demo || !state.connected || writeFailPending) return;
+    const d = state.device;
+    const gone = !d || !d.gatt || !d.gatt.connected || /disconnected|not connected/i.test(String((err && err.message) || err));
+    if (!gone) return;
+    writeFailPending = true;
+    setTimeout(() => {   // after the core's "ERROR: BLE write failed" line
+      writeFailPending = false;
+      if (!state.connected || ui.demo) return;
+      log('The Bluetooth link is gone (a write failed); disconnecting.');
+      window.onDisconnected();
+    }, 0);
+  }
+  // Every requestDevice() goes through here: the release above first, then (in the desktop app) the shell's picker is
+  // told what the scan is for. ble.requestDevice is the browser's; the UX test puts a fake pedal there. Installed at
+  // boot and again before each connect (a browser that gains navigator.bluetooth later, the UX test on Linux).
+  function wrapRequestDevice() {
+    const bt = navigator.bluetooth;
+    if (!bt || !bt.requestDevice || bt.requestDevice.__nano) return;
+    if (!ble.requestDevice) ble.requestDevice = bt.requestDevice.bind(bt);
+    const wrapped = (options) => {
+      releaseOldDevices();
+      ble.requests.push(Object.assign({}, ble.next || {}));
+      let opts = options;
+      if (shellBridge && shellBridge.bluetoothRequest) {
+        const next = ble.next || {};
+        ble.next = null;
+        ble.mode = shellBridge.bluetoothRequest(next) === 'all' ? 'all' : 'nano';
+        if (ble.mode !== 'all' && BLE_SERVICES.length) opts = { filters: BLE_SERVICES.map(s => ({ services: [s] })), optionalServices: BLE_SERVICES };
+      }
+      return Promise.resolve(ble.requestDevice(opts)).then((device) => { if (device) ble.devices.add(device); return device; });
+    };
+    wrapped.__nano = true;
+    bt.requestDevice = wrapped;
+  }
+  wrapRequestDevice();
   // A new scan from the shell (after a device turned out not to be a Nano, with a user gesture) or from the
   // chooser's buttons. While an attempt is running it is cancelled first and the scan starts when it has ended.
   window.__connectAgain = (opts) => {
@@ -2453,7 +2520,21 @@
   function notifyPreviewState(active, name = '', error = '', phase = null) {
     previewToolbar = { active: !!active, name: name || '', error: error || '', phase: phase || (active ? 'active' : 'idle') };
     if (shellBridge && shellBridge.previewState) shellBridge.previewState(previewToolbar);
+    syncAuditionState();
   }
+  // The shell holds a quit while anything is auditioned (src/quit-guard.js), so it is told at once whenever that
+  // changes: from here and from render(), which every audition change calls (not from the drawing itself, which waits
+  // for an animation frame and doesn't run while the Cloud tab hides this page).
+  var auditionSyncReady;   // var: render() may run before the audition state below is set up
+  let auditionShown = false;
+  function syncAuditionState() {
+    if (!auditionSyncReady) return;
+    const now = auditioning();
+    if (now === auditionShown) return;
+    auditionShown = now;
+    if (shellBridge && shellBridge.auditionState) shellBridge.auditionState(now);
+  }
+  window.__auditionShown = () => auditionShown;   // what the shell was last told (UX test)
   // The toolbar state from what is true now (a start or stop in flight shows as starting / stopping).
   function pushPreviewState(error = '') {
     const phase = ui.previewBusy ? (ui.previewing ? 'stopping' : 'starting') : ui.previewing ? 'active' : 'idle';
@@ -2484,6 +2565,7 @@
     return Boolean(irAudition.busy || irAudition.pending || irAudition.active);
   }
   const auditioning = () => Boolean(ui.previewing || ui.previewBusy || irAuditioning());
+  auditionSyncReady = true;
 
   // While anything is auditioned the pedal wants type 91 about every 20 s (it answers 92); without it the audition
   // ends after about a minute. One timer for both kinds; it runs until the last audition is confirmed stopped.
@@ -2573,7 +2655,7 @@
 
   // true once the pedal confirmed the stop (149 with this transaction and status 1). Otherwise nothing changes: the
   // IR may still be playing, so it stays marked active and the keep-alive keeps running.
-  async function stopIRPreview({ quiet = false } = {}) {
+  async function stopIRPreview({ quiet = false, reread = true } = {}) {
     if (!irAudition.active) return !irAudition.busy;
     if (irAudition.busy) return false;
     if (!state.connected) return false;
@@ -2598,7 +2680,7 @@
     irAudition.active = null;
     stopKeepAliveIfIdle();
     render();
-    await refreshAfterIRPreviewStop();
+    if (reread) await refreshAfterIRPreviewStop();
     settleIRSlotTargetAfterPreview();
     return true;
   }
@@ -2649,9 +2731,18 @@
     return true;
   }
 
+  // After a confirmed stop the state is read again, as the official app does (and as after an IR audition): while the
+  // pedal plays a preview its state reports the previewed capture, so without a read the editor kept showing that
+  // capture's name after the stop (seen in the native edition on the pedal, 2026-10-24); the read shows the preset's own.
+  async function refreshAfterCapturePreviewStop() {
+    if (!state.connected) return;
+    if (!(await NanoLive.readCurrentState(6000))) log('Live preview stopped; the current preset state could not be read.');
+  }
+
   // true once the pedal confirmed the stop. Otherwise the preview stays marked active (it may still be playing),
-  // the keep-alive keeps running, and the toolbar shows Stop Preview again.
-  async function stopCapturePreview({ quiet = false } = {}) {
+  // the keep-alive keeps running, and the toolbar shows Stop Preview again. reread: false skips the state read
+  // (quitting).
+  async function stopCapturePreview({ quiet = false, reread = true } = {}) {
     if (!ui.previewing) { if (!ui.previewBusy) pushPreviewState(); return !ui.previewBusy; }
     if (ui.previewBusy) return false;
     if (!state.connected) return false;
@@ -2680,6 +2771,7 @@
     pushPreviewState();
     if (!quiet) toast('Live preview stopped.');
     render();
+    if (reread) await refreshAfterCapturePreviewStop();
     return true;
   }
 
@@ -2694,6 +2786,20 @@
     return ok;
   }
   window.__stopAnyAudition = stopAnyAudition;
+  window.__auditioning = auditioning;
+
+  // Quitting during an audition (src/quit-guard.js): the shell holds the quit and runs this, which ends whatever is
+  // auditioned (148) and waits for the pedal's 149. The shell waits at most 1.5 s and quits either way. A start or
+  // stop already on its way finishes first; no state read afterwards.
+  async function stopAuditionsForQuit() {
+    if (!auditioning()) return { active: false, ok: true };
+    if (!state.connected) return { active: true, ok: false };
+    if (ui.previewBusy || irAudition.busy) await waitUntil(() => !ui.previewBusy && !irAudition.busy, 1400);
+    const capture = !ui.previewing || await stopCapturePreview({ quiet: true, reread: false });
+    const ir = !irAudition.active || await stopIRPreview({ quiet: true, reread: false });
+    return { active: true, ok: capture && ir && !auditioning() };
+  }
+  window.__stopAuditionsForQuit = stopAuditionsForQuit;
 
   // The pedal switched presets itself (footswitch) during an audition: end it anyway (the stop is sent, best effort)
   // and forget it, so the keep-alive stops and the toolbar and inspector don't show an audition of the old preset.
@@ -2774,7 +2880,10 @@
     const c = state.c304;
     if (!c || c.__tapped) return;
     const real = (c.writeValueWithResponse || c.writeValue).bind(c);
-    state.c304 = { __tapped: true, writeValueWithResponse: (p) => { recordEvent('tx', p, ui.lastTxLabel); return real(p); } };
+    state.c304 = { __tapped: true, writeValueWithResponse: (p) => {
+      recordEvent('tx', p, ui.lastTxLabel);
+      return Promise.resolve().then(() => real(p)).catch((err) => { writeFailed(err); throw err; });
+    } };
   }
   // RX: wrap the core's notification handler (connectNano looks it up by name on connect).
   const coreOnC305 = window.onC305;
@@ -2844,6 +2953,7 @@
       }
     }
     if (!connected && /disconnect/i.test(text)) {
+      releaseLink();
       ui.cabIRLoadPaused = false;
       ui.cabIRLoadTimedOut = null;
       ui.cabIRLoadQueue.length = 0;
@@ -3291,6 +3401,7 @@
   }
 
   function render() {
+    syncAuditionState();
     if (ui.knobDragging) {
       ui.renderAfterKnob = true;
       return;
@@ -5128,11 +5239,13 @@
     const f = bodyOf(d);
     const rec = pf.sub(f, 11);           // byte-identical to state field 34 for the active capture
     const by = pf.sub(f, 7), recBy = pf.sub(rec, 4);
+    const desc = NanoText.storedDescription(pf.str(f, 8)) || pf.str(rec, 5);   // 18.8, else the record's own field 5
     const info = {
       ok: pf.int(f, 3) === 1,
       name: pf.str(f, 10) || pf.str(rec, 2),
       author: pf.str(by, 2) || pf.str(by, 1) || pf.str(recBy, 2) || pf.str(recBy, 1),
-      description: NanoText.captureDescription(pf.str(f, 8)),   // "", blank or "null": none
+      description: NanoText.captureDescription(desc),   // "", blank, "null" or a bare Cloud ID: none
+      cloudId: NanoText.captureCloudId(desc),           // the description is the capture's Cortex Cloud ID
       hash: pf.str(f, 9) || pf.str(rec, 1),
       type: pf.str(rec, 6), instrument: pf.str(rec, 10), tags: pf.strs(rec, 7),
     };
@@ -5243,6 +5356,11 @@
 
   // Capture info: "Info…" in the capture node's and the capture slots' context menus. A popover like the native
   // app's: slot, name, author, kind icons, tag chips, description, hash with Copy. slot is 1-based.
+  // A capture whose description is just its Cortex Cloud ID gets "Open in Cortex Cloud" there instead: the shell
+  // (nanoShell.openCloudCapture → src/main.js) loads that capture's page in the Cloud tab. Nothing goes to the pedal.
+  // Without the shell (the web preview) there is no Cloud tab, so no button. The UX test sets its own opener.
+  let openCloudCapture = shellBridge && shellBridge.openCloudCapture ? (id) => shellBridge.openCloudCapture(id) : null;
+  window.__setCloudCaptureOpener = (fn) => { openCloudCapture = typeof fn === 'function' ? fn : null; };
   const slotLabel = (slot) => Math.ceil(slot / 5) + 'ABCDE'[(slot - 1) % 5];
   const shortHash = (h) => (h && h.length > 16 ? h.slice(0, 8) + '…' + h.slice(-6) : h || '');
   async function openCaptureInfo(slot, anchor) {
@@ -5286,6 +5404,16 @@
       kinds.length ? el('div', { class: 'cap-kinds' }, kinds) : null,
       info.tags.length ? el('div', { class: 'chips', dataset: { fk: 'cap-tags' } }, info.tags.map(t => el('span', { class: 'chip', text: t }))) : null,
       info.description ? el('p', { class: 'cap-desc', text: info.description, dataset: { fk: 'cap-desc' } }) : null,
+      info.cloudId && openCloudCapture ? el('button', {
+        class: 'btn ghost small cap-cloud', type: 'button', dataset: { fk: 'cap-cloud-link' },
+        title: 'Open this capture\u2019s page in the Cortex Cloud tab',
+        onclick: () => {
+          const id = info.cloudId;
+          closePopover();
+          log('Opening capture ' + id + ' in Cortex Cloud');
+          Promise.resolve(openCloudCapture(id)).catch(() => {});
+        },
+      }, 'Open in Cortex Cloud') : null,
       el('div', { class: 'cap-hash dev-only' }, el('span', { class: 'k', text: 'Hash' }), el('span', { class: 'v', text: shortHash(info.hash) || '—', title: info.hash || null, dataset: { fk: 'cap-hash' } }), copy),
     ].filter(Boolean));
     place();
@@ -5717,7 +5845,10 @@
     const reply = (frame) => setTimeout(() => handleTypedMessage(frame), 30);
     const notify = (frame) => setTimeout(() => window.onC305({ target: { value: { buffer: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) } } }), 30);
     const reassemble = NanoTransfer.makeReassembler();
-    const hooks = {};   // test hooks (window.__demo.hooks): refuseStop, dropStateReads, quiet115, writeDelay
+    const hooks = {};   // test hooks (window.__demo.hooks): refuseStop, stopDelay, dropStateReads, quiet115, writeDelay
+    // A capture audition on the (demo) pedal. While it plays, a state read reports the previewed capture as the current
+    // one, as the pedal does; after the stop the next read reports the preset's own capture again.
+    const audition = { capture: '', presetCapture: null };
     const firstField = (fields, n) => fields[n] && fields[n][0];
     const textField = (fields, n) => {
       const x = firstField(fields, n);
@@ -5731,6 +5862,7 @@
       const recordFields = record && record.wire === 2 ? parseProtoFields(record.raw) : {};
       const name = textField(recordFields, 2) || 'Demo preview';
       const hash = textField(recordFields, 1);
+      audition.capture = name;
       const enc = (s) => Array.from(new TextEncoder().encode(s));
       const replyRecord = [0x12, enc(name).length, ...enc(name), 0x1A, enc(hash).length, ...enc(hash)];
       notify(buildFrame([0x08, 0x06, 0x18, 0x01, 0x22, replyRecord.length, ...replyRecord], NanoTransfer.MSG_PREVIEW_CAPTURE_REPLY));
@@ -5776,6 +5908,10 @@
           if (state.stateMode === 'current') state.stateMode = 'idle';
           state.protocol.presetLoad = false;
           if (moved.current) { state.selectedPreset = moved.current; moved.current = 0; applyStateDump(); }   // field 13 and the footswitches
+          if (audition.capture) {   // the dump's capture, as the core's parse sets it
+            if (!audition.presetCapture) audition.presetCapture = { ...state.currentCapture };
+            state.currentCapture = { name: audition.capture, id: '', inBank: [...state.captureNames.values()].some(n => sameName(n, audition.capture)) };
+          } else if (audition.presetCapture) { state.currentCapture = audition.presetCapture; audition.presetCapture = null; }
           NanoLive.noteStateRead();
           render();
         }, 20);
@@ -5864,9 +6000,13 @@
         irDownloadReply(Array.from(bytes.slice(2, bytes.length - 4)));
       } else if (type === NanoTransfer.MSG_PREVIEW_STOP) {
         // 148 { 2: transaction, 3 or 4: 0 } → 149 { 1: 1, 2: transaction, 3: 1 }. Test hook: answer a refusal (status 0).
+        // Test hook: hooks.stopDelay (ms) answers that much later (a slow pedal).
         const f = framePayloadFields(bytes);
         const tx = f[2] && f[2][0] ? f[2][0].value : 0;
-        notify(buildFrame([0x08, 0x01, 0x10, ...varint(tx), 0x18, hooks.refuseStop ? 0x00 : 0x01], NanoTransfer.MSG_PREVIEW_STOP_REPLY));
+        const refused = !!hooks.refuseStop;
+        if (!refused && f[3]) audition.capture = '';   // field 3: the capture audition stopped
+        const answer = () => notify(buildFrame([0x08, 0x01, 0x10, ...varint(tx), 0x18, refused ? 0x00 : 0x01], NanoTransfer.MSG_PREVIEW_STOP_REPLY));
+        if (hooks.stopDelay) setTimeout(answer, hooks.stopDelay); else answer();
       } else if (type === MSG_IR_PREVIEW) {
         // 158 { 3 or 4: { 1: index, 2: name }, 8: 1 } → 159 { 1: 6, 3: 1, 4: { 2: name } } when the item exists.
         const f = framePayloadFields(bytes);
@@ -5887,6 +6027,7 @@
     const pbStr = (field, text) => { const b = Array.from(new TextEncoder().encode(text)); return [(field << 3) | 2, ...varint(b.length), ...b]; };
     const pbSub = (field, b) => [(field << 3) | 2, ...varint(b.length), ...b];
     const fakeHash = (seed, n) => Array.from({ length: n }, (_, k) => ((seed * 31 + k * 7 + 3) % 16).toString(16)).join('');
+    const DEMO_CLOUD_ID = '5D3E0C10-0D00-4A11-8C55-0000000000A5';
     const DEMO_TAGS = { 1: ['Marshall', 'Jubilee', 'Crunch'], 2: ['EVH', '5150', 'High gain'], 3: ['Mesa', 'JP2C', 'Lead'], 4: ['Fender', 'Princeton', 'Clean'] };
     function deviceReply(type, f) {
       const int = (n) => (f[n] && f[n][0] && f[n][0].wire === 0 ? f[n][0].value : 0);
@@ -5922,9 +6063,10 @@
       const by = [...pbStr(1, author), ...pbStr(2, author)];
       const record = [...pbStr(1, hash), ...pbStr(2, name), ...pbSub(4, by), ...pbStr(6, kind), ...tags.flatMap(t => pbStr(7, t)), 0x40, 0x04,
         ...pbStr(10, instrument), 0x58, 0x01, ...pbStr(12, '1')];
-      // No description: slot 4 answers an empty one (like the traced reply), slot 2 the text "null". (Slot 3 keeps one:
-      // docs/images/capture-info.png shows it.)
-      const desc = slot === 2 ? 'null' : slot === 4 ? '' : 'Demo capture in slot ' + slot + '.';
+      // No description: slot 4 answers an empty one (like the traced reply), slot 2 the text "null". Slot 5's description
+      // is just a Cortex Cloud ID (made up; capitals, to show it is matched in any case), as some captures on a real
+      // pedal have. (Slot 3 keeps one: docs/images/capture-info.png shows it.)
+      const desc = slot === 2 ? 'null' : slot === 4 ? '' : slot === 5 ? DEMO_CLOUD_ID : 'Demo capture in slot ' + slot + '.';
       return longFrame([0x08, 0x06, 0x18, 0x01, ...pbSub(7, by), ...pbStr(8, desc), ...pbStr(9, hash), ...pbStr(10, name),
         ...pbSub(11, record)], DEV_MSG.CAPTURE);
     }
@@ -6017,6 +6159,7 @@
     }
     function load(n) {
       if (!running) return;
+      audition.capture = ''; audition.presetCapture = null;
       if (saved.has(n)) applySnapshot(saved.get(n)); else if (origin[n - 1] <= 24) fromPreset(origin[n - 1]); else blank();
       reportFxModels();
       applyStateDump();
@@ -6063,6 +6206,7 @@
     function stop() {
       running = false;
       ui.demo = false;
+      audition.capture = ''; audition.presetCapture = null;
       state.c304 = null; state.connected = false;
       if (origWait) window.waitForPresetState = origWait;
       tunerDemo(false);
@@ -6097,7 +6241,31 @@
   window.onC305 = NanoLive.withExactBytes(window.onC305);
   const startDemo = !navigator.bluetooth || window.__FORCE_DEMO || /[?&]demo\b/.test(location.search);
   // Reconnect at launch: the shell grants the user gesture requestDevice() needs and picks the remembered pedal.
-  window.__autoConnect = () => { window.__autoConnect = null; ble.next = { auto: true }; return doConnect(); };
+  window.__autoConnect = () => { window.__autoConnect = null; ble.autoWhy = 'launch'; ble.next = { auto: true }; return doConnect(); };
+  // Sleep and wake (src/main.js, powerMonitor): before the computer sleeps the page disconnects cleanly, so no link is
+  // left for macOS to hold; on wake it reconnects the remembered pedal the way the launch reconnect does (an auto scan)
+  // whenever it was connected before the sleep. That is not the "Reconnect … at launch" setting, which stays launch-only
+  // (the native edition reconnects after any dropped link, wake included). main runs __systemResume with a user gesture
+  // (requestDevice() needs one) and says whether a pedal is remembered (the auto scan takes only that one).
+  window.__systemSuspend = () => {
+    ble.wakeReconnect = false;
+    if (ui.demo || !state.connected) return false;
+    ble.wakeReconnect = true;
+    log('The computer is going to sleep: disconnecting from the pedal.');
+    disconnect();
+    return true;
+  };
+  window.__systemResume = (opts = {}) => {
+    const was = ble.wakeReconnect;
+    ble.wakeReconnect = false;
+    if (!was || ui.demo || state.connected || ui.connecting) return false;
+    if (!(opts && opts.pedal)) { log('The computer woke up. Click Connect to reconnect to the pedal.'); return false; }
+    log('The computer woke up: reconnecting to the remembered pedal.');
+    ble.autoWhy = 'wake';
+    ble.next = { auto: true };
+    doConnect();
+    return true;
+  };
   if (startDemo) demo.start();
   else if (shellBridge && pref.get('autoConnect', false)) shellBridge.autoConnect().catch(() => {});
 })();
