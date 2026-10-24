@@ -759,7 +759,7 @@ ipcMain.handle('toggle-cab-ir', async (e) => {
 // ---------- auditions on quit (src/quit-guard.js) ----------
 // The page reports whether anything is auditioned (a Live Preview or a library IR). ⌘Q, the menu's Quit or closing the
 // window then waits until the page has sent the stop (148) and the pedal confirmed it (149), at most 1.5 s, and quits
-// either way. So does the update modal's Restart.
+// either way, with one "Quit: …" line in the Activity log. So does the update modal's Restart.
 let auditionActive = false;
 ipcMain.on('audition-state', (e, on) => { if (fromEditor(e)) auditionActive = !!on; });
 const { createQuitGuard } = require('./quit-guard');
@@ -881,9 +881,10 @@ function buildMenu() {
 
 // ---------- sleep and wake ----------
 // Before the computer sleeps the editor disconnects from the pedal cleanly, so macOS has no link left to hold (a held
-// link kept the pedal from advertising: 2026-10-20→23). On wake, if it was connected and Settings → "Reconnect to the
-// last pedal at launch" is on, the page reconnects the remembered pedal like the launch reconnect (the user gesture
-// requestDevice() needs comes from executeJavaScript). Bluetooth needs a moment after wake, hence the delay.
+// link kept the pedal from advertising: 2026-10-20→23). On wake, if it was connected before the sleep, the page
+// reconnects the remembered pedal like the launch reconnect (the user gesture requestDevice() needs comes from
+// executeJavaScript); not tied to "Reconnect to the last pedal at launch", which stays launch-only (the native edition
+// reconnects after any dropped link). Bluetooth needs a moment after wake, hence the delay.
 const RESUME_RECONNECT_MS = 3000;
 let resumeTimer = null;
 function editorPage() { return editorFlavor === 'pro' && editor && !editor.webContents.isDestroyed() ? editor.webContents : null; }

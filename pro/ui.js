@@ -5239,12 +5239,13 @@
     const f = bodyOf(d);
     const rec = pf.sub(f, 11);           // byte-identical to state field 34 for the active capture
     const by = pf.sub(f, 7), recBy = pf.sub(rec, 4);
+    const desc = NanoText.storedDescription(pf.str(f, 8)) || pf.str(rec, 5);   // 18.8, else the record's own field 5
     const info = {
       ok: pf.int(f, 3) === 1,
       name: pf.str(f, 10) || pf.str(rec, 2),
       author: pf.str(by, 2) || pf.str(by, 1) || pf.str(recBy, 2) || pf.str(recBy, 1),
-      description: NanoText.captureDescription(pf.str(f, 8)),   // "", blank, "null" or a bare Cloud ID: none
-      cloudId: NanoText.captureCloudId(pf.str(f, 8)),           // the description is the capture's Cortex Cloud ID
+      description: NanoText.captureDescription(desc),   // "", blank, "null" or a bare Cloud ID: none
+      cloudId: NanoText.captureCloudId(desc),           // the description is the capture's Cortex Cloud ID
       hash: pf.str(f, 9) || pf.str(rec, 1),
       type: pf.str(rec, 6), instrument: pf.str(rec, 10), tags: pf.strs(rec, 7),
     };
@@ -6242,9 +6243,10 @@
   // Reconnect at launch: the shell grants the user gesture requestDevice() needs and picks the remembered pedal.
   window.__autoConnect = () => { window.__autoConnect = null; ble.autoWhy = 'launch'; ble.next = { auto: true }; return doConnect(); };
   // Sleep and wake (src/main.js, powerMonitor): before the computer sleeps the page disconnects cleanly, so no link is
-  // left for macOS to hold; on wake it reconnects the remembered pedal the way the launch reconnect does, if it was
-  // connected before and Settings → "Reconnect to the last pedal at launch" is on. main runs __systemResume with a
-  // user gesture (requestDevice() needs one) and says whether a pedal is remembered.
+  // left for macOS to hold; on wake it reconnects the remembered pedal the way the launch reconnect does (an auto scan)
+  // whenever it was connected before the sleep. That is not the "Reconnect … at launch" setting, which stays launch-only
+  // (the native edition reconnects after any dropped link, wake included). main runs __systemResume with a user gesture
+  // (requestDevice() needs one) and says whether a pedal is remembered (the auto scan takes only that one).
   window.__systemSuspend = () => {
     ble.wakeReconnect = false;
     if (ui.demo || !state.connected) return false;
@@ -6257,7 +6259,7 @@
     const was = ble.wakeReconnect;
     ble.wakeReconnect = false;
     if (!was || ui.demo || state.connected || ui.connecting) return false;
-    if (!pref.get('autoConnect', false) || !(opts && opts.pedal)) { log('The computer woke up. Click Connect to reconnect to the pedal.'); return false; }
+    if (!(opts && opts.pedal)) { log('The computer woke up. Click Connect to reconnect to the pedal.'); return false; }
     log('The computer woke up: reconnecting to the remembered pedal.');
     ble.autoWhy = 'wake';
     ble.next = { auto: true };

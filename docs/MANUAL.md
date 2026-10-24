@@ -108,11 +108,12 @@ and a simulated pedal; nothing is sent anywhere. The status bar says "Demo data,
 header returns to the connect screen.
 
 **Reconnect at launch.** In [Settings](#12-settings) → Connection, turn on **Reconnect to the last pedal at launch**.
-The app then connects to the pedal it used last as soon as it starts, without the list, and again when the computer
-wakes from sleep if it was connected before. **Forget pedal** clears the remembered pedal.
+The app then connects to the pedal it used last as soon as it starts, without the list. **Forget pedal** clears the
+remembered pedal.
 
 **Sleep.** Before the computer sleeps the editor disconnects from the pedal, so the pedal is free (and visible to
-Connect) afterwards.
+Connect) afterwards. When the computer wakes, the editor reconnects to the pedal if it was connected before the sleep
+(whether or not **Reconnect to the last pedal at launch** is on).
 
 ## 3. Tour of the window
 

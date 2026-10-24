@@ -7,7 +7,7 @@
 //   stopAuditions()  → a promise from the page (window.__stopAuditionsForQuit): { active, ok }; it sends the stop (148)
 //                      and waits for the pedal's confirmation (149)
 //   quit()           → quit for real (app.quit())
-//   log(line)        → one Activity line per held quit
+//   log(line)        → one Activity line per held quit (QUIT_LINES, word for word the native edition's)
 //
 // intercept(event): while nothing is auditioned it does nothing. Otherwise it holds the quit (event.preventDefault()),
 // asks the page to stop, and quits once the page has answered or capMs have passed, whichever comes first, so a pedal
@@ -16,18 +16,21 @@
 
 const QUIT_CAP_MS = 1500;
 const QUIT_LINES = Object.freeze({
-  stopped: 'Stopped the preview before quitting',
-  unconfirmed: 'Tried to stop the preview before quitting; the pedal didn’t confirm',
+  stopped: (ms) => 'Quit: stopped the preview first (the pedal confirmed in ' + Math.round(ms) + ' ms).',
+  notConfirmed: 'Quit: the pedal did not confirm stopping the preview; quitting anyway.',
+  timedOut: (capMs) => 'Quit: the pedal did not answer the preview stop within ' + (capMs / 1000).toFixed(1) + ' s; quitting anyway.',
 });
 
-function createQuitGuard({ isAuditioning, stopAuditions, quit, log = () => {}, timers = { setTimeout, clearTimeout }, capMs = QUIT_CAP_MS }) {
+function createQuitGuard({ isAuditioning, stopAuditions, quit, log = () => {}, timers = { setTimeout, clearTimeout }, now = Date.now, capMs = QUIT_CAP_MS }) {
   let phase = 'idle';   // 'stopping' while the page stops the audition, then 'done'
 
   const auditioning = () => { try { return !!isAuditioning(); } catch { return false; } };
 
-  // Stops the audition (capped), writes the line, then runs next(), once.
+  // Stops the audition (capped), writes the line, then runs next(), once. A refused stop, a page that is gone and a
+  // pedal that answers too late all end in a quit; the line says which.
   function stopThen(next) {
     phase = 'stopping';
+    const t0 = now();
     let timer = null;
     const capped = new Promise((resolve) => { timer = timers.setTimeout(() => resolve({ active: true, ok: false, timedOut: true }), capMs); });
     const asked = Promise.resolve()
@@ -35,7 +38,7 @@ function createQuitGuard({ isAuditioning, stopAuditions, quit, log = () => {}, t
       .then((r) => r || { active: true, ok: false }, (err) => ({ active: true, ok: false, error: String((err && err.message) || err) }));
     return Promise.race([asked, capped]).then((r) => {
       timers.clearTimeout(timer);
-      if (r.active !== false) log(r.ok ? QUIT_LINES.stopped : QUIT_LINES.unconfirmed);
+      if (r.active !== false) log(r.ok ? QUIT_LINES.stopped(now() - t0) : r.timedOut ? QUIT_LINES.timedOut(capMs) : QUIT_LINES.notConfirmed);
       phase = 'done';
       try { next(); } catch (err) { log('Quitting failed: ' + ((err && err.message) || err)); }
       return r;

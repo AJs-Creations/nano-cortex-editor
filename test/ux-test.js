@@ -1792,7 +1792,9 @@ async function run() {
       return g;
     };
     check('the quit guard waits at most 1.5 s', QUIT_CAP_MS === 1500);
-    check('quit lines: "Stopped the preview before quitting" / "Tried to stop the preview before quitting; the pedal didn’t confirm"', QUIT_LINES.stopped === 'Stopped the preview before quitting' && QUIT_LINES.unconfirmed === 'Tried to stop the preview before quitting; the pedal didn’t confirm');
+    check('quit lines, word for word the native edition\'s: "Quit: stopped the preview first (the pedal confirmed in N ms).", "Quit: the pedal did not confirm stopping the preview; quitting anyway.", "Quit: the pedal did not answer the preview stop within 1.5 s; quitting anyway."',
+      QUIT_LINES.stopped(42.4) === 'Quit: stopped the preview first (the pedal confirmed in 42 ms).' && QUIT_LINES.notConfirmed === 'Quit: the pedal did not confirm stopping the preview; quitting anyway.' && QUIT_LINES.timedOut(QUIT_CAP_MS) === 'Quit: the pedal did not answer the preview stop within 1.5 s; quitting anyway.');
+    const stoppedLine = (lines) => lines.length === 1 && /^Quit: stopped the preview first \(the pedal confirmed in \d+ ms\)\.$/.test(lines[0]);
     let g = makeGuard();
     n0 = await mark();
     await g.sync();
@@ -1809,7 +1811,7 @@ async function run() {
     await waitFor(() => g.quits > 0, { timeout: 4000 });
     tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
     check('… the page sends the stop (148) once, the pedal confirms (149), then the app quits, once', g.quits === 1 && tx.filter(t => /^TX Stop capture preview: .* 94 00 00 00$/.test(t)).length === 1 && await js(`__ui.logs.some(l => l.seq > ${n0} && /^Capture preview stop confirmed/.test(l.text))`) && g.quitAt - g.t0 < QUIT_CAP_MS, JSON.stringify(tx) + ' ' + (g.quitAt - g.t0) + ' ms');
-    check('… with one Activity line: "Stopped the preview before quitting"', JSON.stringify(g.lines) === JSON.stringify(['Stopped the preview before quitting']), JSON.stringify(g.lines));
+    check('… with one Activity line: "Quit: stopped the preview first (the pedal confirmed in N ms)."', stoppedLine(g.lines), JSON.stringify(g.lines));
     check('… no state read on the way out, the keep-alive stopped, nothing auditioned any more', !tx.some(t => /^TX Current preset state request/.test(t)) && await js(`!__ui.previewing && !__ui.previewBusy && __ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive stopped/.test(l.text))`) && !(await g.sync()), JSON.stringify(tx));
     e = g.quit();
     check('once it has run, the next quit goes through', !e.prevented && g.quits === 1);
@@ -1821,7 +1823,7 @@ async function run() {
     e = g.quit();
     await waitFor(() => g.quits > 0, { timeout: 4000 });
     tx = await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
-    check('quitting during an IR audition sends the IR stop (148 {2:tx 4:0}) and quits after the confirmation', e.prevented && g.quits === 1 && tx.filter(t => /^TX Stop IR preview: [0-9A-F]{2} C0 10 ([0-9A-F]{2} )+20 00 94 00 00 00$/.test(t)).length === 1 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.stopped]) && await js('!document.querySelector(".library-preview.playing")'), JSON.stringify(tx) + ' ' + JSON.stringify(g.lines));
+    check('quitting during an IR audition sends the IR stop (148 {2:tx 4:0}) and quits after the confirmation', e.prevented && g.quits === 1 && tx.filter(t => /^TX Stop IR preview: [0-9A-F]{2} C0 10 ([0-9A-F]{2} )+20 00 94 00 00 00$/.test(t)).length === 1 && stoppedLine(g.lines) && await js('!document.querySelector(".library-preview.playing")'), JSON.stringify(tx) + ' ' + JSON.stringify(g.lines));
     await settle();
 
     // A pedal that refuses the stop: quit anyway, at once, and say so.
@@ -1831,7 +1833,7 @@ async function run() {
     await js('__demo.hooks.refuseStop = true');
     e = g.quit();
     await waitFor(() => g.quits > 0, { timeout: 4000 });
-    check('a pedal that refuses the stop: the app still quits, without waiting out the 1.5 s, and the line says the pedal didn’t confirm', e.prevented && g.quits === 1 && g.quitAt - g.t0 < QUIT_CAP_MS && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.unconfirmed]), (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
+    check('a pedal that refuses the stop: the app still quits, without waiting out the 1.5 s, and the line says the pedal did not confirm', e.prevented && g.quits === 1 && g.quitAt - g.t0 < QUIT_CAP_MS && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.notConfirmed]), (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
     await js('__demo.hooks.refuseStop = false');
     check('(the preview is stopped for real afterwards)', (await js('__stopCapturePreview({ quiet: true })')) === true);
     await settle();
@@ -1843,7 +1845,7 @@ async function run() {
     await js('__demo.hooks.stopDelay = 400');
     e = g.quit();
     await waitFor(() => g.quits > 0, { timeout: 4000 });
-    check('a slow pedal (answers after 0.4 s): the quit waits for it, then quits with "Stopped the preview before quitting"', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= 380 && g.quitAt - g.t0 < QUIT_CAP_MS && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.stopped]), (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
+    check('a slow pedal (answers after 0.4 s): the quit waits for it, then quits with "Quit: stopped the preview first (the pedal confirmed in N ms)."', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= 380 && g.quitAt - g.t0 < QUIT_CAP_MS && stoppedLine(g.lines) && Number(/in (\d+) ms/.exec(g.lines[0])[1]) >= 380, (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
     await settle();
     g = makeGuard();
     await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`);
@@ -1851,7 +1853,7 @@ async function run() {
     await js('__demo.hooks.stopDelay = 2600');
     e = g.quit();
     await waitFor(() => g.quits > 0, { timeout: 4000 });
-    check('a pedal that answers after 2.6 s: the app quits at the 1.5 s cap, with the "didn’t confirm" line', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= QUIT_CAP_MS - 50 && g.quitAt - g.t0 < QUIT_CAP_MS + 1000 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.unconfirmed]), (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
+    check('a pedal that answers after 2.6 s: the app quits at the 1.5 s cap, with "Quit: the pedal did not answer the preview stop within 1.5 s; quitting anyway."', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= QUIT_CAP_MS - 50 && g.quitAt - g.t0 < QUIT_CAP_MS + 1000 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.timedOut(QUIT_CAP_MS)]), (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
     await waitFor('!__ui.previewing && !__ui.previewBusy', { timeout: 4000 });
     await js('__demo.hooks.stopDelay = 0');
     check('(that preview ends when the late confirmation arrives)', await js('!__ui.previewing && !__ui.previewBusy'));
@@ -1862,12 +1864,12 @@ async function run() {
     g.shown = true;
     e = g.quit();
     await waitFor(() => g.quits > 0, { timeout: 1000 });
-    check('the editor page gone (executeJavaScript fails): quits at once, "didn’t confirm" line', e.prevented && g.quits === 1 && g.quitAt - g.t0 < 300 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.unconfirmed]), (g.quitAt - g.t0) + ' ms');
+    check('the editor page gone (executeJavaScript fails): quits at once, "did not confirm" line', e.prevented && g.quits === 1 && g.quitAt - g.t0 < 300 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.notConfirmed]), (g.quitAt - g.t0) + ' ms');
     g = makeGuard({ stop: () => new Promise(() => {}), capMs: 250 });
     g.shown = true;
     e = g.quit();
     await waitFor(() => g.quits > 0, { timeout: 2000 });
-    check('a page that never answers: quits at the cap', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= 240 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.unconfirmed]), (g.quitAt - g.t0) + ' ms');
+    check('a page that never answers: quits at the cap ("did not answer … within 0.3 s")', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= 240 && JSON.stringify(g.lines) === JSON.stringify(['Quit: the pedal did not answer the preview stop within 0.3 s; quitting anyway.']), (g.quitAt - g.t0) + ' ms');
     g = makeGuard({ stop: () => Promise.resolve({ active: false, ok: true }) });
     g.shown = true;   // the shell thought so, but the page says nothing plays: quit, no line
     g.quit();
@@ -1882,7 +1884,7 @@ async function run() {
     await g.guard.beforeRestart(() => { g.nexts++; });
     tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
     e = g.quit();
-    check('Restart (update) during an audition: the stop goes first, then the updater runs; its quit is not held again', g.nexts === 1 && g.quits === 0 && !e.prevented && tx.some(t => /^TX Stop capture preview/.test(t)) && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.stopped]), JSON.stringify(tx));
+    check('Restart (update) during an audition: the stop goes first, then the updater runs; its quit is not held again', g.nexts === 1 && g.quits === 0 && !e.prevented && tx.some(t => /^TX Stop capture preview/.test(t)) && stoppedLine(g.lines), JSON.stringify(tx));
     g = makeGuard();
     await g.sync();
     await g.guard.beforeRestart(() => { g.nexts++; });
@@ -2553,6 +2555,18 @@ async function run() {
   check('… and nothing is sent to the pedal', (await txSince(n0)).length === 0, JSON.stringify(await txSince(n0)));
   await openInfo(1);
   check('a capture with a real description keeps it and has no Cloud button', /slot 1/.test(await val('cap-desc')) && await js('!document.querySelector(\'[data-fk="cap-cloud-link"]\')'));
+  {
+    // The description comes from the reply (18.8), else from the capture record it carries (field 5), as in the native
+    // edition: a Cloud ID in the record counts the same.
+    const ID = '4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5';
+    const recBytes = [0x0A, 0x02, ...utf8('ab'), 0x12, 0x09, ...utf8('Darkglass'), 0x2A, 36, ...utf8(ID.toUpperCase())];
+    const reply = (desc) => frameHex([0x08, 0x06, 0x18, 0x01, ...(desc === null ? [] : [0x42, utf8(desc).length, ...utf8(desc)]), 0x52, 0x09, ...utf8('Darkglass'), 0x5A, recBytes.length, ...recBytes], 18);
+    const details = (h) => js(`(() => { let got = null; __dev.capWait = (i) => { got = i; }; const b = Uint8Array.from(${JSON.stringify(h)}.split(' ').map(x => parseInt(x, 16))); onC305({ target: { value: { buffer: b.buffer } } }); return got; })()`);
+    const viaNull = await details(reply('null')), viaNone = await details(reply(null)), viaText = await details(reply('Tight and dry'));
+    check('Info: 18.8 "null" or missing → the record\'s field 5; a Cloud ID there gives "Open in Cortex Cloud" too; a real 18.8 wins',
+      !!viaNull && viaNull.description === '' && viaNull.cloudId === ID && !!viaNone && viaNone.cloudId === ID && !!viaText && viaText.description === 'Tight and dry' && viaText.cloudId === null,
+      JSON.stringify([viaNull && [viaNull.description, viaNull.cloudId], viaNone && viaNone.cloudId, viaText && [viaText.description, viaText.cloudId]]));
+  }
   await key('Escape'); await waitFor('!document.querySelector(".cap-info")');
   await js('__setCloudCaptureOpener(null); delete window.__cloudOpened; 0');
   // Library rows (the Cab / IR inspector's list): a description that is only a Cloud ID is neither shown nor searched.
@@ -2916,21 +2930,17 @@ async function run() {
     // (c) the computer sleeps and wakes (main's powerMonitor runs these hooks).
     n0 = await txCount();
     check('sleep while connected: the page disconnects cleanly', (await js('__systemSuspend()')) === true && await js('!state.connected && __bt.released(fakeF)') && await btLog(n0, '/^The computer is going to sleep: disconnecting from the pedal\\.$/'));
-    await js('localStorage.setItem("settings.autoConnect", "true"); __bt.offer(fakeF); __bt.seq.length = 0; 0');
+    // Not the launch setting: it is off here, and the wake reconnects anyway (as the native edition does after any
+    // dropped link).
+    await js('localStorage.setItem("settings.autoConnect", "false"); __bt.offer(fakeF); __bt.seq.length = 0; 0');
     n0 = await txCount();
-    check('wake, with "Reconnect to the last pedal at launch" on and a pedal remembered: reconnects like the launch reconnect (an auto scan)', (await js('__systemResume({ pedal: true })')) === true && JSON.stringify(await js('__ble.requests.slice(-1)[0]')) === JSON.stringify({ auto: true }) && await btLog(n0, '/^The computer woke up: reconnecting to the remembered pedal\\.$/'));
+    check('wake after a sleep while connected, a pedal remembered: reconnects like the launch reconnect (an auto scan), whatever "Reconnect … at launch" says', (await js('__systemResume({ pedal: true })')) === true && JSON.stringify(await js('__ble.requests.slice(-1)[0]')) === JSON.stringify({ auto: true }) && await btLog(n0, '/^The computer woke up: reconnecting to the remembered pedal\\.$/'));
     await checkSoon('… and is connected to the pedal again', () => js('state.connected && state.device === fakeF.device && fakeF.device.gatt.connected'));
     check('wake without having slept does nothing', (await js('__systemResume({ pedal: true })')) === false);
-    let requests = await js('__ble.requests.length');
-    await js('__systemSuspend(); localStorage.setItem("settings.autoConnect", "false"); 0');
-    n0 = await txCount();
-    check('wake with the setting off: no scan, the Activity log says to click Connect', (await js('__systemResume({ pedal: true })')) === false && (await js('__ble.requests.length')) === requests && !(await js('state.connected')) && await btLog(n0, '/^The computer woke up\\. Click Connect to reconnect to the pedal\\.$/'));
-    await js('localStorage.setItem("settings.autoConnect", "true"); 0');
-    await connectFake('fakeG');
-    await waitFor('state.connected && state.device === fakeG.device');
     await js('__systemSuspend(); 0');
-    requests = await js('__ble.requests.length');
-    check('wake with no remembered pedal: no scan', (await js('__systemResume({ pedal: false })')) === false && (await js('__ble.requests.length')) === requests);
+    let requests = await js('__ble.requests.length');
+    n0 = await txCount();
+    check('wake with no remembered pedal: no scan, the Activity log says to click Connect', (await js('__systemResume({ pedal: false })')) === false && (await js('__ble.requests.length')) === requests && !(await js('state.connected')) && await btLog(n0, '/^The computer woke up\\. Click Connect to reconnect to the pedal\\.$/'));
     check('sleep while disconnected: nothing to do, and no reconnect on wake', (await js('__systemSuspend()')) === false && (await js('__systemResume({ pedal: true })')) === false && (await js('__ble.requests.length')) === requests);
     await js('__ble.autoWhy = "wake"; window.__bleHint = "auto-none"; log("Connect failed: NotFoundError: User cancelled the requestDevice() chooser."); __ble.autoWhy = ""; render()'); await frame();
     check('a pedal that doesn\'t show up after wake: the connect screen says so (with the Troubleshooting link)', (await js('document.querySelector(".veil-card .err")?.textContent || ""')) === 'Your Nano Cortex didn’t show up after the computer woke up. Power it on (and close Cortex Cloud on your phone), then click Connect. Troubleshooting', await js('document.querySelector(".veil-card .err")?.textContent || ""'));

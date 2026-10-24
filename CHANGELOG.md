@@ -18,7 +18,7 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
   of the previewed one.
 - The editor no longer leaves a Bluetooth link to the pedal open after a disconnect, a failed connect, sleep or a long
   idle spell, which could keep the pedal from showing up for **Connect** until the app quit. It disconnects before
-  the computer sleeps and, with **Reconnect to the last pedal at launch** on, reconnects when it wakes.
+  the computer sleeps and reconnects when it wakes if it was connected before.
 
 ## 1.2.0 — 2026-10-23
 
