@@ -46,7 +46,7 @@
     return [
       ...str(1, m.hash), ...str(2, m.name), ...str(3, m.cloudUUID),
       ...bytes(4, [...str(1, m.authorId), ...str(2, m.authorName)]),
-      ...str(5, NanoText.captureDescription(m.description)),   // never "null" (pro/capture-text.js)
+      ...str(5, NanoText.storedDescription(m.description)),   // never "null"; a Cloud ID is kept (pro/capture-text.js)
       ...str(6, m.deviceType || 'default'),
       ...(m.tags || []).flatMap(t => str(7, t)),
       ...int(8, m.gainType),

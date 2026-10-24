@@ -1747,6 +1747,151 @@ async function run() {
   check('a confirmed stop sets the toolbar back to idle', (await js('__stopCapturePreview()')) === true && await js('!__ui.previewing && !__previewToolbar().active && __previewToolbar().phase === "idle"'), JSON.stringify(await js('__previewToolbar()')));
   await key('4'); await frame(); await settle();
 
+  // ---------------------------------------------------------------- after a capture preview stops, the state is read again
+  // While the pedal plays a preview its state names the previewed capture; the native edition kept showing that name
+  // after the stop until the next state read (seen on the pedal, 2026-10-24). The demo pedal reports it the same way.
+  const nodeModel = (k) => js(`document.querySelector('[data-fk="node-${k}"] .model')?.textContent || ''`);
+  const ownCapture = await nodeModel('capture');
+  check('a capture preview starts (re-read)', (await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`)) === true && ownCapture !== '' && ownCapture !== 'Test Preview', ownCapture);
+  n0 = await mark();
+  await js('window.onC305({ target: { value: { buffer: buildFrame([0x08, 0x01], 31).buffer } } })');   // "something changed": one state read
+  await txWait(n0, t => t.some(x => /^TX Current preset state request/.test(x)));
+  await checkSoon('during a preview a state read names the previewed capture (as the pedal reports it)', async () => (await nodeModel('capture')) === 'Test Preview', async () => await nodeModel('capture'));
+  await js('__demo.hooks.refuseStop = true');
+  n0 = await mark();
+  check('a refused stop (re-read)', (await js('__stopCapturePreview({ quiet: true })')) === false);
+  await settle();
+  check('… reads nothing: the preview may still be playing', !(await txSince(n0)).some(t => /^TX Current preset state request/.test(t)) && (await nodeModel('capture')) === 'Test Preview', JSON.stringify(await txSince(n0)));
+  await js('__demo.hooks.refuseStop = false');
+  n0 = await mark();
+  check('stopping the preview (re-read)', (await js('__stopCapturePreview()')) === true);
+  tx = (await txWait(n0, t => t.some(x => /^TX Current preset state request/.test(x)))).filter(t => /^TX (Stop capture preview|Current preset state request)/.test(t));
+  const confirmedAt = await js(`(__ui.logs.find(l => l.seq > ${n0} && /^Capture preview stop confirmed/.test(l.text)) || {}).seq || 0`);
+  const readAt = await js(`(__ui.logs.find(l => l.seq > ${n0} && /^TX Current preset state request/.test(l.text)) || {}).seq || 0`);
+  check('after a confirmed capture-preview stop the state is read again: 148, the 149, then one state request', tx.length === 2 && /^TX Stop capture preview/.test(tx[0]) && /^TX Current preset state request: 0C C0 08 03 18 01 20 01 28 01 01 00 00 00$/.test(tx[1]) && confirmedAt > 0 && readAt > confirmedAt, JSON.stringify(tx) + ' ' + confirmedAt + '/' + readAt);
+  check('… and the chain shows the preset\'s own capture again, not the previewed one', (await nodeModel('capture')) === ownCapture, await nodeModel('capture'));
+  await settle();
+
+  // ---------------------------------------------------------------- quitting during an audition (src/quit-guard.js)
+  // The shell's guard with the real page: the page reports whether anything is auditioned (nanoShell.auditionState;
+  // here __auditionShown()), and the guard runs __stopAuditionsForQuit() as main does with executeJavaScript.
+  {
+    const { createQuitGuard, QUIT_CAP_MS, QUIT_LINES } = require('../src/quit-guard');
+    const quitEvent = () => ({ prevented: false, preventDefault() { this.prevented = true; } });
+    const makeGuard = (opts = {}) => {
+      const g = { quits: 0, lines: [], shown: false, t0: 0, quitAt: 0, nexts: 0 };
+      g.guard = createQuitGuard({
+        isAuditioning: () => g.shown,
+        stopAuditions: opts.stop || (() => js('__stopAuditionsForQuit()')),
+        quit: () => { g.quits++; g.quitAt = Date.now(); },
+        log: (line) => g.lines.push(line),
+        ...(opts.capMs ? { capMs: opts.capMs } : {}),
+      });
+      g.sync = async () => { g.shown = await js('__auditionShown()'); return g.shown; };
+      g.quit = () => { g.t0 = Date.now(); const e = quitEvent(); g.guard.intercept(e); return e; };
+      return g;
+    };
+    check('the quit guard waits at most 1.5 s', QUIT_CAP_MS === 1500);
+    check('quit lines, word for word the native edition\'s: "Quit: stopped the preview first (the pedal confirmed in N ms).", "Quit: the pedal did not confirm stopping the preview; quitting anyway.", "Quit: the pedal did not answer the preview stop within 1.5 s; quitting anyway."',
+      QUIT_LINES.stopped(42.4) === 'Quit: stopped the preview first (the pedal confirmed in 42 ms).' && QUIT_LINES.notConfirmed === 'Quit: the pedal did not confirm stopping the preview; quitting anyway.' && QUIT_LINES.timedOut(QUIT_CAP_MS) === 'Quit: the pedal did not answer the preview stop within 1.5 s; quitting anyway.');
+    const stoppedLine = (lines) => lines.length === 1 && /^Quit: stopped the preview first \(the pedal confirmed in \d+ ms\)\.$/.test(lines[0]);
+    let g = makeGuard();
+    n0 = await mark();
+    await g.sync();
+    let e = g.quit();
+    check('quitting with nothing auditioned is not held (no stop, no line)', !g.shown && !e.prevented && g.quits === 0 && g.lines.length === 0 && (await txSince(n0)).length === 0);
+
+    // A Live Preview playing: the quit waits for the stop and the pedal's confirmation, then quits once.
+    check('a capture preview starts (quit)', (await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`)) === true);
+    check('… and the page has told the shell that something is auditioned', await g.sync());
+    n0 = await mark();
+    e = g.quit();
+    const again = quitEvent(); g.guard.intercept(again);   // ⌘Q again, or the window's close that follows
+    check('quitting during a Live Preview is held (and so is a second quit or the window close meanwhile)', e.prevented && again.prevented && g.quits === 0);
+    await waitFor(() => g.quits > 0, { timeout: 4000 });
+    tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
+    check('… the page sends the stop (148) once, the pedal confirms (149), then the app quits, once', g.quits === 1 && tx.filter(t => /^TX Stop capture preview: .* 94 00 00 00$/.test(t)).length === 1 && await js(`__ui.logs.some(l => l.seq > ${n0} && /^Capture preview stop confirmed/.test(l.text))`) && g.quitAt - g.t0 < QUIT_CAP_MS, JSON.stringify(tx) + ' ' + (g.quitAt - g.t0) + ' ms');
+    check('… with one Activity line: "Quit: stopped the preview first (the pedal confirmed in N ms)."', stoppedLine(g.lines), JSON.stringify(g.lines));
+    check('… no state read on the way out, the keep-alive stopped, nothing auditioned any more', !tx.some(t => /^TX Current preset state request/.test(t)) && await js(`!__ui.previewing && !__ui.previewBusy && __ui.logs.some(l => l.seq > ${n0} && /Live preview keep-alive stopped/.test(l.text))`) && !(await g.sync()), JSON.stringify(tx));
+    e = g.quit();
+    check('once it has run, the next quit goes through', !e.prevented && g.quits === 1);
+
+    // A library IR audition: the IR stop (148 with field 4).
+    g = makeGuard();
+    check('an IR audition starts (quit)', (await js('__previewIR({ kind: "irFactory", index: 0, name: "412 V30" })')) === true && await g.sync());
+    n0 = await mark();
+    e = g.quit();
+    await waitFor(() => g.quits > 0, { timeout: 4000 });
+    tx = await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+    check('quitting during an IR audition sends the IR stop (148 {2:tx 4:0}) and quits after the confirmation', e.prevented && g.quits === 1 && tx.filter(t => /^TX Stop IR preview: [0-9A-F]{2} C0 10 ([0-9A-F]{2} )+20 00 94 00 00 00$/.test(t)).length === 1 && stoppedLine(g.lines) && await js('!document.querySelector(".library-preview.playing")'), JSON.stringify(tx) + ' ' + JSON.stringify(g.lines));
+    await settle();
+
+    // A pedal that refuses the stop: quit anyway, at once, and say so.
+    g = makeGuard();
+    await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`);
+    await g.sync();
+    await js('__demo.hooks.refuseStop = true');
+    e = g.quit();
+    await waitFor(() => g.quits > 0, { timeout: 4000 });
+    check('a pedal that refuses the stop: the app still quits, without waiting out the 1.5 s, and the line says the pedal did not confirm', e.prevented && g.quits === 1 && g.quitAt - g.t0 < QUIT_CAP_MS && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.notConfirmed]), (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
+    await js('__demo.hooks.refuseStop = false');
+    check('(the preview is stopped for real afterwards)', (await js('__stopCapturePreview({ quiet: true })')) === true);
+    await settle();
+
+    // A slow pedal: one that answers within 1.5 s is waited for; one that doesn't is not.
+    g = makeGuard();
+    await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`);
+    await g.sync();
+    await js('__demo.hooks.stopDelay = 400');
+    e = g.quit();
+    await waitFor(() => g.quits > 0, { timeout: 4000 });
+    check('a slow pedal (answers after 0.4 s): the quit waits for it, then quits with "Quit: stopped the preview first (the pedal confirmed in N ms)."', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= 380 && g.quitAt - g.t0 < QUIT_CAP_MS && stoppedLine(g.lines) && Number(/in (\d+) ms/.exec(g.lines[0])[1]) >= 380, (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
+    await settle();
+    g = makeGuard();
+    await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`);
+    await g.sync();
+    await js('__demo.hooks.stopDelay = 2600');
+    e = g.quit();
+    await waitFor(() => g.quits > 0, { timeout: 4000 });
+    check('a pedal that answers after 2.6 s: the app quits at the 1.5 s cap, with "Quit: the pedal did not answer the preview stop within 1.5 s; quitting anyway."', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= QUIT_CAP_MS - 50 && g.quitAt - g.t0 < QUIT_CAP_MS + 1000 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.timedOut(QUIT_CAP_MS)]), (g.quitAt - g.t0) + ' ms ' + JSON.stringify(g.lines));
+    await waitFor('!__ui.previewing && !__ui.previewBusy', { timeout: 4000 });
+    await js('__demo.hooks.stopDelay = 0');
+    check('(that preview ends when the late confirmation arrives)', await js('!__ui.previewing && !__ui.previewBusy'));
+    await settle();
+
+    // The page is gone or hung: never blocks quitting.
+    g = makeGuard({ stop: () => Promise.reject(new Error('Render frame was disposed before WebFrameMain could be accessed')) });
+    g.shown = true;
+    e = g.quit();
+    await waitFor(() => g.quits > 0, { timeout: 1000 });
+    check('the editor page gone (executeJavaScript fails): quits at once, "did not confirm" line', e.prevented && g.quits === 1 && g.quitAt - g.t0 < 300 && JSON.stringify(g.lines) === JSON.stringify([QUIT_LINES.notConfirmed]), (g.quitAt - g.t0) + ' ms');
+    g = makeGuard({ stop: () => new Promise(() => {}), capMs: 250 });
+    g.shown = true;
+    e = g.quit();
+    await waitFor(() => g.quits > 0, { timeout: 2000 });
+    check('a page that never answers: quits at the cap ("did not answer … within 0.3 s")', e.prevented && g.quits === 1 && g.quitAt - g.t0 >= 240 && JSON.stringify(g.lines) === JSON.stringify(['Quit: the pedal did not answer the preview stop within 0.3 s; quitting anyway.']), (g.quitAt - g.t0) + ' ms');
+    g = makeGuard({ stop: () => Promise.resolve({ active: false, ok: true }) });
+    g.shown = true;   // the shell thought so, but the page says nothing plays: quit, no line
+    g.quit();
+    await waitFor(() => g.quits > 0, { timeout: 1000 });
+    check('the page says nothing is auditioned after all: quits, no line', g.quits === 1 && g.lines.length === 0);
+
+    // The update modal's Restart: the stop first, then the updater (which quits by itself).
+    g = makeGuard();
+    await js(`__previewCapture({ cns: [1, 2, 3, 4], meta: ${JSON.stringify(previewMeta)} })`);
+    await g.sync();
+    n0 = await mark();
+    await g.guard.beforeRestart(() => { g.nexts++; });
+    tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
+    e = g.quit();
+    check('Restart (update) during an audition: the stop goes first, then the updater runs; its quit is not held again', g.nexts === 1 && g.quits === 0 && !e.prevented && tx.some(t => /^TX Stop capture preview/.test(t)) && stoppedLine(g.lines), JSON.stringify(tx));
+    g = makeGuard();
+    await g.sync();
+    await g.guard.beforeRestart(() => { g.nexts++; });
+    check('Restart with nothing auditioned runs the updater at once', g.nexts === 1 && g.lines.length === 0);
+    await settle();
+  }
+
   // ---------------------------------------------------------------- write coalescing
   // Deterministic: the first write leaves at once, the next five queue behind it under one key and merge.
   n0 = await mark();
@@ -2362,6 +2507,75 @@ async function run() {
   await waitFor('!!document.querySelector(\'[data-fk="cap-author"]\') && !!document.querySelector(\'[data-fk="cap-tags"] .chip\')');
   check('a capture with an empty description shows no description and no stray "null"', await js('!document.querySelector(\'[data-fk="cap-desc"]\') && !/null/i.test(document.querySelector(".cap-info").textContent) && [...document.querySelector(".cap-body").childNodes].every(n => n.nodeType === 1)'), await js('document.querySelector(".cap-info")?.textContent'));
   await key('Escape'); await waitFor('!document.querySelector(".cap-info")');
+  // Slot 5's description is just a Cortex Cloud product ID, as some captures on a real pedal have ("Darkglass
+  // MT900V2 1", 2026-10-24). No bare ID is shown; in the desktop app "Open in Cortex Cloud" takes its place.
+  const DEMO_CLOUD_ID = '5d3e0c10-0d00-4a11-8c55-0000000000a5';
+  const openInfo = async (slot) => {
+    await rightClick(`[data-fk="capslot-${slot}"]`);
+    await js(ctxItem('Info') + '.click()');
+    await waitFor('!!document.querySelector(\'[data-fk="cap-author"]\') && !!document.querySelector(\'[data-fk="cap-tags"] .chip\')');
+    await stable('JSON.stringify(document.querySelector(".pop.cap-info")?.getBoundingClientRect())');
+  };
+  const cloudOf = (v) => js(`NanoText.captureCloudId(${JSON.stringify(v)})`);
+  const NT = require('../pro/capture-text');
+  check('captureCloudId: the whole (trimmed) description must be one UUID; returned in lowercase',
+    (await cloudOf(' 4CD7F0D5-B0E2-4C8C-AA79-A9B856D71CF5 ')) === '4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5' && (await cloudOf('4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5')) === '4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5'
+    && (await cloudOf('See 4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5')) === null && (await cloudOf('4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5 4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5')) === null
+    && (await cloudOf('4cd7f0d5b0e24c8caa79a9b856d71cf5')) === null && (await cloudOf('4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf')) === null && (await cloudOf('zcd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5')) === null
+    && (await cloudOf('')) === null && (await cloudOf(null)) === null && (await cloudOf('null')) === null && NT.captureCloudId('4CD7F0D5-B0E2-4C8C-AA79-A9B856D71CF5') === '4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5');
+  const shownOf = (v) => js(`NanoText.captureDescription(${JSON.stringify(v)})`);
+  check('a description that is a bare Cloud ID counts as no description (shown, searched); a real text with an ID in it is kept',
+    (await shownOf(' 4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5 ')) === '' && (await shownOf('From 4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5')) === 'From 4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5' && NT.captureDescription('4CD7F0D5-B0E2-4C8C-AA79-A9B856D71CF5') === '');
+  check('… but it is still stored and sent as it is: a capture record keeps its Cloud ID as field 5 (only "null" and blanks go out empty)', await js(`(() => { const m = { hash: 'ab', name: 'N', cloudUUID: 'u', authorId: 'a', authorName: 'b', deviceType: 'pedal', tags: [], instrumentType: 'guitar', version: '1' };
+    return new TextDecoder().decode(Uint8Array.from(NanoTransfer.captureRecord({ ...m, description: '4CD7F0D5-B0E2-4C8C-AA79-A9B856D71CF5' }))).includes('4CD7F0D5-B0E2-4C8C-AA79-A9B856D71CF5'); })()`) && NT.storedDescription(' NULL ') === '' && NT.storedDescription('4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5') === '4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5');
+  await openInfo(5);
+  check('without the desktop shell (the web preview) a Cloud-ID description shows nothing: no ID, no button', await js(`!document.querySelector('[data-fk="cap-desc"]') && !document.querySelector('[data-fk="cap-cloud-link"]') && !/${DEMO_CLOUD_ID}/i.test(document.querySelector(".cap-info").textContent)`), await js('document.querySelector(".cap-info")?.textContent'));
+  await key('Escape'); await waitFor('!document.querySelector(".cap-info")');
+  // The desktop app's opener (nanoShell.openCloudCapture → main), recorded here instead.
+  await js('window.__cloudOpened = []; __setCloudCaptureOpener((id) => { __cloudOpened.push(id); return Promise.resolve(true); }); 0');
+  await openInfo(5);
+  const cloudBtn = await js(`(() => { const b = document.querySelector('[data-fk="cap-cloud-link"]'); if (!b) return null; const by = document.querySelector('[data-fk="cap-author"]').getBoundingClientRect();
+    const r = document.createRange(); r.selectNodeContents(b); const t = r.getBoundingClientRect(), s = getComputedStyle(b);
+    return { text: b.textContent, cls: b.className, tag: b.tagName, title: b.title, textLeft: Math.round(t.left), byLeft: Math.round(by.left), size: s.fontSize, bg: s.backgroundColor, color: s.color,
+      dim: getComputedStyle(document.documentElement).getPropertyValue('--dim').trim(), panelText: document.querySelector('.cap-info').textContent, desc: !!document.querySelector('[data-fk="cap-desc"]'),
+      afterTags: !!b.previousElementSibling && b.previousElementSibling.matches('[data-fk="cap-tags"]') }; })()`);
+  check('a capture whose description is its Cloud ID: Info shows "Open in Cortex Cloud" where the description would be (a small ghost button, no ID)',
+    !!cloudBtn && cloudBtn.text === 'Open in Cortex Cloud' && cloudBtn.tag === 'BUTTON' && /\bbtn\b/.test(cloudBtn.cls) && /\bghost\b/.test(cloudBtn.cls) && /\bsmall\b/.test(cloudBtn.cls) && !cloudBtn.desc && cloudBtn.afterTags
+    && !new RegExp(DEMO_CLOUD_ID, 'i').test(cloudBtn.panelText) && cloudBtn.size === '12px' && cloudBtn.bg === 'rgba(0, 0, 0, 0)' && cloudBtn.title === 'Open this capture\u2019s page in the Cortex Cloud tab', JSON.stringify(cloudBtn));
+  check('… link-style: its text lines up with "by …" above it', !!cloudBtn && Math.abs(cloudBtn.textLeft - cloudBtn.byLeft) <= 1, JSON.stringify(cloudBtn && [cloudBtn.textLeft, cloudBtn.byLeft]));
+  await shot('xx-capture-info-cloud');
+  {
+    const r = await js('(() => { const b = document.querySelector(".pop.cap-info").getBoundingClientRect(); return { x: Math.floor(b.left) - 12, y: Math.floor(b.top) - 12, width: Math.ceil(b.width) + 24, height: Math.ceil(b.height) + 24 }; })()');
+    fs.writeFileSync(path.join(OUT, 'xx-capture-info-cloud-panel.png'), (await wc.capturePage(r)).toPNG());
+  }
+  n0 = await mark();
+  await click('[data-fk="cap-cloud-link"]');
+  await checkSoon('clicking it asks the shell to open exactly that capture (lowercase ID) and closes Info', async () => JSON.stringify(await js('__cloudOpened')) === JSON.stringify([DEMO_CLOUD_ID]) && await js('!document.querySelector(".cap-info")'), async () => JSON.stringify(await js('__cloudOpened')));
+  await settle();
+  check('… and nothing is sent to the pedal', (await txSince(n0)).length === 0, JSON.stringify(await txSince(n0)));
+  await openInfo(1);
+  check('a capture with a real description keeps it and has no Cloud button', /slot 1/.test(await val('cap-desc')) && await js('!document.querySelector(\'[data-fk="cap-cloud-link"]\')'));
+  {
+    // The description comes from the reply (18.8), else from the capture record it carries (field 5), as in the native
+    // edition: a Cloud ID in the record counts the same.
+    const ID = '4cd7f0d5-b0e2-4c8c-aa79-a9b856d71cf5';
+    const recBytes = [0x0A, 0x02, ...utf8('ab'), 0x12, 0x09, ...utf8('Darkglass'), 0x2A, 36, ...utf8(ID.toUpperCase())];
+    const reply = (desc) => frameHex([0x08, 0x06, 0x18, 0x01, ...(desc === null ? [] : [0x42, utf8(desc).length, ...utf8(desc)]), 0x52, 0x09, ...utf8('Darkglass'), 0x5A, recBytes.length, ...recBytes], 18);
+    const details = (h) => js(`(() => { let got = null; __dev.capWait = (i) => { got = i; }; const b = Uint8Array.from(${JSON.stringify(h)}.split(' ').map(x => parseInt(x, 16))); onC305({ target: { value: { buffer: b.buffer } } }); return got; })()`);
+    const viaNull = await details(reply('null')), viaNone = await details(reply(null)), viaText = await details(reply('Tight and dry'));
+    check('Info: 18.8 "null" or missing → the record\'s field 5; a Cloud ID there gives "Open in Cortex Cloud" too; a real 18.8 wins',
+      !!viaNull && viaNull.description === '' && viaNull.cloudId === ID && !!viaNone && viaNone.cloudId === ID && !!viaText && viaText.description === 'Tight and dry' && viaText.cloudId === null,
+      JSON.stringify([viaNull && [viaNull.description, viaNull.cloudId], viaNone && viaNone.cloudId, viaText && [viaText.description, viaText.cloudId]]));
+  }
+  await key('Escape'); await waitFor('!document.querySelector(".cap-info")');
+  await js('__setCloudCaptureOpener(null); delete window.__cloudOpened; 0');
+  // Library rows (the Cab / IR inspector's list): a description that is only a Cloud ID is neither shown nor searched.
+  await click('[data-fk="node-cab"]');
+  await js(`state.library.irUser.push({ index: 99, name: 'Cloud ID IR', description: '${DEMO_CLOUD_ID.toUpperCase()}' }); render()`);
+  const idRow = await waitFor(() => js(`(() => { const r = [...document.querySelectorAll('.cab-library-section .library-row')].find(x => x.textContent.includes('Cloud ID IR')); return r ? { search: r.dataset.search, text: r.textContent, title: r.title || '', titles: [...r.querySelectorAll('[title]')].map(e => e.title).join(' ') } : null; })()`));
+  check('a library row whose description is a bare Cloud ID: no ID in its detail line, tooltip or search text', !!idRow && !new RegExp(DEMO_CLOUD_ID, 'i').test(idRow.search + ' ' + idRow.text + ' ' + idRow.title + ' ' + idRow.titles) && /cloud id ir/.test(idRow.search), JSON.stringify(idRow));
+  await js(`state.library.irUser = state.library.irUser.filter(x => x.index !== 99); render()`); await frame();
+  await click('[data-fk="node-capture"]');
   const descOf = (v) => js(`NanoText.captureDescription(${JSON.stringify(v)})`);
   check('a description of "null" (any case), blanks or nothing counts as none; real text is kept', (await descOf('null')) === '' && (await descOf(' NULL ')) === '' && (await descOf('Null')) === '' && (await descOf('   ')) === '' && (await descOf(null)) === '' && (await js('NanoText.captureDescription(undefined)')) === '' && (await descOf('Not null at all')) === 'Not null at all' && require('../pro/capture-text').captureDescription(' null ') === '');
   check('sending a capture never writes "null" as its description (field 5 goes out empty)', await js(`(() => { const m = { hash: 'ab', name: 'N', cloudUUID: 'u', authorId: 'a', authorName: 'b', deviceType: 'pedal', tags: [], instrumentType: 'guitar', version: '1' };
@@ -2618,6 +2832,122 @@ async function run() {
   check('Save disabled while disconnected', await js('document.getElementById("saveBtn").disabled'));
   await key('s', [MOD]);
   check('⌘S while disconnected explains', (await js('document.getElementById("toast").textContent')).includes('Connect'));
+  // ---------------------------------------------------------------- no stale Bluetooth link (fake pedals, no demo)
+  // 2026-10-20→23: "Disconnected" for two days while macOS still held a link to the pedal, which then stopped
+  // advertising. The page now releases the link whenever it decides it is disconnected, and before every scan. The
+  // fake pedals below stand in for Web Bluetooth device objects (the page's real connect code runs on them).
+  {
+    const addedBluetooth = await js(`(() => { if (navigator.bluetooth) return false; Object.defineProperty(navigator, 'bluetooth', { configurable: true, value: { requestDevice: () => Promise.reject(new Error('NotFoundError: no Bluetooth here')) } }); render(); return true; })()`);
+    await js(`(() => {
+      window.__bt = { seq: [], fakes: [], browserRequest: __ble.requestDevice || null };
+      window.__fakePedal = (opts = {}) => {
+        const f = { name: opts.name || 'Neural DSP Nano Cortex', disconnects: 0, writes: [], fail: '', stubborn: opts.stubborn || 0, services: opts.services !== false };
+        const listeners = new Set();
+        const c304 = { uuid: C304_UUID, writeValueWithResponse: async (b) => { if (f.fail) throw new Error(f.fail); f.writes.push(hex(b)); } };
+        const c305 = { uuid: C305_UUID, startNotifications: async () => c305, addEventListener() {}, removeEventListener() {} };
+        const service = { getCharacteristic: async (u) => { if (u === C304_UUID) return c304; if (u === C305_UUID) return c305; throw new Error('No Characteristics matching UUID ' + u); }, getCharacteristics: async () => [] };
+        const id = 'FAKE-' + (__bt.fakes.length + 1);
+        const device = {
+          id, name: f.name,
+          addEventListener: (t, fn) => { if (t === 'gattserverdisconnected') listeners.add(fn); },
+          removeEventListener: (t, fn) => { if (t === 'gattserverdisconnected') listeners.delete(fn); },
+          gatt: {
+            connected: false,
+            connect: async () => { __bt.seq.push(id + ' connect'); device.gatt.connected = true; return server; },
+            // stubborn: that many calls leave it connected (the OS holding on)
+            disconnect: () => { f.disconnects++; __bt.seq.push(id + ' disconnect'); if (f.stubborn > 0) { f.stubborn--; return; } const was = device.gatt.connected; device.gatt.connected = false; if (was) f.emit(); },
+          },
+        };
+        const server = { device, connected: true, getPrimaryService: async (u) => { if (!f.services) throw new Error('No Services matching UUID ' + u + ' found in Device.'); return service; } };
+        f.emit = () => { for (const fn of [...listeners]) fn({ type: 'gattserverdisconnected', target: device }); };
+        f.listening = () => listeners.size;
+        f.device = device; f.id = id;
+        __bt.fakes.push(f);
+        return f;
+      };
+      // The next requestDevice() returns this fake.
+      __bt.offer = (f) => { __ble.requestDevice = async () => { __bt.seq.push('requestDevice'); return f.device; }; };
+      // Nothing of it is kept: not as the page's device, not in the list of device objects to release.
+      __bt.released = (f) => !f.device.gatt.connected && state.device !== f.device && !__ble.devices.has(f.device) && f.listening() === 0 && f.disconnects > 0;
+    })()`);
+    const connectFake = async (k, opts) => {
+      await js(`window.${k} = __fakePedal(${JSON.stringify(opts || {})}); __bt.offer(${k}); 0`);
+      // The connect screen is drawn on the next frame after a disconnect (until then the old, hidden one is there).
+      await waitFor('!__ui.connecting && !state.connected && !document.getElementById("veil").hidden && !!document.querySelector(\'[data-fk="veil-connect"]\') && !document.querySelector(\'[data-fk="veil-connect"]\').disabled && document.querySelector(\'[data-fk="veil-connect"]\').getBoundingClientRect().height > 0');
+      await frame();
+      await click('[data-fk="veil-connect"]');
+    };
+    const btLog = async (n, re) => js(`__ui.logs.some(l => l.seq > ${n} && ${re}.test(l.text))`);
+    await js('__ui.connectError = ""; render()'); await frame();
+    await connectFake('fakeA');
+    await checkSoon('a fake pedal connects through the page\'s real connect code (no demo)', () => js('state.connected && !__ui.demo && state.device === fakeA.device && fakeA.device.gatt.connected'));
+
+    // (a) the link drops, but the OS still holds it: Chromium reports gattserverdisconnected while gatt.connected is true.
+    n0 = await txCount();
+    await js('fakeA.emit()');
+    await checkSoon('the link drops (gattserverdisconnected) while the OS still holds it: Disconnected, gatt.disconnect() called, no reference kept', () => js('!state.connected && __bt.released(fakeA) && state.server === null && state.c304 === null && state.c305 === null'), async () => JSON.stringify(await js('({ connected: state.connected, gatt: fakeA.device.gatt.connected, disconnects: fakeA.disconnects, kept: __ble.devices.has(fakeA.device), dev: !!state.device })')));
+    check('… the Activity log says the link was released while it was still open', await btLog(n0, '/^Bluetooth link to Neural DSP Nano Cortex released \\(it was still open\\)\\.$/'));
+
+    // (a) a write fails because the link is gone (no event came): disconnected and released.
+    await connectFake('fakeB');
+    await waitFor('state.connected && state.device === fakeB.device');
+    await settle();
+    n0 = await txCount();
+    await js(`fakeB.fail = 'NotSupportedError: GATT operation failed for unknown reason.'; writeC304('Test write', bytesFromHex('06 C0 08 03 5B 00 00 00')).then(() => { fakeB.fail = ''; }); 0`);
+    await waitFor(`__ui.logs.some(l => l.seq > ${n0} && /^ERROR: BLE write failed for "Test write"/.test(l.text))`);
+    await settle();
+    check('a write refused while the link is still up changes nothing (still connected, nothing released)', await js('state.connected && state.device === fakeB.device && fakeB.disconnects === 0 && fakeB.device.gatt.connected'));
+    n0 = await txCount();
+    await js(`fakeB.device.gatt.connected = false; fakeB.fail = 'NetworkError: GATT Server is disconnected. Cannot perform GATT operations. (Re)connect first with \`device.gatt.connect\`.'; writeC304('Test write', bytesFromHex('06 C0 08 03 5B 00 00 00')); 0`);
+    await checkSoon('a write that fails because the link is gone (no event): Disconnected, gatt.disconnect() called, no reference kept', () => js('!state.connected && __bt.released(fakeB)'));
+    check('… and says so in the Activity log, after the write error', await btLog(n0, '/^The Bluetooth link is gone \\(a write failed\\); disconnecting\\.$/') && await js(`(() => { const a = __ui.logs.find(l => l.seq > ${n0} && /^ERROR: BLE write failed/.test(l.text)), b = __ui.logs.find(l => l.seq > ${n0} && /^The Bluetooth link is gone/.test(l.text)); return !!a && !!b && a.seq < b.seq; })()`));
+    await js('fakeB.fail = ""');
+
+    // (a) an explicit Disconnect.
+    await connectFake('fakeC');
+    await waitFor('state.connected && state.device === fakeC.device');
+    await click('#connectBtn');
+    await checkSoon('Disconnect: gatt.disconnect(), Disconnected, no reference kept', () => js('!state.connected && __bt.released(fakeC)'));
+
+    // (a) a connect that fails half-way: the device has no Nano service, but its GATT link was opened.
+    await connectFake('fakeD', { services: false, name: 'JBL Flip 5' });
+    await checkSoon('a connect that fails half-way (no Nano service) leaves no link open', () => js('!state.connected && !__ui.connecting && __bt.released(fakeD)'), async () => JSON.stringify(await js('({ gatt: fakeD.device.gatt.connected, n: fakeD.disconnects, dev: state.device && state.device.id })')));
+    await js('__ui.connectError = ""; render()'); await frame();
+
+    // (b) before every requestDevice(): an older device object that still reports a connection is disconnected.
+    await connectFake('fakeE', { stubborn: 1 });
+    await waitFor('state.connected && state.device === fakeE.device');
+    n0 = await txCount();
+    await js('fakeE.emit()');
+    await waitFor('!state.connected');
+    check('a link that stays open after gatt.disconnect() (the OS holding on) is kept to be tried again, and logged', await js('fakeE.device.gatt.connected && __ble.devices.has(fakeE.device) && state.device === null && fakeE.disconnects === 1') && await btLog(n0, '/still reports a connection \\(tried again before the next scan\\)/'));
+    await js('__bt.seq.length = 0');
+    await connectFake('fakeF');
+    await waitFor('state.connected && state.device === fakeF.device');
+    const seq = await js('__bt.seq.slice()');
+    check('the next Connect disconnects it before requestDevice(), then connects the new one', seq.indexOf(await js('fakeE.id') + ' disconnect') === 0 && seq.indexOf('requestDevice') === 1 && await js('__bt.released(fakeE)'), JSON.stringify(seq));
+
+    // (c) the computer sleeps and wakes (main's powerMonitor runs these hooks).
+    n0 = await txCount();
+    check('sleep while connected: the page disconnects cleanly', (await js('__systemSuspend()')) === true && await js('!state.connected && __bt.released(fakeF)') && await btLog(n0, '/^The computer is going to sleep: disconnecting from the pedal\\.$/'));
+    // Not the launch setting: it is off here, and the wake reconnects anyway (as the native edition does after any
+    // dropped link).
+    await js('localStorage.setItem("settings.autoConnect", "false"); __bt.offer(fakeF); __bt.seq.length = 0; 0');
+    n0 = await txCount();
+    check('wake after a sleep while connected, a pedal remembered: reconnects like the launch reconnect (an auto scan), whatever "Reconnect … at launch" says', (await js('__systemResume({ pedal: true })')) === true && JSON.stringify(await js('__ble.requests.slice(-1)[0]')) === JSON.stringify({ auto: true }) && await btLog(n0, '/^The computer woke up: reconnecting to the remembered pedal\\.$/'));
+    await checkSoon('… and is connected to the pedal again', () => js('state.connected && state.device === fakeF.device && fakeF.device.gatt.connected'));
+    check('wake without having slept does nothing', (await js('__systemResume({ pedal: true })')) === false);
+    await js('__systemSuspend(); 0');
+    let requests = await js('__ble.requests.length');
+    n0 = await txCount();
+    check('wake with no remembered pedal: no scan, the Activity log says to click Connect', (await js('__systemResume({ pedal: false })')) === false && (await js('__ble.requests.length')) === requests && !(await js('state.connected')) && await btLog(n0, '/^The computer woke up\\. Click Connect to reconnect to the pedal\\.$/'));
+    check('sleep while disconnected: nothing to do, and no reconnect on wake', (await js('__systemSuspend()')) === false && (await js('__systemResume({ pedal: true })')) === false && (await js('__ble.requests.length')) === requests);
+    await js('__ble.autoWhy = "wake"; window.__bleHint = "auto-none"; log("Connect failed: NotFoundError: User cancelled the requestDevice() chooser."); __ble.autoWhy = ""; render()'); await frame();
+    check('a pedal that doesn\'t show up after wake: the connect screen says so (with the Troubleshooting link)', (await js('document.querySelector(".veil-card .err")?.textContent || ""')) === 'Your Nano Cortex didn’t show up after the computer woke up. Power it on (and close Cortex Cloud on your phone), then click Connect. Troubleshooting', await js('document.querySelector(".veil-card .err")?.textContent || ""'));
+    await js(`localStorage.removeItem("settings.autoConnect"); __ui.connectError = ""; __ble.requestDevice = __bt.browserRequest; delete window.__fakePedal; delete window.fakeA; delete window.fakeB; delete window.fakeC; delete window.fakeD; delete window.fakeE; delete window.fakeF; delete window.fakeG; ${addedBluetooth ? 'delete navigator.bluetooth;' : ''} render()`); await frame();
+    check('the fake pedals left nothing connected or remembered', await js('!state.connected && !state.device && [...__ble.devices].every(d => !d.gatt.connected) && __bt.fakes.every(f => !f.device.gatt.connected)'));
+    await js('delete window.__bt; 0');
+  }
   await click('.veil-card .btn:last-child');
   await checkSoon('demo restarts from connect screen', 'state.connected && __ui.demo');
   await settle();

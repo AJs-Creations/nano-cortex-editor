@@ -819,6 +819,9 @@ body:not(.dev-tools) .dev-only { display: none !important; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 .chip { padding: 1px 9px; border-radius: 10px; background: var(--raised); border: 1px solid var(--line); color: var(--dim); font-size: 12px; line-height: 18px; }
 .cap-desc { margin: 0 0 10px; color: var(--dim); font-size: 12px; line-height: 1.45; }
+/* "Open in Cortex Cloud" (a capture whose description is its Cloud ID): a link-style ghost button where the description
+   would be, its text lined up with the text above. */
+.cap-cloud { display: flex; width: fit-content; margin: -4px 0 4px -10px; }
 .cap-hash { display: flex; align-items: center; gap: 8px; padding-top: 8px; border-top: 1px solid var(--line-soft); font-size: 12px; }
 .cap-hash .k { color: var(--faint); }
 .cap-hash .v { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; user-select: text; }
