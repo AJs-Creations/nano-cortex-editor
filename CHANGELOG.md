@@ -2,6 +2,14 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
+## 1.2.2 — 2026-10-29
+
+### Fixed
+
+- Sending a capture or an IR from Cortex Cloud to the pedal, and Live Preview, failed with "Cortex Cloud answered
+  400": Cortex Cloud now requires the headers its own web client sends with a download, and the editor sends them too
+  ([#28](https://github.com/AJs-Creations/nano-cortex-editor/pull/28), thanks @itsbreaded).
+
 ## 1.2.1 — 2026-10-24
 
 ### Changed
