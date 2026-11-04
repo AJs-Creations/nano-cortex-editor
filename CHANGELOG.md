@@ -2,6 +2,20 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Graphic 9 now has a compact nine-band vertical slider bank, with HPF, LPF and Output in the same panel. Band
+  values support 0.1 dB adjustments, double-click to reset to zero and click-to-type exact values.
+
+### Fixed
+
+- Corrected effect parameter display and write mappings using comparisons with the official iOS app, including
+  Graphic 9, Parametric 3, Low-High Cut, IR Loader, Transpose and Envelope Filter.
+- Retained the last read or imported settings for bypassed effects as a visibly marked local cache, so values are
+  available without querying an inactive block; cached values are also marked while an active readback is pending.
+
 ## 1.2.2 — 2026-10-29
 
 ### Fixed

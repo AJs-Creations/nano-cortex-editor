@@ -231,8 +231,14 @@ straight away; **Save** keeps it.
 ![The gate inspector with the Reduction knob](images/inspector-gate.png)
 
 **Pre FX and Post FX.** Two effect slots before the capture and three after it. Each slot holds one effect; the
-inspector shows its parameters as knobs, switches and menus (for example, a delay's **Sync** locks **Delay Time** to
-the **Sync Note**). An empty slot says so and offers to add an effect.
+inspector shows its parameters with controls suited to that effect (knobs, switches, menus and, for Graphic 9, a
+nine-band slider bank). Graphic 9's vertical sliders adjust the 65 Hz through 16 kHz bands; its HPF, LPF and Output
+controls sit in the same panel. The band sliders use 0.1 dB steps; double-click one to reset it to 0 dB, or click its
+value above the slider to type an exact gain. For example, a delay's **Sync** locks **Delay Time** to the **Sync
+Note**. An empty slot says so and offers to add an effect.
+
+The editor marks cached effect values as potentially stale while bypassed or while a fresh active readback is
+pending. If no readback is cached yet, enable the effect once to load its values.
 
 ![The Post FX 2 inspector with a stereo digital delay: mix, feedback, filters, ping pong, sync, time and modulation](images/inspector-fx.png)
 
