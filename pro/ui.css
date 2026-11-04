@@ -399,9 +399,10 @@ html.preset-dragging, html.preset-dragging * { cursor: grabbing !important; }
   color: var(--text);
 }
 .graphic9-band.locked { opacity: .38; }
-.graphic9-value { color: var(--text); font-size: 10px; line-height: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; padding: 0 2px; border: 1px solid transparent; border-radius: 3px; cursor: text; }
+.graphic9-value-slot { display: flex; align-items: center; justify-content: center; width: 44px; height: 18px; }
+.graphic9-value { display: block; box-sizing: border-box; width: 44px; color: var(--text); font-size: 10px; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; white-space: nowrap; padding: 0 2px; border: 1px solid transparent; border-radius: 3px; cursor: text; }
 .graphic9-value:hover { border-color: var(--line); }
-.graphic9-value-input { width: 50px; height: 18px; padding: 0 2px; border: 1px solid var(--focus); border-radius: 3px; outline: none; background: var(--ws); color: var(--text); font: inherit; font-size: 10px; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
+.graphic9-value-input { box-sizing: border-box; width: 44px; height: 18px; margin: 0; padding: 0 2px; border: 1px solid var(--focus); border-radius: 3px; outline: none; background: var(--ws); color: var(--text); font: inherit; font-size: 10px; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
 .graphic9-value-input::-webkit-inner-spin-button, .graphic9-value-input::-webkit-outer-spin-button { appearance: none; -webkit-appearance: none; margin: 0; }
 .graphic9-frequency { color: var(--dim); font-size: 10px; line-height: 16px; white-space: nowrap; }
 .graphic9-fader { position: relative; width: 100%; min-width: 28px; height: 264px; }

@@ -499,6 +499,8 @@ const state = {
       paramRefreshQueue: [],
       pendingParamBlock: null,
       pendingParamTimer: null,
+      paramRefreshDiscardPending: false,
+      paramRefreshDrainTimer: null,
       protocol: { feSyncComplete: false, lastStateSync: 0, metadataLoaded: false, skipFXModelApply: false, presetLoad: false },
       presetLoadTimer: null,
       blocks: {
@@ -726,6 +728,13 @@ function onDisconnected() {
       state.connected = false;
       state.c304 = null;
       state.c305 = null;
+      state.paramRefreshQueue = [];
+      state.pendingParamBlock = null;
+      if (state.pendingParamTimer) clearTimeout(state.pendingParamTimer);
+      state.pendingParamTimer = null;
+      state.paramRefreshDiscardPending = false;
+      if (state.paramRefreshDrainTimer) clearTimeout(state.paramRefreshDrainTimer);
+      state.paramRefreshDrainTimer = null;
       state.protocol.metadataLoaded = false;
       state.protocol.feSyncComplete = false;
       gattWriteQueue.splice(0).forEach(job => job.waiters.forEach(resolve => resolve(false)));
@@ -919,8 +928,10 @@ function parseBufferedCurrentState() {
         log('Current cab/IR: ' + state.currentIR.shortName);
       }
 
+      const isPresetLoad = state.protocol.presetLoad;
       applyFXModelsFromCurrentState(fields);
       applyFXEnabledStatesFromCurrentState(fields);
+      if (isPresetLoad) discardActiveCachedFXParams();
 
       render();
       presetStateWaiters.slice().forEach(waiter => waiter());
@@ -1028,6 +1039,24 @@ function applyFXEnabledStatesFromCurrentState(fields) {
       });
 
       log('FX bypass states: ' + keys.map((key, i) => key + '=' + (entry.raw[i] === 0 ? 'on' : 'off')).join(', '));
+    }
+
+function discardActiveCachedFXParams() {
+      FX_BLOCK_KEYS.forEach(key => {
+        const block = state.blocks[key];
+        if (!block || !block.on || !block.paramsFromCache) return;
+
+        const model = block.models.find(entry => entry.name === block.model);
+        block.params = structuredClone(model && model.params || []);
+        block.paramsLoaded = false;
+        block.paramsFromCache = false;
+        block.cachedAt = 0;
+        block.originalFloats = null;
+        block.originalModel = null;
+        block.originalPreset = null;
+        block.fxPresetActive = -1;
+        log(block.title + ' cached values discarded for active preset load; waiting for live readback.');
+      });
     }
 
 function currentIRSlotIndex() {
@@ -1418,11 +1447,25 @@ function restoreFxParamCache(blockKey, block) {
       return true;
     }
 
+function holdFXRefreshQueueForLateReply(delayMs) {
+      state.paramRefreshDiscardPending = true;
+      if (state.paramRefreshDrainTimer) clearTimeout(state.paramRefreshDrainTimer);
+      state.paramRefreshDrainTimer = setTimeout(() => {
+        state.paramRefreshDiscardPending = false;
+        state.paramRefreshDrainTimer = null;
+        log('FX parameter reply drain finished.');
+        requestNextFXParamRefresh();
+      }, delayMs);
+    }
+
 function cancelFXParamRefresh() {
       state.paramRefreshQueue = [];
+      const cancelledBlock = state.pendingParamBlock;
       state.pendingParamBlock = null;
       if (state.pendingParamTimer) clearTimeout(state.pendingParamTimer);
       state.pendingParamTimer = null;
+
+      if (cancelledBlock) holdFXRefreshQueueForLateReply(1200);
     }
 
 function queueFXParamRefreshes() {
@@ -1443,7 +1486,7 @@ function queueFXParamRefreshes() {
     }
 
 async function requestNextFXParamRefresh() {
-      if (state.pendingParamBlock) return;
+      if (state.pendingParamBlock || state.paramRefreshDiscardPending) return;
 
       const blockKey = state.paramRefreshQueue.shift();
       if (!blockKey) return;
@@ -1462,6 +1505,8 @@ async function requestNextFXParamRefresh() {
       state.pendingParamTimer = setTimeout(() => {
         log('FX parameter refresh timed out for ' + block.title);
         state.pendingParamBlock = null;
+        state.pendingParamTimer = null;
+        holdFXRefreshQueueForLateReply(300);
         requestNextFXParamRefresh();
       }, 900);
 
@@ -1484,6 +1529,14 @@ function handleFXParamRefreshResponse(data) {
       const blockKey = state.pendingParamBlock;
 
       if (!blockKey) {
+        if (state.paramRefreshDiscardPending) {
+          state.paramRefreshDiscardPending = false;
+          if (state.paramRefreshDrainTimer) clearTimeout(state.paramRefreshDrainTimer);
+          state.paramRefreshDrainTimer = null;
+          log('Discarded a late FX parameter response while draining the previous request.');
+          requestNextFXParamRefresh();
+          return;
+        }
         log('FX parameter response received with no pending block.');
         return;
       }

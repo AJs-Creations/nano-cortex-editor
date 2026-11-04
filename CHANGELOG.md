@@ -15,6 +15,9 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
   Graphic 9, Parametric 3, Low-High Cut, IR Loader, Transpose and Envelope Filter.
 - Retained the last read or imported settings for bypassed effects as a visibly marked local cache, so values are
   available without querying an inactive block; cached values are also marked while an active readback is pending.
+- On preset changes, discard cached values for active effects until a fresh pedal readback arrives, and drain late
+  replies from cancelled or timed-out refreshes so they cannot be assigned to the newly selected preset.
+- Keep Graphic 9's editable gain readout in a fixed-width slot so opening it for typing does not shift the fader bank.
 
 ## 1.2.2 — 2026-10-29
 

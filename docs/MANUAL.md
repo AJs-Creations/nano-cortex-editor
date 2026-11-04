@@ -237,8 +237,9 @@ controls sit in the same panel. The band sliders use 0.1 dB steps; double-click 
 value above the slider to type an exact gain. For example, a delay's **Sync** locks **Delay Time** to the **Sync
 Note**. An empty slot says so and offers to add an effect.
 
-The editor marks cached effect values as potentially stale while bypassed or while a fresh active readback is
-pending. If no readback is cached yet, enable the effect once to load its values.
+The editor marks cached effect values as potentially stale while bypassed. After loading a preset, active effects
+show their live pedal values after a fresh readback; the editor ignores old cached values while that read is pending.
+If no readback is cached for a bypassed effect, enable it once to load its values.
 
 ![The Post FX 2 inspector with a stereo digital delay: mix, feedback, filters, ping pong, sync, time and modulation](images/inspector-fx.png)
 

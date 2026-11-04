@@ -4036,12 +4036,14 @@
       return out;
     }
 
-    if (b.paramsFromCache || (!b.on && !b.paramsLoaded)) {
+    if (b.paramsFromCache || !b.paramsLoaded) {
       out.push(el('p', { class: 'note fx-read-status', text: b.paramsFromCache
         ? (b.on
           ? 'Showing cached values until a fresh pedal readback replaces them.'
           : 'Showing cached values; they may be stale while this effect is bypassed.')
-        : 'No parameter readback yet. The pedal does not return bypassed effect values.' }));
+        : b.on
+          ? 'Reading current effect values from the pedal…'
+          : 'No parameter readback yet. The pedal does not return bypassed effect values.' }));
     }
 
     const params = def && def.displayOrder ? def.displayOrder.map(i => b.params[i]).filter(Boolean) : b.params;
@@ -4066,6 +4068,7 @@
       const locked = isParamDisabled(block, p);
       const label = p.name.replace(/khz/i, ' kHz').replace(/hz/i, ' Hz');
       const readout = el('output', { class: 'graphic9-value', text: graphic9BandValue(p), title: 'Click to type this band gain' });
+      const valueSlot = el('div', { class: 'graphic9-value-slot' }, readout);
       const slider = el('input', {
         class: 'graphic9-slider', type: 'range', min: meta.min, max: meta.max,
         step: meta.step || 0.1, value: p.value, disabled: locked,
@@ -4118,7 +4121,7 @@
         style: '--c:' + color,
         title: label + ' · ' + paramDisplayValue(p),
       },
-        readout,
+        valueSlot,
         el('div', { class: 'graphic9-fader' },
           el('div', { class: 'graphic9-ticks', 'aria-hidden': 'true' }),
           el('div', { class: 'graphic9-zero', 'aria-hidden': 'true' }),

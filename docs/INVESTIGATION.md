@@ -460,8 +460,10 @@ querying a bypassed block has been unstable on the Nano. Enabling a block trigge
 
 The editor caches complete readbacks (and imported parameter values) locally by device, preset, slot and model. This
 cache is only a display fallback: a bypassed block shows cached values with a stale-data note, and a missing cache is
-shown as unread. Cached values are also identified while an active block's fresh readback is pending. An active
-readback replaces the cache. The cache does not change the pedal or make an off-block refresh safe.
+shown as unread. Active blocks use cached values while a regular readback is pending, but preset changes discard the
+cached display and wait for fresh pedal values. A drain barrier ignores late replies from cancelled or timed-out
+refreshes before later reads begin, preventing a response for the previous preset from being saved under the new
+preset. The cache does not change the pedal or make an off-block refresh safe.
 
 Parameter floats are normalized, but their conversion to displayed units depends on the control and model. The
 editor uses parameter metadata and model-specific curves; there is no single Hz conversion for all effects. Recent
@@ -472,4 +474,6 @@ against additional values when available, especially where only one paired value
 Graphic 9 presents its nine band gains as vertical sliders with 0.1 dB steps, click-to-type values and double-click
 reset to zero; HPF, LPF and Output stay in the same panel. Its parameter list is displayed in frequency order, while
 the wire response places HPF first; the UI-to-wire mapping is explicit in the model definition in `editor/index.html`.
+Its typed gain input stays in the same fixed-width slot as the readout, keeping the band columns centered over their
+sliders while editing.
 
