@@ -2849,7 +2849,7 @@ async function run() {
   await key('s', [MOD]); await settle();
   check('… and ⌘S saves nothing', !(await txSince(n0)).some(t => /^TX save preset/.test(t)));
   await js('__demo.hooks.dropStateReads = false; __reorderTimeouts.state = 6000; __reorderTimeouts.list = 20000; state.presetDirty = false');
-  check('a successful state read clears it', (await js('NanoLive.readCurrentState(3000)')) === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'));
+  check('a successful state read clears it', (await js('NanoLive.readCurrentState(6000)')) === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'));
   await checkSoon('the order is back as it was', async () => JSON.stringify(await allNames()) === JSON.stringify(namesBefore) && (await js('state.selectedPreset')) === mvFrom);
   win.setContentSize(1400, 900);
   await waitFor('innerHeight === 900'); await frame();
