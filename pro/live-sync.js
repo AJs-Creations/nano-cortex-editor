@@ -298,8 +298,7 @@
     const next = normalizedToParamValue(p, raw / 255);
     if (p.value !== next) {
       p.value = next;
-      if (block.paramsLoaded) {
-        block.paramsFromCache = false;
+      if (block.paramsLoaded) {   // only this value is now known: a saved set stays marked as saved
         block.paramsPreset = state.selectedPreset;
         saveCurrentFxParamCache(FX_BLOCK_KEYS[s]);
       }

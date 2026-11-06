@@ -1,6 +1,7 @@
 FX parameter mappings, Graphic 9 wire order, Cab/IR curves and per-preset FX value cache.
 From AJs-Creations/nano-cortex-editor#31 by itsbreaded (calibrated against the official iOS app on NanOS 2.2.1),
 ported onto upstream V1.12.1. Upstream has none of it yet; its own "[123] q" fix covers part of Parametric 3.
+Kept for display only: saved values never become an effect's Original or count as known.
 One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream says -12..+12).
 
 --- a/editor/index.html
@@ -297,7 +298,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
        }
  
        return clamp(0.66212219 + (value / 12) * (1 - 0.66212219), 0, 1);
-@@ -3121,18 +3238,31 @@
+@@ -3121,20 +3238,33 @@
        const n = clamp(Number(normalized), 0, 1);
  
        if (n <= 0.66212219) {
@@ -319,8 +320,8 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
 -      return roundToStep(min + clamp(Number(normalized), 0, 1) * (max - min), step || 1);
 +    function cabIRNormalizedToRange(normalized, min, max, step, power = 1) {
 +      return roundToStep(min + Math.pow(clamp(Number(normalized), 0, 1), power) * (max - min), step || 1);
-+    }
-+
+     }
+ 
 +    function cabIRValueToNormalized(key, value) {
 +      if (key === 'level') return cabIRLevelDbToNormalized(value);
 +      const [min, max, , power = 1] = CAB_RANGES[key];
@@ -331,9 +332,11 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
 +      if (key === 'level') return cabIRLevelNormalizedToDb(normalized);
 +      const [min, max, step, power = 1] = CAB_RANGES[key];
 +      return cabIRNormalizedToRange(normalized, min, max, step, power);
-     }
- 
++    }
++
      async function selectCaptureSlot(slotNumber) {
+       const slot = Number(slotNumber);
+       if (!Number.isFinite(slot) || slot < 0 || slot > 25) return;
 @@ -3248,8 +3378,8 @@
        const values = parseCabIRParamBlob(paramBlob);
  
@@ -371,7 +374,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
      }
  
      function findModelByCurrentStateID(block, idHex) {
-@@ -3515,11 +3648,76 @@
+@@ -3515,11 +3648,78 @@
        return null;
      }
  
@@ -419,9 +422,11 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
 +      block.paramsFromCache = true;
 +      block.paramsPreset = state.selectedPreset;
 +      block.cachedAt = Number(cached.savedAt) || 0;
-+      block.originalFloats = cached.floats.slice();
-+      block.originalModel = block.model;
-+      block.originalPreset = state.selectedPreset;
++      // Saved values are only shown: they never become the effect's Original (which writes every parameter) and never
++      // count as known (fxValuesKnown), because the preset may have changed elsewhere since they were read.
++      block.originalFloats = null;
++      block.originalModel = null;
++      block.originalPreset = null;
 +      log(block.title + ' is showing cached parameters last read for preset ' + state.selectedPreset + '.');
 +      return true;
 +    }
@@ -448,7 +453,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
      }
  
      // Only active blocks are read: querying bypassed blocks crashed the Nano.
-@@ -3541,7 +3739,7 @@
+@@ -3541,7 +3741,7 @@
      }
  
      async function requestNextFXParamRefresh() {
@@ -457,7 +462,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
  
        const blockKey = state.paramRefreshQueue.shift();
        if (!blockKey) return;
-@@ -3560,6 +3758,8 @@
+@@ -3560,6 +3760,8 @@
        state.pendingParamTimer = setTimeout(() => {
          log('FX parameter refresh timed out for ' + block.title);
          state.pendingParamBlock = null;
@@ -466,7 +471,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          requestNextFXParamRefresh();
        }, 900);
  
-@@ -3582,6 +3782,14 @@
+@@ -3582,6 +3784,14 @@
        const blockKey = state.pendingParamBlock;
  
        if (!blockKey) {
@@ -481,7 +486,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          log('FX parameter response received with no pending block.');
          return;
        }
-@@ -3600,8 +3808,14 @@
+@@ -3600,8 +3810,14 @@
  
        const floats = decodeFloat32Array(data.slice(start, end));
        applyFloatValuesToBlock(blockKey, floats);
@@ -497,7 +502,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          block.originalFloats = floats.slice();
          block.originalModel = block.model;
          block.originalPreset = state.selectedPreset;
-@@ -3636,7 +3850,7 @@
+@@ -3636,7 +3852,7 @@
        if (!block || !block.params) return;
  
        floats.forEach((normalized, index) => {
@@ -506,7 +511,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          if (!param) return;
          param.value = normalizedToParamValue(param, normalized);
        });
-@@ -3651,7 +3865,10 @@
+@@ -3651,7 +3867,10 @@
          return Math.max(0, Math.min(maxIndex, Math.round(n * maxIndex)));
        }
  
@@ -518,7 +523,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
      }
  
  function parseSelectedCaptureState(payload) {
-@@ -5311,6 +5528,10 @@
+@@ -5311,6 +5530,10 @@
  
        block.model = model.name;
        block.params = structuredClone(model.params);
@@ -529,7 +534,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
        render();
  
        const payload = new Uint8Array(
-@@ -5393,7 +5614,11 @@
+@@ -5393,7 +5616,11 @@
          return clamp(param.value / maxIndex, 0, 1);
        }
  
@@ -542,7 +547,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
      }
  
      async function setFXParam(blockKey, param, rawValue = null, fromPreset = false) {
-@@ -5409,13 +5634,19 @@
+@@ -5409,13 +5636,18 @@
          0x0F, 0xC0,
          0x08, 0x01,
          0x18, cfg.modelSlot,
@@ -556,15 +561,14 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
 -      await writeC304(cfg.label + ' param ' + param.name + '=' + paramDisplayValue(param), payload, 'fx-param:' + blockKey + ':' + param.index);
 +      await writeC304(cfg.label + ' param ' + param.name + '=' + paramDisplayValue(param), payload, 'fx-param:' + blockKey + ':' + (param.wireIndex === undefined ? param.index : param.wireIndex));
 +      const block = state.blocks[blockKey];
-+      if (block && block.paramsLoaded) {
-+        block.paramsFromCache = false;
++      if (block && block.paramsLoaded) {   // this one value is now known; the rest of a saved set is still marked as saved
 +        block.paramsPreset = state.selectedPreset;
 +        saveCurrentFxParamCache(blockKey);
 +      }
      }
  
      function coerceParamValue(param, rawValue) {
-@@ -5832,7 +6063,7 @@
+@@ -5832,7 +6064,7 @@
        box.appendChild(renderCabKnob('Low Pass', 'lowPass', state.cabIR.lowPassHz, setCabIRLowPassHz));
      }
  
@@ -573,7 +577,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
  
      // The five mics of the factory cabs (the names are what the Nano expects) and our own drawings of them.
      const CAB_MICS = [
-@@ -5950,7 +6181,7 @@
+@@ -5950,7 +6182,7 @@
        p.appendChild(valueEl);
  
        let current = Number(value);
@@ -582,7 +586,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
        const apply = next => {
          const v = roundToStep(clamp(next, min, max), step);
          if (v === current) return;
-@@ -5962,8 +6193,8 @@
+@@ -5962,8 +6194,8 @@
        knobEl.addEventListener('wheel', e => { e.preventDefault(); apply(current + (e.deltaY < 0 ? fine : -fine)); }, { passive: false });
        knobEl.addEventListener('pointerdown', e => {
          e.preventDefault();
@@ -593,7 +597,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          const onUp = () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onUp); };
          window.addEventListener('pointermove', onMove);
          window.addEventListener('pointerup', onUp);
-@@ -5973,7 +6204,9 @@
+@@ -5973,7 +6205,9 @@
          const unit = key === 'level' ? 'dB' : 'Hz';
          const entered = await askText(label + ' in ' + unit + ' (' + min + ' to ' + max + ')', String(current));
          if (entered === null) return;
@@ -604,10 +608,11 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          if (!Number.isNaN(number)) apply(number);
        });
        show();
-@@ -6424,6 +6657,14 @@
+@@ -6423,6 +6657,14 @@
+       actions.appendChild(toggle);
        head.appendChild(actions);
        el.appendChild(head);
- 
++
 +      if (!block.on && block.model !== 'None' && (block.paramsFromCache || !block.paramsLoaded)) {
 +        const readStatus = document.createElement('div');
 +        readStatus.className = 'fx-param-read-status';
@@ -615,11 +620,10 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
 +        if (block.paramsFromCache && block.cachedAt) readStatus.title = 'Last read ' + new Date(block.cachedAt).toLocaleString();
 +        el.appendChild(readStatus);
 +      }
-+
+ 
        const select = document.createElement('select');
        select.className = 'model-select';
- 
-@@ -6456,6 +6697,10 @@
+@@ -6456,6 +6698,10 @@
  
          block.model = e.target.value;
          block.params = selected && selected.params ? structuredClone(selected.params) : [];
@@ -630,7 +634,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          render();
  
          if (selected && selected.id) setFXModel(key, e.target.value);
-@@ -6552,6 +6797,10 @@
+@@ -6552,6 +6798,10 @@
        const block = state.blocks[blockKey];
        if (!block || !block.params || !floats) return;
        floats.forEach((n, i) => { if (block.params[i]) block.params[i].value = normalizedToParamValue(block.params[i], n); });
@@ -641,7 +645,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
        block.fxPresetActive = active;
        render();
        block.params.forEach((param, i) => { if (i < floats.length) setFXParam(blockKey, param, null, true); });
-@@ -6803,7 +7052,7 @@
+@@ -6803,7 +7053,7 @@
      // The values of an effect are known when they were read from the Nano (or imported) for this preset and model.
      function fxValuesKnown(block) {
        return block.model === 'None' ||
@@ -650,7 +654,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          (block.importedModel === block.model && block.importedPreset === state.selectedPreset);
      }
  
-@@ -7013,6 +7262,10 @@
+@@ -7013,6 +7263,10 @@
        }
        if (Array.isArray(f.values)) {
          f.values.forEach((n, i) => { if (block.params[i]) block.params[i].value = normalizedToParamValue(block.params[i], n); });
@@ -661,7 +665,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          for (const param of block.params.slice(0, f.values.length)) await setFXParam(key, param, null, true);
          block.importedModel = f.model;
          block.importedPreset = preset;
-@@ -9255,9 +9508,7 @@
+@@ -9255,9 +9509,7 @@
          }
          case 'captureVolume': return (Number($('captureVolumeSlider').value) + 24) / 36;
          case 'cab': {
@@ -672,7 +676,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          }
        }
        return null;
-@@ -9326,7 +9577,7 @@
+@@ -9326,7 +9578,7 @@
          const param = block && block.params.find(p => p.name === t.param);
          if (!param) return; // the model in this slot has no parameter with this name
          const meta = param.meta || rangeMeta(0, 10, 0.1, '', 1);
@@ -681,7 +685,7 @@ One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream
          const next = coerceParamValue(param, raw);
          if (next === null || next === param.value) return;
          param.value = next;
-@@ -9345,9 +9596,9 @@
+@@ -9345,9 +9597,9 @@
  
        if (t.kind === 'cab') {
          const [min, max, step] = CAB_RANGES[t.key];

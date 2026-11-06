@@ -1645,9 +1645,11 @@ function restoreFxParamCache(blockKey, block) {
       block.paramsFromCache = true;
       block.paramsPreset = state.selectedPreset;
       block.cachedAt = Number(cached.savedAt) || 0;
-      block.originalFloats = cached.floats.slice();
-      block.originalModel = block.model;
-      block.originalPreset = state.selectedPreset;
+      // Saved values are only shown: they never become the effect's Original (which writes every parameter) and never
+      // count as known (fxValuesKnown), because the preset may have changed elsewhere since they were read.
+      block.originalFloats = null;
+      block.originalModel = null;
+      block.originalPreset = null;
       log(block.title + ' is showing cached parameters last read for preset ' + state.selectedPreset + '.');
       return true;
     }
@@ -3142,8 +3144,7 @@ async function setFXParam(blockKey, param, rawValue = null, fromPreset = false) 
 
       await writeC304(cfg.label + ' param ' + param.name + '=' + paramDisplayValue(param), payload, 'fx-param:' + blockKey + ':' + (param.wireIndex === undefined ? param.index : param.wireIndex));
       const block = state.blocks[blockKey];
-      if (block && block.paramsLoaded) {
-        block.paramsFromCache = false;
+      if (block && block.paramsLoaded) {   // this one value is now known; the rest of a saved set is still marked as saved
         block.paramsPreset = state.selectedPreset;
         saveCurrentFxParamCache(blockKey);
       }

@@ -6,18 +6,23 @@ All notable changes to Nano Cortex Editor (Electron edition). Versions follow [S
 
 ### Added
 
-- Graphic 9 now has a compact nine-band vertical slider bank, with HPF, LPF and Output in the same panel. Band
-  values support 0.1 dB adjustments, double-click to reset to zero and click-to-type exact values.
+- Graphic 9 has a nine-band fader bank, with HPF, LPF and Output below it. Bands move in 0.1 dB steps; double-click
+  resets one to 0 dB and clicking its value lets you type one.
+- An effect that is off shows the values last read from the pedal for this preset, marked as saved values: the pedal
+  doesn't report an effect while it is off. They are replaced as soon as the effect is on, and they are only shown,
+  never sent back as a whole.
 
 ### Fixed
 
-- Corrected effect parameter display and write mappings using comparisons with the official iOS app, including
-  Graphic 9, Parametric 3, Low-High Cut, IR Loader, Transpose and Envelope Filter.
-- Retained the last read or imported settings for bypassed effects as a visibly marked local cache, so values are
-  available without querying an inactive block; cached values are also marked while an active readback is pending.
-- On preset changes, discard cached values for active effects until a fresh pedal readback arrives, and drain late
-  replies from cancelled or timed-out refreshes so they cannot be assigned to the newly selected preset.
-- Keep Graphic 9's editable gain readout in a fixed-width slot so opening it for typing does not shift the fader bank.
+- Effect values now read as in the official app for Graphic 9 (including which band is which), Parametric 3 (the band
+  frequencies showed as 2.2, 4.1 and 6.2), Low-High Cut, the Cab/IR level and cutoffs, Transpose and Envelope Filter
+  ([#31](https://github.com/AJs-Creations/nano-cortex-editor/pull/31), thanks @itsbreaded).
+- After a preset change, a late reply from the previous preset can no longer land on the new one.
+
+### Changed
+
+- The protocol layer comes from the community editor by DrD85 at V1.12.1 (was v1.5.2), with the fixes above kept as a
+  patch on top of it (`editor/patches/`).
 
 ## 1.2.2 — 2026-10-29
 
