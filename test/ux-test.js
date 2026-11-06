@@ -183,10 +183,12 @@ async function txWait(n0, ready = (tx) => tx.length > 0, opts) {
 }
 
 // Reload the editor page (demo restarts) and wait until it has booted.
+// Booted = demo connected and the first preset rendered (a slow CI runner can connect before the header exists).
+const BOOTED = 'typeof __ui !== "undefined" && __ui.demo && state.connected && !!document.querySelector(".preset-title .name")?.textContent';
 async function reloadPage() {
   const loaded = new Promise(r => wc.once('did-finish-load', r));
   wc.reload();
-  await loaded; await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle(); await frame();
+  await loaded; await waitFor(BOOTED); await settle(); await frame();
 }
 // A typed frame as the Activity log prints it: [len] C0 [payload] [u32 LE type].
 const hexBytes = (bytes) => bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
@@ -203,7 +205,7 @@ const rgbOf = (css) => {
 
 async function run() {
   // ---------------------------------------------------------------- boot
-  await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle();
+  await waitFor(BOOTED); await settle();
   // Start like a fresh install (a previous run may have left an accent, a sound or a tempo behind).
   if (await js('Object.keys(localStorage).some(k => k.startsWith("settings.") || k === "metronome")')) {
     await js('Object.keys(localStorage).filter(k => k.startsWith("settings.") || k === "metronome").forEach(k => localStorage.removeItem(k))');
@@ -3053,7 +3055,7 @@ async function run() {
   const labelsFor = async (plat) => {
     const loaded = new Promise(r => wc.once('did-finish-load', r));
     await win.loadURL('file://' + PAGE + '?demo' + (plat ? '&platform=' + plat : ''));
-    await loaded; await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle(); await frame();
+    await loaded; await waitFor(BOOTED); await settle(); await frame();
     await js('document.activeElement.blur()');
     await key('?'); await waitFor('!!document.querySelector(".modal .keys")');
     const r = await js(`({ kbd: document.querySelector("#saveBtn kbd").textContent, saveTitle: document.getElementById("saveBtn").title,
@@ -3087,7 +3089,7 @@ async function run() {
   const loadDemo = async (query) => {
     const loaded = new Promise(r => wc.once('did-finish-load', r));
     await win.loadURL('file://' + PAGE + '?demo' + query);
-    await loaded; await waitFor('typeof __ui !== "undefined" && __ui.demo && state.connected'); await settle(); await frame();
+    await loaded; await waitFor(BOOTED); await settle(); await frame();
   };
   await loadDemo('&demoFirmware=2.2.1');
   check('firmware 2.2.1 reported: no notice, nothing remembered', await js('document.getElementById("fwNotice").hidden && localStorage.getItem("settings.firmwareWarned") === null'));
