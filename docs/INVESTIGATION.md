@@ -452,3 +452,28 @@ transaction and status 1; the keep-alive runs only between an accepted 151/159 a
 a 143 uses absolute indices even when the list is filtered; a failed or unconfirmed move ends with the order read
 from the pedal, never an assumed one.
 
+## 13. FX parameter readback and display mappings (2026-11-04)
+
+The current-state response reports each FX slot's model and bypass state, but not the effect's parameter floats.
+Parameter values arrive through a separate refresh response. The editor requests those refreshes for active FX only;
+querying a bypassed block has been unstable on the Nano. Enabling a block triggers a readback.
+
+The editor caches complete readbacks (and imported parameter values) locally by device, preset, slot and model. This
+cache is only a display fallback: a bypassed block shows cached values with a stale-data note, and a missing cache is
+shown as unread. Active blocks use cached values while a regular readback is pending, but preset changes discard the
+cached display and wait for fresh pedal values. A drain barrier ignores late replies from cancelled or timed-out
+refreshes before later reads begin, preventing a response for the previous preset from being saved under the new
+preset. The cache does not change the pedal or make an off-block refresh safe.
+
+Parameter floats are normalized, but their conversion to displayed units depends on the control and model. The
+editor uses parameter metadata and model-specific curves; there is no single Hz conversion for all effects. Recent
+official-app comparisons were used to correct Graphic 9 band ordering and cutoffs, Parametric 3 and Transpose
+frequencies, Low-High Cut, IR Loader, and Envelope Filter ranges. These curves are empirical and should be checked
+against additional values when available, especially where only one paired value has been confirmed.
+
+Graphic 9 presents its nine band gains as vertical sliders with 0.1 dB steps, click-to-type values and double-click
+reset to zero; HPF, LPF and Output stay in the same panel. Its parameter list is displayed in frequency order, while
+the wire response places HPF first; the UI-to-wire mapping is explicit in the model definition in `editor/index.html`.
+Its typed gain input stays in the same fixed-width slot as the readout, keeping the band columns centered over their
+sliders while editing.
+
