@@ -440,6 +440,58 @@ async function run() {
   await rxFXParameter(1, 1, 196); await rxLiveParameter(0x06, 196); await frame(); await sleep(220);
   tx = await txSince(n0);
   check('FX parameter companion report does not trigger a full preset refresh', !tx.some(t => /^TX Current preset state request/.test(t)), JSON.stringify(tx));
+
+  // FX mappings (#31): Graphic 9's wire order is HPF first, then the nine bands; frequencies use the fitted curves;
+  // values saved from an earlier read are shown for a bypassed effect but never count as known.
+  const fxBackup = await js('JSON.stringify({ model: state.blocks.pre2.model, on: state.blocks.pre2.on, params: state.blocks.pre2.params })');
+  await js(`(() => {
+    const b = state.blocks.pre2, m = b.models.find(x => x.name === 'Graphic 9');
+    b.model = m.name; b.params = structuredClone(m.params); b.on = true; b.paramsLoaded = true; b.paramsFromCache = false;
+    __ui.selected = 'pre2'; render();
+  })()`);
+  await frame();
+  check('Graphic 9: the nine bands show as a fader bank, HPF / LPF / Output below it', await js('document.querySelectorAll(".graphic9-band").length === 9 && document.querySelectorAll(".graphic9-extras > *").length === 3 && [...document.querySelectorAll(".graphic9-frequency")].map(x => x.textContent).join() === "65 Hz,125 Hz,250 Hz,500 Hz,1 kHz,2 kHz,4 kHz,8 kHz,16 kHz"'), await js('[...document.querySelectorAll(".graphic9-frequency")].map(x => x.textContent).join()'));
+  n0 = await mark();
+  await js('document.querySelector(\'[data-fk="p-pre2-0"]\').focus()');
+  await key('Up');
+  await txWait(n0);
+  tx = await txSince(n0);
+  check('Graphic 9: the 65 Hz fader writes wire index 1', tx.length === 1 && /^TX Pre FX 2 param 65Hz=/.test(tx[0]) && / 20 01 2D /.test(tx[0]), JSON.stringify(tx));
+  n0 = await mark();
+  await js('setFXParam("pre2", state.blocks.pre2.params.find(p => p.name === "HPF"))');
+  await txWait(n0);
+  tx = await txSince(n0);
+  check('Graphic 9: HPF writes wire index 0', tx.length === 1 && /^TX Pre FX 2 param HPF=/.test(tx[0]) && / 20 00 2D /.test(tx[0]), JSON.stringify(tx));
+  check('Graphic 9: a readback lands by wire index (float 0 is HPF, float 1 is 65 Hz)', await js(`(() => {
+    const b = state.blocks.pre2, f = new Array(12).fill(0.5); f[0] = 0; f[1] = 0;
+    applyFloatValuesToBlock('pre2', f);
+    const by = n => b.params.find(p => p.name === n).value;
+    return by('HPF') === 20 && by('65Hz') === -12 && by('125Hz') === 0;
+  })()`));
+  check('Parametric 3: band frequencies are 20 Hz to 20 kHz, not the Q range', await js(`(() => {
+    const m = state.blocks.pre2.models.find(x => x.name === 'Parametric 3');
+    const f = m.params.find(p => p.name === '2 Freq').meta, q = m.params.find(p => p.name === '2 Q').meta;
+    return f.min === 20 && f.max === 20000 && f.unit === 'Hz' && q.max === 10;
+  })()`));
+  check('Low-High Cut: Cortex Cloud\'s 665 Hz high pass reads back as 665 Hz (wire 0.357)', await js(`(() => {
+    const m = state.blocks.pre2.models.find(x => x.name === 'Low-High Cut');
+    return Math.abs(normalizedToParamValue(m.params.find(p => p.name === 'HPF Freq'), 0.357) - 665) < 3;
+  })()`));
+  const cacheCheck = await js(`(() => {
+    const b = state.blocks.pre2, f = b.params.map(() => 0.25);
+    saveFxParamCache('pre2', f);
+    b.params = structuredClone(b.models.find(x => x.name === 'Graphic 9').params);
+    b.paramsLoaded = false; b.on = false;
+    const restored = restoreFxParamCache('pre2', b);
+    return { restored, fromCache: b.paramsFromCache, original: b.originalFloats, known: fxValuesKnown(b) };
+  })()`);
+  check('saved values are restored for a bypassed effect, but never as its Original or as known', cacheCheck.restored && cacheCheck.fromCache && cacheCheck.original === null && cacheCheck.known === false, JSON.stringify(cacheCheck));
+  await js('render()'); await frame();
+  check('a bypassed effect with saved values says so', /cached values; they may be stale/.test(await js('(document.querySelector(".fx-read-status") || {}).textContent || ""')));
+  await js('setFXParam("pre2", state.blocks.pre2.params[0])'); await settle();
+  check('one knob turned on a saved set keeps the rest marked as saved', await js('state.blocks.pre2.paramsFromCache === true'));
+  await js(`(() => { const b = state.blocks.pre2, o = ${fxBackup}; b.model = o.model; b.on = o.on; b.params = o.params; b.paramsFromCache = false; b.paramsLoaded = true; render(); })()`);
+  await frame();
   await js('__ui.selected = "capture"; render()'); await frame();
   n0 = await mark();
   await rxFXEnable(5, false); await frame();
@@ -448,6 +500,11 @@ async function run() {
   tx = await txSince(n0);
   check('FX bypass dirty companion preserves the effective pedal state', await js('state.blocks.pre2.on === false && !document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
   check('contextual FX bypass and dirty companion do not trigger a full preset refresh', !tx.some(t => /^TX Current preset state request/.test(t)), JSON.stringify(tx));
+  n0 = await mark();
+  await rxFXEnable(5, true);
+  tx = await txWait(n0, t => t.some(x => /^TX Pre FX 2 param refresh/.test(x)), { timeout: 3000 });
+  check('a pedal report that turns an effect on reads its values (they could not be read while it was off)', await js('state.blocks.pre2.on === true') && tx.some(t => /^TX Pre FX 2 param refresh/.test(t)), JSON.stringify(tx));
+  await rxFXEnable(5, false); await settle();
   // A manual refresh is authoritative once no local bypass target is pending.
   await js('window.applyFXEnabledStatesFromCurrentState({ 31: [{ wire: 2, raw: [0, 0, 0, 1, 1] }] }); render()');
   await frame();
@@ -2797,7 +2854,9 @@ async function run() {
   await key('s', [MOD]); await settle();
   check('… and ⌘S saves nothing', !(await txSince(n0)).some(t => /^TX save preset/.test(t)));
   await js('__demo.hooks.dropStateReads = false; __reorderTimeouts.state = 6000; __reorderTimeouts.list = 20000; state.presetDirty = false');
-  check('a successful state read clears it', (await js('NanoLive.readCurrentState(3000)')) === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'));
+  { const t0 = Date.now(); const ok = await js('NanoLive.readCurrentState(6000)'); const ms = Date.now() - t0;
+    const diag = await js('JSON.stringify({ unknown: __ui.presetUnknown, saveDisabled: document.getElementById("saveBtn").disabled, mode: state.stateMode, bytes: state.stateBytes.length, reads: NanoLive.stateReads, q: gattWriteQueue.length, pump: gattWritePumpRunning, pending: state.pendingParamBlock, rq: state.paramRefreshQueue, drain: state.paramRefreshDiscardPending, presetLoad: state.protocol.presetLoad, dirty: state.presetDirty, logs: __ui.logs.slice(-14).map(l => l.text.slice(0, 90)) })');
+    check('a successful state read clears it', ok === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'), 'ok=' + ok + ' ms=' + ms + ' ' + diag); }
   await checkSoon('the order is back as it was', async () => JSON.stringify(await allNames()) === JSON.stringify(namesBefore) && (await js('state.selectedPreset')) === mvFrom);
   win.setContentSize(1400, 900);
   await waitFor('innerHeight === 900'); await frame();

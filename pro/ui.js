@@ -28,6 +28,7 @@
     return n;
   };
   const svgNS = 'http://www.w3.org/2000/svg';
+  const graphic9LastPress = new WeakMap();
   const sv = (tag, attrs = {}) => {
     const n = document.createElementNS(svgNS, tag);
     for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
@@ -4035,15 +4036,167 @@
       return out;
     }
 
+    if (b.paramsFromCache || !b.paramsLoaded) {
+      out.push(el('p', { class: 'note fx-read-status', text: b.paramsFromCache
+        ? (b.on
+          ? 'Showing cached values until a fresh pedal readback replaces them.'
+          : 'Showing cached values; they may be stale while this effect is bypassed.')
+        : b.on
+          ? 'Reading current effect values from the pedal…'
+          : 'No parameter readback yet. The pedal does not return bypassed effect values.' }));
+    }
+
     const params = def && def.displayOrder ? def.displayOrder.map(i => b.params[i]).filter(Boolean) : b.params;
     if (!params.length) {
       out.push(el('p', { class: 'empty-block', text: 'This effect has no adjustable parameters.' }));
+      return out;
+    }
+    if (b.model === 'Graphic 9' && params.length >= 9) {
+      out.push(graphic9BandSection(key, b, params.slice(0, 9), params.slice(9), s.color));
       return out;
     }
     const grid = el('div', { class: 'params' });
     params.forEach(p => grid.append(paramControl(key, b, p, s.color)));
     out.push(el('div', { class: 'section' }, grid));
     return out;
+  }
+
+  function graphic9BandSection(key, block, bands, extraParams, color) {
+    const bank = el('div', { class: 'graphic9-bank', role: 'group', 'aria-label': 'Graphic 9 equalizer bands' });
+    bands.forEach(p => {
+      const meta = p.meta || { min: -12, max: 12, step: 0.1, unit: 'dB' };
+      const locked = isParamDisabled(block, p);
+      const label = p.name.replace(/khz$/i, ' kHz').replace(/(\d)hz$/i, '$1 Hz');   // 1kHz → 1 kHz, 500hz → 500 Hz
+      const readout = el('output', { class: 'graphic9-value', text: graphic9BandValue(p), title: 'Click to type this band gain' });
+      const valueSlot = el('div', { class: 'graphic9-value-slot' }, readout);
+      const slider = el('input', {
+        class: 'graphic9-slider', type: 'range', min: meta.min, max: meta.max,
+        step: meta.step || 0.1, value: p.value, disabled: locked,
+        'aria-label': label + ' gain', 'aria-valuetext': paramDisplayValue(p),
+        title: label + ' band · drag or use arrow keys to adjust; double-click to reset to 0 dB',
+        dataset: { fk: 'p-' + key + '-' + p.index },
+      });
+      const setBandValue = (rawValue) => {
+        const value = roundToStep(clamp(Number(rawValue), meta.min, meta.max), meta.step || 0.1);
+        if (!Number.isFinite(value) || value === Number(p.value)) return false;
+        p.value = value;
+        slider.value = String(value);
+        readout.textContent = graphic9BandValue(p);
+        slider.setAttribute('aria-valuetext', paramDisplayValue(p));
+        noteExpressionLocalOverride(key, 'param', p);
+        setFXParam(key, p);
+        return true;
+      };
+      slider.addEventListener('pointerdown', (event) => {
+        if (locked || event.button !== 0) return;
+        const now = Date.now();
+        const previous = graphic9LastPress.get(p) || 0;
+        if (now - previous < 500) {
+          graphic9LastPress.delete(p);
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          setBandValue(0);
+          render();
+        } else {
+          graphic9LastPress.set(p, now);
+        }
+      });
+      const drag = holdGraphic9Slider(slider);
+      slider.addEventListener('input', () => setBandValue(slider.value));
+      slider.addEventListener('change', () => { if (!drag.active()) render(); });
+      const resetBand = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!locked) setBandValue(0);
+        render();
+      };
+      slider.addEventListener('click', (event) => { if (event.detail === 2) resetBand(event); });
+      slider.addEventListener('dblclick', resetBand);
+      readout.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (!locked) editGraphic9BandValue(label, p, readout, setBandValue);
+      });
+      bank.append(el('div', {
+        class: 'graphic9-band' + (locked ? ' locked' : ''),
+        style: '--c:' + color,
+        title: label + ' · ' + paramDisplayValue(p),
+      },
+        valueSlot,
+        el('div', { class: 'graphic9-fader' },
+          el('div', { class: 'graphic9-ticks', 'aria-hidden': 'true' }),
+          el('div', { class: 'graphic9-zero', 'aria-hidden': 'true' }),
+          slider),
+        el('span', { class: 'graphic9-frequency', text: label })));
+    });
+    const extras = el('div', { class: 'params graphic9-extras' });
+    extraParams.forEach(p => extras.append(paramControl(key, block, p, color)));
+    const surface = [el('div', { class: 'graphic9-scroll' }, bank)];
+    if (extraParams.length) {
+      surface.push(el('div', { class: 'graphic9-extra-group' }, extras));
+    }
+
+    return el('div', { class: 'section graphic9-section' },
+      el('h3', { text: 'Graphic 9' }),
+      el('div', { class: 'graphic9-surface' }, surface));
+  }
+
+  function graphic9BandValue(param) {
+    const value = Number(param.value);
+    return (value > 0 ? '+' : '') + value.toFixed(1);
+  }
+
+  function editGraphic9BandValue(label, param, readout, setValue) {
+    if (ui.editing) return;
+    ui.editing = true;
+    const meta = param.meta || { min: -12, max: 12, step: 0.1 };
+    const input = el('input', {
+      class: 'graphic9-value-input', type: 'number', min: meta.min, max: meta.max,
+      step: meta.step || 0.1, value: Number(param.value).toFixed(1),
+      'aria-label': label + ' gain in dB',
+    });
+    readout.replaceWith(input);
+    input.focus({ preventScroll: true });
+    input.select();
+    let finished = false;
+    const finish = (apply) => {
+      if (finished) return;
+      finished = true;
+      ui.editing = false;
+      if (apply && input.value.trim() !== '' && Number.isFinite(Number(input.value))) setValue(input.value);
+      render();
+    };
+    input.addEventListener('keydown', (event) => {
+      event.stopPropagation();
+      if (event.key === 'Enter') finish(true);
+      else if (event.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+  }
+
+  function holdGraphic9Slider(slider) {
+    let held = false;
+    const finish = () => {
+      if (!held) return;
+      held = false;
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      window.removeEventListener('blur', finish);
+      document.body.style.cursor = '';
+      ui.knobDragging = false;
+      ui.renderAfterKnob = false;
+      render();
+    };
+    slider.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || ui.knobDragging) return;
+      held = true;
+      ui.knobDragging = true;
+      ui.renderAfterKnob = false;
+      document.body.style.cursor = 'ns-resize';
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', finish);
+      window.addEventListener('blur', finish);
+    });
+    return { active: () => held };
   }
 
   function paramControl(key, block, p, color) {
