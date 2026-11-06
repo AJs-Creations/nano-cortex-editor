@@ -2,7 +2,7 @@
 
 All notable changes to Nano Cortex Editor (Electron edition). Versions follow [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 1.2.3 — 2026-11-05
 
 ### Added
 
