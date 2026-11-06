@@ -1,7 +1,7 @@
 # Upstream editor (vendored, verbatim)
 
 `index.html` is the community **Nano Cortex Editor** by Dominik Schmidt, MIT:
-<https://github.com/DrD85/nano-cortex-editor>, commit `43292dbccf1569c7f697b3364af505d489c44334` (v1.5.2, 2026-10-08).
+<https://github.com/DrD85/nano-cortex-editor>, commit `5ff9796e3c3b16b3349a4e1442157d1b477addec` (V1.12.1, 2026-11-05).
 
 Don't edit it. `scripts/build-core.js` extracts the protocol layer from it into `pro/core.js`; the full upstream UI
 stays available in the app under **View → Classic Editor**.
