@@ -4066,7 +4066,7 @@
     bands.forEach(p => {
       const meta = p.meta || { min: -12, max: 12, step: 0.1, unit: 'dB' };
       const locked = isParamDisabled(block, p);
-      const label = p.name.replace(/khz/i, ' kHz').replace(/hz/i, ' Hz');
+      const label = p.name.replace(/khz$/i, ' kHz').replace(/(\d)hz$/i, '$1 Hz');   // 1kHz → 1 kHz, 500hz → 500 Hz
       const readout = el('output', { class: 'graphic9-value', text: graphic9BandValue(p), title: 'Click to type this band gain' });
       const valueSlot = el('div', { class: 'graphic9-value-slot' }, readout);
       const slider = el('input', {

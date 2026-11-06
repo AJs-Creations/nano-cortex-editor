@@ -450,7 +450,7 @@ async function run() {
     __ui.selected = 'pre2'; render();
   })()`);
   await frame();
-  check('Graphic 9: the nine bands show as a fader bank, HPF / LPF / Output below it', await js('document.querySelectorAll(".graphic9-band").length === 9 && document.querySelectorAll(".graphic9-extras > *").length === 3'));
+  check('Graphic 9: the nine bands show as a fader bank, HPF / LPF / Output below it', await js('document.querySelectorAll(".graphic9-band").length === 9 && document.querySelectorAll(".graphic9-extras > *").length === 3 && [...document.querySelectorAll(".graphic9-frequency")].map(x => x.textContent).join() === "65 Hz,125 Hz,250 Hz,500 Hz,1 kHz,2 kHz,4 kHz,8 kHz,16 kHz"'), await js('[...document.querySelectorAll(".graphic9-frequency")].map(x => x.textContent).join()'));
   n0 = await mark();
   await js('document.querySelector(\'[data-fk="p-pre2-0"]\').focus()');
   await key('Up');
@@ -500,6 +500,11 @@ async function run() {
   tx = await txSince(n0);
   check('FX bypass dirty companion preserves the effective pedal state', await js('state.blocks.pre2.on === false && !document.querySelector("[data-stage=pre2] .stomp").classList.contains("on")'));
   check('contextual FX bypass and dirty companion do not trigger a full preset refresh', !tx.some(t => /^TX Current preset state request/.test(t)), JSON.stringify(tx));
+  n0 = await mark();
+  await rxFXEnable(5, true);
+  tx = await txWait(n0, t => t.some(x => /^TX Pre FX 2 param refresh/.test(x)), { timeout: 3000 });
+  check('a pedal report that turns an effect on reads its values (they could not be read while it was off)', await js('state.blocks.pre2.on === true') && tx.some(t => /^TX Pre FX 2 param refresh/.test(t)), JSON.stringify(tx));
+  await rxFXEnable(5, false); await settle();
   // A manual refresh is authoritative once no local bypass target is pending.
   await js('window.applyFXEnabledStatesFromCurrentState({ 31: [{ wire: 2, raw: [0, 0, 0, 1, 1] }] }); render()');
   await frame();

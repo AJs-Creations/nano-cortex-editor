@@ -316,7 +316,11 @@
     if (!key || (v !== 0 && v !== 1)) return false;
     const enabled = v === 0;
     if (hooks.keepLocalBypass(key, enabled)) return true;
-    if (state.blocks[key].on !== enabled) { state.blocks[key].on = enabled; render(); }
+    if (state.blocks[key].on !== enabled) {
+      state.blocks[key].on = enabled;
+      if (enabled) readAfterEnable(key);   // its values could not be read while it was off (saved values show until then)
+      render();
+    }
     return true;
   }
 
