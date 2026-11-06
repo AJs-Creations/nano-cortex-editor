@@ -291,11 +291,19 @@
     const s = slot ? slot.value : 0, i = index ? index.value : 0, raw = value ? fixed32(value) : 0;
     if (!(s >= 0 && s < FX_BLOCK_KEYS.length) || !(i >= 0) || raw === null || raw < 0 || raw > 255) return false;
     const block = state.blocks[FX_BLOCK_KEYS[s]];
-    const p = block && !block.unknownId && block.params && block.params[i];
+    const p = block && !block.unknownId && block.params && block.params.find(param =>
+      (param.wireIndex === undefined ? param.index : param.wireIndex) === i);
     if (!p) return false;
     recentFXParam = { raw, at: Date.now() };
     const next = normalizedToParamValue(p, raw / 255);
-    if (p.value !== next) { p.value = next; render(); }
+    if (p.value !== next) {
+      p.value = next;
+      if (block.paramsLoaded) {   // only this value is now known: a saved set stays marked as saved
+        block.paramsPreset = state.selectedPreset;
+        saveCurrentFxParamCache(FX_BLOCK_KEYS[s]);
+      }
+      render();
+    }
     return true;
   }
 
@@ -308,7 +316,11 @@
     if (!key || (v !== 0 && v !== 1)) return false;
     const enabled = v === 0;
     if (hooks.keepLocalBypass(key, enabled)) return true;
-    if (state.blocks[key].on !== enabled) { state.blocks[key].on = enabled; render(); }
+    if (state.blocks[key].on !== enabled) {
+      state.blocks[key].on = enabled;
+      if (enabled) readAfterEnable(key);   // its values could not be read while it was off (saved values show until then)
+      render();
+    }
     return true;
   }
 
