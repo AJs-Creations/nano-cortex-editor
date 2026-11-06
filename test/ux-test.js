@@ -2854,7 +2854,9 @@ async function run() {
   await key('s', [MOD]); await settle();
   check('… and ⌘S saves nothing', !(await txSince(n0)).some(t => /^TX save preset/.test(t)));
   await js('__demo.hooks.dropStateReads = false; __reorderTimeouts.state = 6000; __reorderTimeouts.list = 20000; state.presetDirty = false');
-  check('a successful state read clears it', (await js('NanoLive.readCurrentState(6000)')) === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'));
+  { const t0 = Date.now(); const ok = await js('NanoLive.readCurrentState(6000)'); const ms = Date.now() - t0;
+    const diag = await js('JSON.stringify({ unknown: __ui.presetUnknown, saveDisabled: document.getElementById("saveBtn").disabled, mode: state.stateMode, bytes: state.stateBytes.length, reads: NanoLive.stateReads, q: gattWriteQueue.length, pump: gattWritePumpRunning, pending: state.pendingParamBlock, rq: state.paramRefreshQueue, drain: state.paramRefreshDiscardPending, presetLoad: state.protocol.presetLoad, dirty: state.presetDirty, logs: __ui.logs.slice(-14).map(l => l.text.slice(0, 90)) })');
+    check('a successful state read clears it', ok === true && await js('!__ui.presetUnknown && !document.getElementById("saveBtn").disabled'), 'ok=' + ok + ' ms=' + ms + ' ' + diag); }
   await checkSoon('the order is back as it was', async () => JSON.stringify(await allNames()) === JSON.stringify(namesBefore) && (await js('state.selectedPreset')) === mvFrom);
   win.setContentSize(1400, 900);
   await waitFor('innerHeight === 900'); await frame();
