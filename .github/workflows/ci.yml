@@ -35,6 +35,22 @@ jobs:
       - name: Syntax check
         run: for f in src/*.js pro/*.js scripts/*.js test/*.js; do node --check "$f"; done
 
+  # The release builds Windows too; this catches a Windows-only break (e.g. CRLF checkouts) before a tag does.
+  build-core-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:core
+      - run: git diff --exit-code pro/core.js
+
   ux-test:
     runs-on: macos-latest
     timeout-minutes: 20
