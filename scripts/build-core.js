@@ -30,7 +30,8 @@ const root = path.join(__dirname, '..');
 const patchDir = path.join(root, 'editor', 'patches');
 const patchFiles = fs.existsSync(patchDir) ? fs.readdirSync(patchDir).filter(f => f.endsWith('.patch')).sort() : [];
 const html = patchFiles.reduce((text, f) => applyPatch(text, fs.readFileSync(path.join(patchDir, f), 'utf8'), f),
-  fs.readFileSync(path.join(root, 'editor', 'index.html'), 'utf8'));
+  // LF first: a Windows checkout (core.autocrlf) has CRLF, and the hunks match line by line.
+  fs.readFileSync(path.join(root, 'editor', 'index.html'), 'utf8').replace(/\r\n/g, '\n'));
 
 // Exact unified-diff apply: every hunk's context and removed lines must appear, in order, after the previous hunk.
 function applyPatch(text, patch, name) {
