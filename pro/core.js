@@ -55,10 +55,55 @@ function knob(name, index, value = null, meta = null) {
       };
     }
 
+const PERCENT = [0, 100, 0.1, '%', 1], SEMITONES = [-24, 24, 1, 'Sem', 0];
+
+const MODEL_PARAM_META = {
+      'Poly Octaver': { 'Dry': PERCENT, 'Oct': PERCENT, 'Sub': PERCENT },
+      'Wham': { 'Mix': PERCENT, 'Pedal': PERCENT, 'Heel Pitch 1': SEMITONES, 'Toe Pitch 1': SEMITONES, 'Heel Pitch 2': SEMITONES,
+        'Toe Pitch 2': SEMITONES, 'Blend': [0, 100, 1, '%', 0] },
+      'Chief OC2': { 'Output': [-12, 12, 0.1, 'dB', 1], 'Dry': PERCENT, 'Oct 1': PERCENT, 'Oct 2': PERCENT },
+      'Blossom (ST)': { 'Mix': PERCENT, 'Decay': [0.5, 20, 0.01, 's', 2], 'Pre Delay': [0, 500, 1, 'ms', 0], 'High Pass': [30, 800, 1, 'Hz', 0],
+        'Low Pass': [1000, 20000, 1, 'Hz', 0], 'E.R. Length': [0, 100, 1, '%', 0], 'Diffusion': [0, 100, 1, '%', 0],
+        'Bass': [-18, 6, 0.1, 'dB', 1], 'Treble': [-18, 6, 0.1, 'dB', 1], 'Ducking': [0, 100, 1, '%', 0], 'Modulation': PERCENT },
+      'Shimmer': { 'Mix': PERCENT, 'Decay': [4, 20, 0.1, 's', 1], 'Brightness': PERCENT, 'Feedback': PERCENT, 'Pitch': SEMITONES,
+        'Pre Delay': [1, 200, 1, 'ms', 0], 'Damping': PERCENT, 'High Pass': [20, 800, 1, 'Hz', 0], 'Rand Pitch': [2, 33, 1, 'Cent', 0],
+        'Mod Speed': [0.1, 5, 0.01, 'Hz', 2], 'Mod Depth': PERCENT }
+    };
+
+const PARAM_SKEW = {
+      "Low-High Cut": { "HPF Freq": 0.3, "LPF Freq": 0.3 },
+      "Utility Gate": { "Threshold": 0.6, "Hold": 0.6, "Release": 0.6, "Range": 0.6 },
+      "Legendary 87 (M)": { "Attack": 0.6, "Release": 0.6 },
+      "Opto Comp (M)": { "Ratio": 0.6, "Attack": 0.6, "Release": 0.6 },
+      "Solid State Comp (M)": { "Attack": 0.6, "Release": 0.6 },
+      "VCA Comp (M)": { "Ratio": 0.6, "Release": 0.6 },
+      "Legendary 87 (ST)": { "Attack": 0.6, "Release": 0.6 },
+      "Opto Comp (ST)": { "Ratio": 0.6, "Attack": 0.6, "Release": 0.6 },
+      "Solid State Comp (ST)": { "Attack": 0.6, "Release": 0.6 },
+      "VCA Comp (ST)": { "Ratio": 0.6, "Release": 0.6 },
+      "Chorus 229T": { "Rate": 0.5 },
+      "Tremolo": { "Rate": 0.6, "Fade In": 0.6, "Fade Out": 0.6 },
+      "Analog Delay": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6, "Mod Rate": 0.6 },
+      "Digital Delay (ST)": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6 },
+      "Dual Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "High Pass": 0.6, "Low Pass": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6 },
+      "Dual Reverse Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "Attack": 0.6, "Release": 0.6, "High Pass": 0.6 },
+      "Tape Delay": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6 },
+      "Ambience": { "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+      "Cave": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+      "Hall": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+      "Mind Hall": { "High Pass": 0.5, "Low Pass": 0.5 },
+      "Modulated": { "Decay": 0.6, "Pre Delay": 0.6, "Mod Speed": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+      "Room": { "Decay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+      "Blossom (ST)": { "Decay": 0.4, "Pre Delay": 0.4, "High Pass": 0.5, "Low Pass": 0.5, "E.R. Length": 0.4, "Bass": 2.375, "Treble": 2.375 },
+      "Shimmer": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Mod Speed": 0.6 },
+    };
+
 function makeParams(labels, modelName = '') {
       return labels.map((label, index) => {
         const parsed = parseParamLabel(label);
         const meta = inferParamMeta(modelName, parsed.name, parsed.options);
+        const skew = (PARAM_SKEW[modelName] || {})[parsed.name];
+        if (skew && meta.kind === 'range') meta.skew = skew;
         return {
           type: meta.kind === 'enum' ? 'switch' : 'knob',
           name: parsed.name,
@@ -109,6 +154,9 @@ function inferParamMeta(modelName, paramName, inlineOptions = null) {
       const m = normaliseName(modelName);
 
       if (inlineOptions && inlineOptions.length > 1) return enumMeta(correctOptions(inlineOptions));
+
+      const fixed = (MODEL_PARAM_META[modelName] || {})[paramName];
+      if (fixed) return rangeMeta(...fixed);
 
       if (p.includes('sync note')) return enumMeta(syncNoteOptionsForModel(modelName, paramName));
       if (p === 'sync' || p === 'sync l' || p === 'sync r') return enumMeta(['Off', 'On']);
@@ -406,7 +454,11 @@ const deviceModels = {
         device('VCA Comp (M)', 'Compressor', ['Threshold', 'Ratio', 'Attack', 'Release', 'Makeup', 'Mix'], [0x8D, 0x27])
       ],
       pitch: [
-        device('Transpose', 'Pitch', ['Mix', 'Semitones', 'Pitch Fine', 'High Pass', 'Low Pass'], [0xD1, 0x8C, 0x01])
+        device('Transpose', 'Pitch', ['Mix', 'Semitones', 'Pitch Fine', 'High Pass', 'Low Pass'], [0xD1, 0x8C, 0x01]),
+        // NanOS 2.3.0
+        device('Poly Octaver', 'Pitch', ['Dry', 'Oct', 'Sub'], [0xD4, 0x8C, 0x01]),
+        device('Wham', 'Pitch', ['Mix', 'Pedal', 'Heel Pitch 1', 'Toe Pitch 1', 'Heel Pitch 2', 'Toe Pitch 2', 'Blend'], [0xD6, 0x8C, 0x01]),
+        device('Chief OC2', 'Pitch', ['Output', 'Dry', 'Oct 1', 'Oct 2'], [0xDE, 0x8C, 0x01])
       ],
       postUtilityEQ: [
         device('Doubler', 'Utility/EQ', ['Spread', 'Dry Level', 'FX Level'], [0x8B, 0x7D]),
@@ -439,11 +491,15 @@ const deviceModels = {
       ],
       reverb: [
         device('Ambience', 'Reverb', ['Mix', 'Size', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC8, 0x3E]),
+        device('Blossom (ST)', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass', 'Extra E.R. (Off/On)', 'E.R. Length', 'Diffusion',
+          'Bass', 'Treble', 'Ducking', 'Modulation'], [0xDE, 0x3E]),   // NanOS 2.3.0
         device('Cave', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'Damping', 'High Pass', 'Low Pass'], [0xC9, 0x3E]),
         device('Hall', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC3, 0x3E]),
         device('Mind Hall', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass', 'Damping'], [0xCB, 0x3E]),
         device('Modulated', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'Mod Speed', 'Mod Depth', 'High Pass', 'Low Pass'], [0xC7, 0x3E]),
-        device('Room', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC0, 0x3E])
+        device('Room', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC0, 0x3E]),
+        device('Shimmer', 'Reverb', ['Mix', 'Decay', 'Brightness', 'Feedback', 'Pitch', 'Pre Delay', 'Damping', 'High Pass', 'Rand Pitch',
+          'Mod Speed', 'Mod Depth'], [0xCA, 0x3E])   // NanOS 2.3.0
 ]
     };
 
@@ -455,6 +511,83 @@ const postFx2Models = [].concat(deviceModels.postUtilityEQ.slice(1), deviceModel
 
 const postFx3Models = [].concat(deviceModels.postUtilityEQ.slice(1), deviceModels.reverb);
 
+const MODEL_IMAGES = {
+      'Circular Delay': 'img/pp/strymon-volante.png',
+      'Digital Delay (ST)': 'img/pp/boss-dd3.png',
+      'Ambience': 'img/pp/mrblack-ambience.png',
+      'Hall': 'img/pp/ehx-holy-grail.png',
+      'Modulated': 'img/pp/catalinbread-sinkhole.png',
+      'Room': 'img/pp/boss-rv6.png',
+
+      'Bass Wah': 'img/pp/dunlop-105q.png',
+      'Bass wah': 'img/pp/dunlop-105q.png',
+      'modulated': 'img/pp/catalinbread-sinkhole.png',
+      'Cave': 'img/pp/earthquaker-afterneath.png',
+
+      'Tape Delay': 'img/pp/boss-re2.png',
+      'Circular delay': 'img/pp/strymon-volante.png',
+      'Analoge Delay': 'img/pp/boss-dm2.png',
+      'Analog Delay': 'img/pp/boss-dm2.png',
+      'Digital Delay': 'img/pp/boss-dd3.png',
+      'Dual Delay': 'img/pp/strymon-timeline.png',
+      'Dual Reverse Delay': 'img/pp/tc-flashback.png',
+      'Cave Reverb': 'img/pp/earthquaker-afterneath.png',
+      'modulated reverb': 'img/pp/catalinbread-sinkhole.png',
+      'Bass wah': 'img/pp/dunlop-105q.png',
+      'Bubba Wah': 'img/Budda Wah.png',
+      'Crying Clyde Wah': 'img/pp/dunlop-cm95.png',
+      'Crying Wah': 'img/pp/dunlop-gcb95.png',
+      'Chief BD 2': 'img/pp/boss-bd2.png',
+      'Chief BD2': 'img/pp/boss-bd2.png',
+      'Chief OD1': 'img/pp/boss-od1.png',
+      'Exotic': 'img/pp/xotic-bb.png',
+      'Exotic Z Boost': 'img/pp/xotic-rcbooster.png',
+      'Facial Fuzz': 'img/pp/dunlop-jdf2.png',
+      'Green 808': 'img/pp/ibanez-ts808.png',
+      'Obsessive Drive': 'img/pp/fulltone-ocd.png',
+      'OD250': 'img/pp/dod-250.png',
+      'Rodent Drive': 'img/pp/proco-rat.png',
+      'Exotic Bass Z Boost': 'img/pp/xotic-bass-rcboosterv2.png',
+      'Microtubes B3K': 'img/pp/darkglass-b3k.png',
+      'Mind Hall': 'img/Lexicon224.png',
+      'Shimmer': 'img/pp/eventide-h9.png',
+      'Blossom (ST)': 'img/pp/strymon-bigsky.png',
+      'Poly Octaver': 'img/pp/ehx-micro-pog.png',
+      'Wham': 'img/pp/digitech-whammy.png',
+      'Chief OC2': 'img/pp/boss-oc2.png',
+      'Legendary 87 (M)': 'img/pp/ua-1176.png',
+      'Legendary 87 (ST)': 'img/pp/ua-1176.png',
+      'Opto Comp (M)': 'img/Opto Comp.png',
+      'Opto Comp (ST)': 'img/Opto Comp.png',
+      'Solid State Comp (M)': 'img/SSL Comp.png',
+      'Solid State Comp (ST)': 'img/SSL Comp.png',
+      'VCA Comp (M)': 'img/pp/mxr-m102.png',
+      'VCA Comp (ST)': 'img/pp/mxr-m102.png',
+      'Chief CE2W (ST)': 'img/pp/boss-ce2w.png',
+      'Chief DC2W (ST)': 'img/pp/boss-dc2w.png',
+      'Chorus 229T': 'img/pp/tc-2290p.png',
+      'Dream Chorus (ST)': 'img/pp/tc-thedreamscape.png',
+      'Dream Chorus': 'img/pp/tc-thedreamscape.png',
+      'MX Flanger': 'img/pp/mxr-m117r.png',
+      'MX Phase 95': 'img/pp/mxr-m290.png',
+      'MX Vibes': 'img/pp/mxr-m68.png',
+      'MX Vibe': 'img/pp/mxr-m68.png',
+      'Love Meat': 'img/pp/lovetone-meatball.png',
+      // Neural DSP's own effects: the nearest real device
+      'Adaptive Gate': 'img/pp/fortin-zuul.png',
+      'Utility Gate': 'img/pp/isp-decimator.png',
+      'Graphic 9': 'img/pp/mxr-m108s.png',
+      'Parametric 3': 'img/pp/empress-para-eq.png',
+      'Low-High Cut': 'img/pp/broughton-low-high-pass-filter.png',
+      'Volume': 'img/pp/ernie-ball-vp.png',
+      'Envelope Filter': 'img/pp/ehx-q-tron-plus.png',
+      'Doubler': 'img/pp/tc-mimiq.png',
+      'Transpose': 'img/pp/digitech-drop.png',
+      'Tremolo': 'img/pp/boss-tr2.png'
+    };
+
+const GATE_IMAGE = 'img/pp/fortin-zuul.png';
+
 let eqView = null;
 
 const state = {
@@ -465,10 +598,12 @@ const state = {
       presetSlots: { a1: -1, b1: -1, a2: -1, b2: -1 },
       library: { factory: [], user: [], irFactory: [], irUser: [], loaded: false, requested: false },
       exp: { preset: null, loaded: false, ranges: {}, bypass: {}, saveTimer: null, status: '', pending: null, queue: [] },
-      libBrowser: { q: '', source: 'all', type: 'all', instrument: 'all', tags: new Set() },
+      libBrowser: { mode: 'capture', q: '', irQ: '', source: 'all', irSource: 'all', version: 'all', type: 'all', instrument: 'all', tags: new Set() },
       tuner: { open: false, live: true, baseFrequency: 440, muted: false, logged: 0 },
       libraryBytes: [],
       libraryTimer: null,
+      libraryRx: null,      // the library reply: 'waiting' after the request, 'receiving' from its first packet, null otherwise
+      libraryTries: 0,      // requests for the current reading (an incomplete reply is asked for again)
       presetDirty: false,   // the Nano's own mark: the loaded preset has unsaved changes
       localEdit: false,     // a change the Nano does not mark (the cab's mic, position, level and filters), until Save or another preset
       ab: { active: false, side: 'B', A: null, B: null, preset: 0, busy: false },   // A/B compare
@@ -542,7 +677,7 @@ const blockSlotConfig = {
       return id => document.getElementById(id) || stubs.get(id) || (stubs.set(id, Object.assign(document.createElement('div'), { hidden: true })), stubs.get(id));
     })();
 
-const EDITOR_VERSION = '1.12.1';
+const EDITOR_VERSION = '1.18.0';
 
     function log() { /* replaced by pro/ui.js */ }
 
@@ -559,6 +694,10 @@ const gattWriteQueue = [];
 let gattWritePumpRunning = false;
 
 function writeC304(label, payload, coalesceKey = null) {
+      if (cap && cap.mode && !cap.bypass && !capAllowed(frameType(payload))) {   // the Nano is capturing: nothing may change it now
+        log('Capture mode – not sent: ' + label);
+        return Promise.resolve(false);
+      }
       return new Promise(resolve => {
         if (coalesceKey) {
           const pending = gattWriteQueue.find(job => job.key === coalesceKey);
@@ -602,6 +741,21 @@ async function pumpGattWriteQueue() {
 
 let connectBusy = false;
 
+const autoLink = { wanted: true, auto: false, timer: null, tries: 0, boardAlone: false };
+
+const autoLinkAvailable = () => Boolean(window.nanoWindow && typeof window.nanoWindow.autoConnect === 'function');
+
+function scheduleAutoConnect(ms) {
+      if (!autoLinkAvailable() || !autoLink.wanted || state.connected) return;
+      clearTimeout(autoLink.timer);
+      autoLink.timer = setTimeout(() => {
+        autoLink.timer = null;
+        if (!autoLink.wanted || state.connected || connectBusy) return;
+        autoLink.tries++;
+        window.nanoWindow.autoConnect();   // the app calls nanoConnectNow() as a gesture
+      }, ms);
+    }
+
 async function connectAll() {
       if (connectBusy || state.connected) {
         log('Connect ignored: ' + (state.connected ? 'already connected.' : 'a connection is being set up.'));
@@ -617,8 +771,15 @@ async function connectAll() {
       } finally {
         connectBusy = false;
         $('connectBtn').disabled = false;
+        if (state.connected) autoLink.tries = 0;
+        else scheduleAutoConnect(autoLink.boardAlone ? 10000 : autoLink.tries < 3 ? 2000 : autoLink.tries < 14 ? 5000 : 20000);   // (soon, then every 5 s for a minute, then every 20 s)
+        autoLink.auto = false;
       }
     }
+
+let chooseNext = false;
+
+    async function knownNano() { return null; /* disabled by build-core.js: the shell picks the pedal */ }
 
 async function connectNano() {
       try {
@@ -626,14 +787,16 @@ async function connectNano() {
         setStatus('Requesting device...');
         log('Requesting Nano Cortex...');
 
-        const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICE_UUIDS });
+        const known = await knownNano();
+        chooseNext = false;
+        const device = known ? known.device : await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: SERVICE_UUIDS });
         state.device = device;
         device.addEventListener('gattserverdisconnected', onDisconnected);
 
         setStatus('Connecting...');
-        log('Selected device: ' + (device.name || '(unnamed)'));
+        log('Selected device: ' + (device.name || '(unnamed)') + (known ? ' (known, connected directly)' : ''));
 
-        const server = await device.gatt.connect();
+        const server = known ? known.server : await device.gatt.connect();
         state.server = server;
         log('Connected. Searching A002/A003 for C304/C305...');
 
@@ -669,25 +832,41 @@ async function connectNano() {
         }
 
         if (!state.c304 || !state.c305) throw new Error('C304/C305 not found under A002/A003');
-        await state.c305.startNotifications();
+        try {
+          await state.c305.startNotifications();
+        } catch (err) {
+          if (/controller/i.test(device.name || '')) {
+            if (!autoLink.boardAlone) log('The controller does not hold the Nano yet - trying again every 10 s.');
+            autoLink.boardAlone = true;
+          }
+          throw err;
+        }
+        autoLink.boardAlone = false;
         state.c305.addEventListener('characteristicvaluechanged', onC305);
 
         state.connected = true;
+        try { localStorage.setItem('nanoLastDevice', device.id); } catch (err) { /* no storage */ }
         // "Nano Cortex Controller": the hardware controller passes everything on to the Nano.
         state.viaController = /controller/i.test(device.name || '');
+        showControllerMenu();
         setStatus(state.viaController ? 'Connected via controller' : 'Connected', true);
         log('C305 notifications enabled. Loading metadata and current preset state...');
       } catch (err) {
         log('Connect failed: ' + err.message);
-        setStatus('Disconnected');
+        setStatus(autoLink.boardAlone ? 'Controller is looking for the Nano' : 'Disconnected');
         // The list was closed without a device - often because the Nano was not in it: it only shows while nothing
         // else holds its one Bluetooth connection.
-        if (err && err.name === 'NotFoundError') {
+        if (err && err.name === 'NotFoundError' && !autoLink.auto) {   // (an automatic try says nothing: it tries again)
           showNotice('Nano not in the list?', 'The Nano shows up only while nothing else is connected to it.' + NL + NL +
             '• Close the Cortex Cloud app on your phone (or switch the phone’s Bluetooth off).' + NL +
             '• Close other tabs or windows with the editor, and the Nano Cortex Controller if it is on.' + NL +
             '• Wait about ten seconds and click Connect again.' + NL + NL +
             'If it still does not appear, switch the Nano off and on.');
+        }
+        // the direct try took the few seconds in which a click may open the list
+        if (err && err.name === 'SecurityError' && !autoLink.auto) {
+          chooseNext = true;
+          showNotice('Choose the Nano', 'The Nano did not answer directly. Click Connect again to choose it from the list.');
         }
       }
     }
@@ -738,10 +917,11 @@ function beginPresetLoad() {
         state.presetLoadTimer = null;
         log('Lade neue Preset-Daten (Refresh)...');
         requestCurrentPresetState();
-      }, 450);
+      }, 250);   // (was 450: the editor showed the preset before for that long; fast switching still loads only the last)
     }
 
 async function requestCurrentPresetState() {
+      state.stateAskedAt = Date.now();   // (a model chosen after this is not in its answer)
       if (state.stateTimer) clearTimeout(state.stateTimer);
       state.stateTimer = null;
       state.stateMode = 'current';
@@ -751,7 +931,15 @@ async function requestCurrentPresetState() {
 
 function onDisconnected() {
       state.connected = false;
+      scheduleAutoConnect(1500);   // Mac app: a lost link is taken up again (not after the user's Disconnect)
       state.viaController = false;
+      state.library.requested = false;   // read again on the next connection: Cortex Cloud may have changed it
+      state.libraryRx = null;
+      if (state.libraryTimer) clearTimeout(state.libraryTimer);
+      state.libraryTimer = null;
+      showControllerMenu();
+      ctlMessage(null);   // a backup or restore under way ends
+      fsLinkEnd();
       state.c304 = null;
       state.c305 = null;
       state.paramRefreshQueue = [];
@@ -771,12 +959,16 @@ function onDisconnected() {
       state.settingsAsked = false;
       clearLocalEdit();
       renderMutes();
-      setStatus('Disconnected');
+      setStatus(autoLink.boardAlone ? 'Controller is looking for the Nano' : 'Disconnected');
       log('Disconnected.');
     }
 
 function closeDeviceDialogs() {
+      capDisconnected();
       closeTuner(false);
+      if ($('orgOverlay')) { org.busy = false; $('orgOverlay').hidden = true; }
+      closeMetro(false);
+      auditionEnded('');
       closeExpPanel();
       closeFootswitches();
       closeLibraryBrowser();
@@ -794,7 +986,9 @@ function closeDeviceDialogs() {
 function onC305(event) {
       const data = new Uint8Array(event.target.value.buffer.slice(0));
       if (frameType(data) === MSG.TunerMetering) { handleTunerMetering(data); return; }
+      if (frameType(data) === 64 && capMeter(data)) return;   // capture meters (many per second, not logged)
       if (frameType(data) === MSG.ControllerSwitch) { controllerSwitch(data); return; }
+      if (ctlPacket(data)) return;
       log('RX C305: ' + hex(data.slice(0, 24)) + (data.length > 24 ? ' ...' : ''));
 
       if (data.length === 0) return;
@@ -811,15 +1005,13 @@ function onC305(event) {
 
       if (handleTypedMessage(data)) return;
 
+      if (libraryPacket(data)) return;
+
       if (isFEStreamPacket(data)) {
         // The last packet of a reply carries 0x80 in its second byte: the reply is parsed at once then (the timers
         // remain for a lost last packet).
         const last = (data[1] & 0x80) === 0x80;
-        if (state.stateMode === 'library') {
-          for (const b of data.slice(2)) state.libraryBytes.push(b);
-          if (state.libraryTimer) clearTimeout(state.libraryTimer);
-          state.libraryTimer = setTimeout(() => parseLibraryContent(state.libraryBytes), 1500);
-        } else if (state.stateMode === 'current') {
+        if (state.stateMode === 'current') {
           appendCurrentStatePayload(data);
           if (last) {
             if (state.stateTimer) clearTimeout(state.stateTimer);
@@ -863,6 +1055,7 @@ function parseBufferedCurrentState() {
       log('CURRENT STATE FULL HEX: ' + hex(bytes));
       log('CURRENT STATE FULL ASCII: ' + printableASCII(bytes));
       const fields = parseProtoFields(bytes);
+      if (capStateReply(fields)) { state.stateBytes = []; state.stateMode = 'idle'; return; }   // capture mode
 
       const captureSlot = fields[11] && fields[11][0] ? fields[11][0].value : 0;
 
@@ -901,6 +1094,19 @@ function parseBufferedCurrentState() {
         state.tuner.baseFrequency = Math.round(new DataView(Uint8Array.from(tunerFreq.raw).buffer).getFloat32(0, true)) || 440;
       }
       state.tuner.muted = Boolean(varintField(63, 0));
+      // 24 firmwareVersion ("2.3.0+05c36621"), 55 tempoIsGlobal, 56 tempo (float32), 61 externalMidiClockRunning
+      if (fields[24] && fields[24][0] && fields[24][0].wire === 2) metro.firmware = utf8(fields[24][0].raw);
+      const tempoField = fields[56] && fields[56][0];
+      if (tempoField && tempoField.wire === 5) {
+        const bpm = new DataView(Uint8Array.from(tempoField.raw).buffer).getFloat32(0, true);
+        if (bpm >= 20 && bpm <= 400 && !metro.editing) metro.tempo = Math.round(bpm * 10) / 10;
+      }
+      if (!metro.editing) metro.global = Boolean(varintField(55, 0));
+      metro.extClock = Boolean(varintField(61, 0));
+      metroRefresh();
+      // 64 captureAuditioningActive: the Nano ended the listening by itself (a preset change, its own controls)
+      // (65 irAuditioningActive for an IR)
+      if (audition.current && !varintField(isIrKind(audition.current.kind) ? 65 : 64, 0) && Date.now() - audition.startedAt > 2000) auditionEnded('The Nano ended the listening.');
       log('Current preset: ' + state.selectedPreset + (state.presetDirty ? ' (edited)' : ''));
       if ((!$('expOverlay').hidden || state.mc6.mixSlot >= 0) && (state.exp.preset !== state.selectedPreset || !state.exp.loaded)) requestExpAssignments();
 
@@ -974,11 +1180,19 @@ function parseBufferedCurrentState() {
         // (The cab settings reply is not: it can name another position than the preset plays - seen in a log.)
         const micCheck = cabMicLive.check;
         if (micCheck && parsedCabIR.mic && !cabMicLiveActive()) {
-          cabMicLive.check = null;
           const pos = parsedCabIR.position !== null ? parsedCabIR.position : 1;
           const took = sameName(parsedCabIR.mic, micCheck.mic) && pos === micCheck.position;
-          log('Cab mic in the state: ' + parsedCabIR.mic + ', position ' + pos + (took ? ' - as chosen' : ' - chosen was ' + micCheck.mic + ', position ' + micCheck.position));
-          if (!took) {
+          log('Cab mic in the state (' + state.currentIR.fullName + ', slot ' + state.cabIR.stateSlot + '): ' + parsedCabIR.mic + ', position ' + pos +
+            (took ? ' - as chosen' : ' - chosen was ' + micCheck.mic + ', position ' + micCheck.position));
+          // the Nano may still be switching the IR: read twice more before saying it did not take it, and keep
+          // showing the choice meanwhile
+          if (!took && (micCheck.reads || 0) < 2) {
+            micCheck.reads = (micCheck.reads || 0) + 1;
+            state.cabIR.mic = micCheck.mic;
+            state.cabIR.position = micCheck.position;
+            setTimeout(() => { state.protocol.skipFXModelApply = true; requestCurrentPresetState(); }, micCheck.reads === 1 ? 1000 : 2000);
+          } else cabMicLive.check = null;
+          if (!took && !cabMicLive.check) {
             state.cabIR.mic = parsedCabIR.mic;
             state.cabIR.position = pos;
             toast('The Nano plays ' + parsedCabIR.mic + ', position ' + pos + ' – it did not take ' + micCheck.mic + ', position ' + micCheck.position + '.', 'error', 8000);
@@ -1014,9 +1228,12 @@ function parseBufferedCurrentState() {
       requestCabIRParamRefresh();
       queueFXParamRefreshes();
 
+      // Through the controller its footswitches and FX presets first: the controller answers those itself within a
+      // second, the library takes the Nano several seconds (it waits until they are through, see there).
+      if (state.viaController && !fsLink.asked) setTimeout(fsLinkStart, 300);
       if (!state.library.requested) {
         state.library.requested = true;
-        setTimeout(requestLibraryContent, 2500);
+        setTimeout(requestLibraryContent, 1200);
       }
     }
 
@@ -1068,6 +1285,25 @@ function applyFXModelsFromCurrentState(fields) {
           return;
         }
 
+        // Only reset params if the model actually changed — otherwise we'd
+        // wipe the real current values (which haven't been read back yet)
+        // with defaults, causing a visible flash every time the state is
+        // re-read for unrelated reasons (cab mic change, capture toggle, etc.)
+        // A model chosen here a moment ago that the Nano does not report: it did not take it (some combinations it
+        // refuses, e.g. a second pitch effect next to Transpose) - say so instead of silently going back.
+        const asked = modelAsked[blockKey];
+        if (asked && (Date.now() - asked.at > 8000 || asked.preset !== state.selectedPreset)) delete modelAsked[blockKey];
+        else if (asked && !(state.stateAskedAt > asked.at)) {
+          // a report asked for before the model was chosen: it cannot know it yet - not judged, and the choice stays
+          log(block.title + ': state from before choosing ' + asked.name + ' - not taken as the answer');
+          return;
+        } else if (asked) {
+          delete modelAsked[blockKey];
+          if (asked.name !== model.name) {
+            log(block.title + ': the Nano did not take ' + asked.name + ' - it kept ' + model.name);
+            toast('The Nano did not take ' + asked.name + ' in ' + block.title + ' - it kept ' + model.name + '.', 'info', 5000);
+          }
+        }
         // Reset parameters when the model or preset changes. For unrelated
         // state re-reads, preserve current values and try the per-preset cache
         // only when this block has not been read for the selected preset.
@@ -1234,6 +1470,7 @@ function cabIRNormalizedToValue(key, normalized) {
 async function selectCaptureSlot(slotNumber) {
       const slot = Number(slotNumber);
       if (!Number.isFinite(slot) || slot < 0 || slot > 25) return;
+      rot.quietUntil = Date.now() + 700;
 
       state.capture.selectedSlot = slot;
       state.capture.on = slot !== 0;
@@ -1255,6 +1492,7 @@ async function selectCaptureSlot(slotNumber) {
 async function selectCabIRSlot(slotNumber) {
       const slot = Number(slotNumber);
       if (!Number.isFinite(slot) || slot < 0 || slot > 5) return;
+      rot.quietUntil = Date.now() + 700;
 
       state.cabIR.selectedSlot = slot;
       state.cabIR.on = slot !== 0;
@@ -1503,7 +1741,7 @@ async function runCabMicLive() {
       const want = state.cabIR.micPending;
       if (!want || !state.connected || !state.cabIR.on) return;
       const slot = state.cabIR.stateSlot;
-      if (!(slot >= 1 && slot <= 5) || !sameName(state.irNames.get(slot), want.cab)) {
+      if (!cabInSlot(slot, want.cab)) {
         log('Cab mic/position: "' + want.cab + '" is in no cab slot of this preset - it is written with Save.');
         return;
       }
@@ -1523,6 +1761,14 @@ async function runCabMicLive() {
 
 const cabMicLiveActive = () => Boolean(cabMicLive.timer || cabMicLive.busy);
 
+function cabInSlot(slot, cab) {
+      if (!(slot >= 1 && slot <= 5)) return false;
+      if (sameName(state.irNames.get(slot), cab)) return true;
+      if (!sameName(state.currentIR.shortName, cab)) return false;
+      log('Cab slot ' + slot + ' is listed as "' + (state.irNames.get(slot) || '') + '", the preset plays "' + state.currentIR.shortName + '" from it - written there.');
+      return true;
+    }
+
 async function storeCabMic() {
       clearTimeout(cabMicLive.timer); cabMicLive.timer = null;   // the save writes it now
       if (cabMicLive.busy) await waitUntil(() => !cabMicLive.busy, 8000);
@@ -1534,7 +1780,7 @@ async function storeCabMic() {
       if (!item) return { problem: 'the cab “' + want.cab + '” was not found in the Nano\'s library, so ' + what + ' was not stored' };
       // the slot of this preset if it holds this cab - else the cab comes from the library and needs a slot
       let slot = state.cabIR.stateSlot;
-      if (!(slot >= 1 && slot <= 5) || !sameName(state.irNames.get(slot), want.cab)) slot = await chooseSlot('cab', want.cab + ' (' + what + ')');
+      if (!cabInSlot(slot, want.cab)) slot = await chooseSlot('cab', want.cab + ' (' + what + ')');
       if (!slot) return { problem: 'no cab slot was chosen, so ' + what + ' was not stored' };
 
       if (cabMicLive.written !== want || cabMicLive.writtenSlot !== slot) {   // not already in the slot from the click
@@ -1819,10 +2065,22 @@ function normalizedToParamValue(param, normalized) {
         return Math.max(0, Math.min(maxIndex, Math.round(n * maxIndex)));
       }
 
-      const scaled = meta.normalizedReversePower
-        ? 1 - Math.pow(1 - n, meta.normalizedReversePower)
-        : Math.pow(n, meta.normalizedPower || 1);
-      return roundToStep(meta.min + (scaled * (meta.max - meta.min)), meta.step || 0.1);
+      return roundToStep(meta.min + (travelToShare(meta, n) * (meta.max - meta.min)), meta.step || 0.1);
+    }
+
+function travelToShare(meta, n) {
+      // A fitted curve (editor/patches, from #31) wins over the skew until both are checked on a Nano.
+      const v = clamp(n, 0, 1);
+      if (meta.normalizedReversePower) return 1 - Math.pow(1 - v, meta.normalizedReversePower);
+      if (meta.normalizedPower) return Math.pow(v, meta.normalizedPower);
+      return meta.skew ? Math.pow(v, 1 / meta.skew) : v;
+    }
+
+function shareToTravel(meta, share) {
+      const s = clamp(share, 0, 1);
+      if (meta.normalizedReversePower) return 1 - Math.pow(1 - s, 1 / meta.normalizedReversePower);
+      if (meta.normalizedPower) return Math.pow(s, 1 / meta.normalizedPower);
+      return meta.skew ? Math.pow(s, meta.skew) : s;
     }
 
 function parseSelectedCaptureState(payload) {
@@ -2063,6 +2321,16 @@ const MSG = {
       RetrieveExpAssignmentsResponse: 61,
       SaveExpAssignmentsRequest: 62,
       TunerMetering: 128,
+      TempoScreen: 145,
+      Selector: 28,
+      AuditioningEnableDisableRequest: 148,
+      AuditioningEnableDisableResponse: 149,
+      AuditioningListenCaptureRequest: 150,
+      AuditioningListenCaptureResponse: 151,
+      DeleteLibraryItemsRequest: 82,
+      DeleteLibraryItemsResponse: 83,
+      AuditioningListenIrRequest: 158,
+      AuditioningListenIrResponse: 159,
       RetrieveSettingsRequest: 65,
       RetrieveSettingsResponse: 66,
       UpdateSettingsRequest: 67,
@@ -2139,10 +2407,330 @@ async function selectPreset(preset) {
       beginPresetLoad();
     }
 
+const CAPM = { SaveCapture: 13, SaveCaptureResponse: 14, Value: 26, Button: 27, StartTraining: 39, TrainingProgress: 40,
+                   TrainingDone: 41, AbCompare: 42, CompareCab: 43, Metering: 64, StartCapture: 73, CaptureStateRequest: 87,
+                   CaptureState: 88, CaptureSanity: 93, StateResponse: 2 };
+
+const CAP_CONNECT = [
+      ['Guitar into <b>INPUT 1</b>.', '<b>OUTPUT 2R (CAPTURE OUT)</b> to the amp’s input.',
+       'A mic in front of the speaker into <b>CAPTURE INPUT</b>: about 1 inch (2–3 cm) from the grill, at the centre of the cone, straight on. Dynamic mics plug in directly, condenser mics need a preamp. Towards the edge = fewer mids, closer = more bass, angled (45°) = warmer.',
+       'Headphones into <b>HP OUTPUT</b>, or a monitor on <b>OUTPUT 1L</b>.'],
+      ['Guitar into <b>INPUT 1</b>.', '<b>OUTPUT 2R (CAPTURE OUT)</b> to the amp’s input.',
+       '<b>Reactive load box:</b> the amp’s speaker output into the load box, its line output into <b>CAPTURE INPUT</b>. Or the amp’s <b>D.I. out</b> into CAPTURE INPUT – with a cabinet still connected to the amp.',
+       'Headphones into <b>HP OUTPUT</b>, or a monitor on <b>OUTPUT 1L</b>.'],
+      ['Guitar into <b>INPUT 1</b>.', '<b>OUTPUT 2R (CAPTURE OUT)</b> to the pedal’s input.', 'The pedal’s output into <b>CAPTURE INPUT</b>.',
+       'Headphones into <b>HP OUTPUT</b>, or a monitor on <b>OUTPUT 1L</b>.'],
+    ];
+
+var cap = {   // (var: writeC304 above looks at it)
+      mode: false, step: 0, type: 0, saveType: 1, gain: 0, level: 0, progress: 0, cab: 0, source: false, auto: 0,
+      autoTimer: null, saving: false, saveSlot: 0, slotPicking: false, chosenSlot: 0, name: '', leaving: false,
+      exitsNeeded: 1, exitsSent: 0, contextSeen: false, lastMeterAt: 0, peak: [0, 0], peakAt: [0, 0], meterMax: [0, 0],
+      checkTimer: null, bypass: false, stopArmed: 0
+    };
+
+function capAllowed(type) {
+      return type === null || type === 1 || type === 30 || type === 65 || type === 76 || type === 91;
+    }
+
+function pbVar(field, value) { return [field << 3, ...encodeVarint(value)]; }
+
+function pbBytes(field, bytes) { return [field << 3 | 2, ...encodeVarint(bytes.length), ...bytes]; }
+
+function capSend(label, type, payload = []) {
+      cap.bypass = true;
+      const done = writeC304('Capture: ' + label, buildFrame(payload, type), type === CAPM.Value ? 'capValue' + payload[1] : null);
+      cap.bypass = false;
+      return done;
+    }
+
+function capDb(which, raw) {
+      const p = Math.max(0, Math.min(255, raw)) / 255;
+      return which === 0 ? 24 * Math.pow(p, 1 / 0.9) : -60 + 72 * Math.pow(p, 1 / 3.8018);
+    }
+
+function capDbText(which, raw) {
+      const db = capDb(which, raw);
+      return (db < 0 ? '−' : '') + Math.abs(db).toFixed(1) + ' dB';
+    }
+
+function capRender() {
+      const steps = $('capSteps').children;
+      for (let i = 0; i < 4; i++) {
+        steps[i].className = i + 1 === cap.step ? 'on' : i + 1 < cap.step ? 'done' : '';
+        steps[i].textContent = i + 1 < cap.step ? ['Connect', 'Levels', 'Capture', 'Compare & save'][i] : (i + 1) + ' · ' + ['Connect', 'Levels', 'Capture', 'Compare & save'][i];
+      }
+      document.querySelectorAll('#capOverlay .cw-page').forEach(p => { p.hidden = Number(p.dataset.step) !== cap.step; });
+      document.querySelectorAll('#capTypes button').forEach(b => b.classList.toggle('on', Number(b.dataset.type) === cap.type));
+      $('capConnect').innerHTML = CAP_CONNECT[cap.type].map(s => '<li>' + s + '</li>').join('');
+      $('capGain').value = cap.gain;
+      $('capLevel').value = cap.level;
+      $('capGainVal').textContent = capDbText(0, cap.gain);
+      $('capLevelVal').textContent = capDbText(1, cap.level);
+      document.querySelectorAll('#capOverlay [data-cabs] button').forEach(b => b.classList.toggle('on', Number(b.dataset.cab) === cap.cab));
+      document.querySelectorAll('#capListen button').forEach(b => b.classList.toggle('on', (b.dataset.listen === '1') === cap.source));
+      document.querySelectorAll('#capAuto button').forEach(b => b.classList.toggle('on', Number(b.dataset.auto) === cap.auto));
+      document.querySelectorAll('#capSaveTypes button').forEach(b => b.classList.toggle('on', Number(b.dataset.save) === cap.saveType));
+      $('capProgTitle').textContent = 'Capturing · ' + cap.progress + ' %';
+      $('capProg').style.width = cap.progress + '%';
+      const left = (100 - cap.progress) * 2.3;   // (on the Nano: about 3.5 minutes from the start to done)
+      $('capProgLeft').textContent = cap.progress <= 0 ? 'Starting …' : left >= 90 ? 'About ' + Math.round(left / 60) + ' minutes left.' : 'Almost done.';
+      const nameOk = $('capName').value.trim().length >= 4 && !cap.saving;
+      $('capSaveLib').disabled = !nameOk;
+      $('capSaveSlot').disabled = !nameOk || (cap.slotPicking && !cap.chosenSlot);
+      $('capSaveSlot').textContent = cap.slotPicking ? (cap.chosenSlot ? 'Save into ' + (Math.floor((cap.chosenSlot - 1) / 5) + 1) + '–' + ((cap.chosenSlot - 1) % 5 + 1) : 'Choose a slot') : 'Save to slot …';
+      $('capSlotCard').hidden = !cap.slotPicking;
+      $('capSaveCard').hidden = cap.slotPicking;
+      if (cap.slotPicking) {
+        $('capSlots').innerHTML = '';
+        for (let s = 1; s <= 25; s++) {
+          const b = document.createElement('button');
+          b.textContent = (Math.floor((s - 1) / 5) + 1) + '–' + ((s - 1) % 5 + 1) + '  ' + (state.captureNames.get(s) || '–');
+          b.title = b.textContent;
+          b.classList.toggle('on', s === cap.chosenSlot);
+          b.onclick = () => { cap.chosenSlot = s; capRender(); };
+          $('capSlots').appendChild(b);
+        }
+      }
+      if (cap.saving) capMessage4('Saving …');
+    }
+
+function capMessage4(text) { capMsg(4, text); }
+
+function capMsg(step, text) {
+      document.querySelectorAll('#capOverlay [data-msg]').forEach(m => { if (Number(m.dataset.msg) === step) m.textContent = text || ''; });
+    }
+
+function capClearMessages() { document.querySelectorAll('#capOverlay [data-msg]').forEach(m => { m.textContent = ''; }); }
+
+function capShow(step, message) {
+      const opening = $('capOverlay').hidden;
+      if (opening) {
+        $('capName').value = '';
+        cap.slotPicking = false;
+        cap.chosenSlot = 0;
+        capClearMessages();
+      }
+      cap.step = step;
+      if (step !== 4) { capAutoStop(); cap.auto = 0; }
+      $('capOverlay').hidden = false;
+      capRender();
+      if (message) capMsg(step, message);
+    }
+
+function capCloseDialog() {
+      $('capOverlay').hidden = true;
+      capAutoStop();
+      cap.step = 0;
+    }
+
+function capCheckLater(ms) {
+      clearTimeout(cap.checkTimer);
+      cap.checkTimer = setTimeout(capCheck, ms);
+    }
+
+function capMetersRunning() { return Date.now() - cap.lastMeterAt < 1200; }
+
+function capCheck() {
+      if (!cap.mode) return;
+      if (cap.contextSeen || !cap.leaving) { requestCurrentPresetState(); return; }
+      if (cap.exitsSent < cap.exitsNeeded || (capMetersRunning() && cap.exitsSent < 4)) {
+        cap.exitsSent++;
+        capExitStep();
+        capCheckLater(900);
+        return;
+      }
+      capLeft();
+    }
+
+function capExitStep() { return capSend('Exit', CAPM.Button, [0x20, 0x01]); }
+
+function capEntered(why) {
+      if (cap.mode) return;
+      log('Capture: the Nano is in capture mode (' + why + ') – the editor stays quiet');
+      cap.mode = true;
+      cap.leaving = false;
+      cap.progress = 0;
+      cap.source = false;
+      if ($('capOverlay').hidden) capShow(2);
+    }
+
+function capLeft() {
+      if (!cap.mode && $('capOverlay').hidden) return;
+      log('Capture: the Nano is back in play mode (meters seen up to ' + cap.meterMax.join(' / ') + ')');
+      const wasLeaving = cap.leaving;
+      cap.mode = cap.leaving = cap.saving = false;
+      clearTimeout(cap.checkTimer);
+      if (!$('capOverlay').hidden) {
+        capCloseDialog();
+        if (!wasLeaving) toast('The Nano left capture mode.', 'info');
+      }
+      beginPresetLoad();
+    }
+
+function capAutoStop() {
+      if (cap.autoTimer) clearInterval(cap.autoTimer);
+      cap.autoTimer = null;
+    }
+
+function capDone(text) {
+      cap.saving = false;
+      $('capDoneTitle').textContent = cap.name + ' is saved';
+      $('capDoneText').textContent = text;
+      capShow(5);
+      requestLibraryContent();
+    }
+
+function capStateReply(fields) {
+      const value = n => fields[n] && fields[n][0] ? fields[n][0].value : 0;
+      if (value(23) !== 1) {
+        if (!cap.mode) return false;
+        if (cap.contextSeen) { capLeft(); return false; }
+        return true;
+      }
+      if (!cap.contextSeen) log('Capture: the Nano reports capture mode in its state (field 23)');
+      cap.contextSeen = true;
+      cap.gain = Math.min(255, value(3));
+      cap.level = Math.min(255, value(4));
+      capEntered('state');
+      if (cap.leaving) {
+        if (++cap.exitTries > 4) {
+          cap.leaving = false;
+          capShow(2, 'The Nano stays in capture mode – press EXIT on the Nano.');
+          return true;
+        }
+        capExitStep();
+        capCheckLater(700);
+        return true;
+      }
+      if (!$('capOverlay').hidden) capRender();
+      return true;
+    }
+
+function capMeter(data) {
+      const f = framePayloadFields(data);
+      const which = f[3] && f[3][0] ? f[3][0].value : 0, value = f[4] && f[4][0] ? f[4][0].value : 0;
+      if (which > 1) return false;   // (2 = the expression pedal)
+      cap.lastMeterAt = Date.now();
+      if (value > cap.meterMax[which]) { cap.meterMax[which] = value; log('Capture meter ' + (which ? 'OUTPUT' : 'IN') + ': new highest value ' + value); }
+      if (!cap.mode && !cap.leaving) { capEntered('levels from the Nano'); requestCurrentPresetState(); }
+      const v = Math.max(0, Math.min(255, value)), pct = v / 255 * 100;
+      const fill = $('capFill' + which), peak = $('capPeak' + which);
+      fill.style.width = pct + '%';
+      fill.classList.toggle('hot', v > 240);
+      const now = Date.now();
+      if (v >= cap.peak[which] || now - cap.peakAt[which] > 1500) { cap.peak[which] = v; cap.peakAt[which] = now; peak.style.left = pct + '%'; }
+      return true;
+    }
+
+function capMessage(type, data) {
+      if (![CAPM.Button, CAPM.TrainingProgress, CAPM.TrainingDone, CAPM.CaptureState, CAPM.CaptureSanity, CAPM.AbCompare,
+            CAPM.CompareCab, CAPM.SaveCaptureResponse, MSG.SetCaptureSlotContentResponse, CAPM.Value, CAPM.StateResponse].includes(type)) return false;
+      const f = framePayloadFields(data);
+      const value = n => f[n] && f[n][0] ? f[n][0].value : 0;
+      switch (type) {
+        case CAPM.StateResponse:   // (a small, complete one: in capture mode)
+          if (data[1] !== 0xC0 || !cap.mode) return false;
+          return capStateReply(f);
+        case CAPM.Button: {
+          const button = value(3);
+          log('Capture: ' + ['EXIT', 'CAPTURE', 'SAVE'][button] + ' pressed on the Nano');
+          if (button === 1) { capEntered('CAPTURE on the Nano'); requestCurrentPresetState(); }
+          else if (button === 2) { if (cap.mode) capMsg(cap.step, 'Saving on the Nano itself: choose the slot with its knobs, hold SAVE to confirm.'); }
+          else if (cap.mode && !cap.leaving) {
+            if (cap.step >= 3 && cap.step < 5) { cap.progress = 0; capShow(2); capCheckLater(400); }
+            else { cap.leaving = true; cap.exitsNeeded = cap.exitsSent = 1; capCloseDialog(); capCheckLater(1500); }
+          }
+          return true;
+        }
+        case CAPM.TrainingProgress: {   // 0-255 (Cortex Cloud shows value / 255; seen on the Nano: done after ~220)
+          const percent = Math.min(100, Math.floor(value(3) * 100 / 255)), changed = percent !== cap.progress;
+          cap.progress = percent;
+          capEntered('capturing');
+          if (changed) log('Capture: ' + percent + ' % (' + value(3) + ')');
+          if (cap.step !== 3) capShow(3); else capRender();
+          return true;
+        }
+        case CAPM.TrainingDone:
+          log('Capture: done – compare and save');
+          cap.progress = 100;
+          cap.source = false;
+          capSend('state request', CAPM.CaptureStateRequest);
+          capShow(4);
+          $('capName').focus();
+          return true;
+        case CAPM.CaptureState: {
+          const step = value(3);
+          cap.progress = Math.min(100, Math.floor(value(4) * 100 / 255));
+          cap.source = value(7) === 1;
+          cap.cab = value(8);
+          log('Capture state: step ' + step + ', ' + cap.progress + ' %, listening to the ' + (cap.source ? 'original' : 'capture') + ', cab ' + cap.cab);
+          if (step === 1) capShow(2); else if (step === 2) capShow(3); else if (step === 3 && cap.step !== 5) capShow(4); else capRender();
+          return true;
+        }
+        case CAPM.CaptureSanity: {
+          const status = value(3);
+          log('Capture: signal check ' + status);
+          if (status === 0) capShow(2, 'No signal, or it was too low. Check the cables and raise Capture In, then start again.');
+          else if (status === 1) capShow(2, 'The signal was too hot. Turn BOOST off or the amp’s / pedal’s output down, then start again.');
+          return true;
+        }
+        case CAPM.AbCompare: cap.source = value(3) === 1; capRender(); return true;
+        case CAPM.CompareCab: cap.cab = value(3); capRender(); return true;
+        case CAPM.SaveCaptureResponse: {
+          const status = value(3);
+          log('Capture saved into the Nano’s library (status ' + status + ')');
+          if (!cap.saving) { requestLibraryContent(); return true; }   // (Cortex Cloud saved one)
+          if (status !== 1) {
+            cap.saving = false;
+            const why = f[5] && f[5][0] && f[5][0].raw ? new TextDecoder().decode(new Uint8Array(f[5][0].raw)) : '';
+            capShow(4, 'The Nano did not save the capture' + (why ? ' (' + why + ')' : '') + '.');
+            return true;
+          }
+          const id = f[4] && f[4][0] && f[4][0].raw ? Array.from(f[4][0].raw) : null;
+          if (cap.saveSlot && id) {
+            capSend('into slot ' + cap.saveSlot, MSG.SetCaptureSlotContentRequest, [...pbVar(3, cap.saveSlot - 1), ...pbBytes(5, id)]);
+            return true;
+          }
+          capDone('My Neural Captures' + (cap.saveSlot ? ' – not loaded into the slot (no id in the Nano’s answer)' : ''));
+          return true;
+        }
+        case MSG.SetCaptureSlotContentResponse: {
+          if (!cap.saving) return false;
+          const ok = value(3) === 1, s = cap.saveSlot;
+          capDone('My Neural Captures' + (ok ? ' · capture bank ' + (Math.floor((s - 1) / 5) + 1) + ', slot ' + ((s - 1) % 5 + 1) : ' (the slot was not changed)'));
+          if (ok) beginPresetLoad();
+          return true;
+        }
+        case CAPM.Value:
+          if (value(5) !== 1) return false;
+          if (value(3) === 1) cap.level = value(4); else cap.gain = value(4);
+          log('Capture: IN ' + cap.gain + ', OUTPUT ' + cap.level + ' (set on the Nano or in an app)');
+          capEntered('capture value');
+          capRender();
+          return true;
+      }
+      return false;
+    }
+
+function capDisconnected() {
+      if (!cap.mode && $('capOverlay').hidden) return;
+      cap.mode = cap.leaving = cap.saving = false;
+      clearTimeout(cap.checkTimer);
+      capCloseDialog();
+    }
+
 function handleTypedMessage(data) {
       const type = frameType(data);
+      if (capMessage(type, data)) return true;
+
+      if (type === MSG.Selector) {
+        handleSelector(data);
+        return true;
+      }
 
       if (type === MSG.SetPresetSlotsRequest) {
+        rot.quietUntil = Date.now() + 1500;   // (the capture that comes with a preset change is no turning)
         // Preset changed on the device (footswitch, knob) - mirror the app: update,
         // acknowledge, then re-read the state.
         const fields = framePayloadFields(data);
@@ -2222,6 +2810,25 @@ function handleTypedMessage(data) {
         return true;
       }
 
+      if (type === MSG.TempoScreen) {
+        handleTempoScreen(data);
+        return true;
+      }
+
+      if (type === MSG.DeleteLibraryItemsResponse) {   // { 3: status (1 = success), 4: message }
+        const fields = framePayloadFields(data);
+        const ok = fields[3] && fields[3][0] && fields[3][0].value === 1;
+        const message = fields[4] && fields[4][0] && fields[4][0].wire === 2 ? utf8(fields[4][0].raw) : '';
+        log('RX delete reply: ' + (ok ? 'deleted' : 'NOT deleted') + (message ? ' "' + message + '"' : '') + ' ' + hex(data));
+        if (org.waiting) { const done = org.waiting; org.waiting = null; done({ ok, message }); }
+        return true;
+      }
+
+      if (type === MSG.AuditioningListenCaptureResponse || type === MSG.AuditioningListenIrResponse || type === MSG.AuditioningEnableDisableResponse) {
+        handleAuditionResponse(type, data);
+        return true;
+      }
+
       if (type === MSG.TunerMode) {
         // Tuner switched on/off on the device itself (footswitch).
         const fields = framePayloadFields(data);
@@ -2279,15 +2886,18 @@ async function renamePresetTo(preset, entered) {
       return null;
     }
 
-function requestLibraryContent() {
+function requestLibraryContent(retry) {
       if (!state.connected) return;
-      if (state.stateMode !== 'idle' || state.pendingParamBlock) {
-        setTimeout(requestLibraryContent, 1000);
+      // (not while the controller answers in several packets either: those are not told apart from the library's)
+      if (state.stateMode !== 'idle' || state.pendingParamBlock || state.libraryRx || ctl.waiter || fsLink.syncing) {
+        setTimeout(() => requestLibraryContent(retry), 250);
         return;
       }
 
+      state.libraryTries = retry ? state.libraryTries + 1 : 1;
       state.stateMode = 'library';
       state.libraryBytes = [];
+      state.libraryRx = 'waiting';
       // { 3: includeFactoryCaptures, 4: includeFactoryImpulseResponses, 5: includeUserCaptures, 6: includeUserImpulseResponses }
       writeC304('Library content request', buildFrame([0x18, 0x01, 0x20, 0x01, 0x28, 0x01, 0x30, 0x01], MSG.RetrieveLibraryContentRequest));
 
@@ -2295,14 +2905,81 @@ function requestLibraryContent() {
       // packet comes only once the Nano has sent the whole reply (about 3.3 s for 27 KB) - after 4 s the reply was
       // taken for something else and lost.
       setTimeout(() => {
-        if (state.stateMode !== 'library' || state.libraryBytes.length !== 0) return;
-        state.stateMode = 'idle';
+        if (state.libraryRx !== 'waiting') return;
+        state.libraryRx = null;
+        if (state.stateMode === 'library') state.stateMode = 'idle';
         log('Library content: no reply');
       }, state.viaController ? 15000 : 4000);
     }
 
+function libraryPacket(data) {
+      if (!state.libraryRx || data.length < 3 || data[1] === 0xC0) return false;
+      const first = (data[1] & 0x40) !== 0, last = (data[1] & 0x80) !== 0;
+      if (state.libraryRx === 'waiting') {
+        if (!first) return false;
+        state.libraryRx = 'receiving';
+        state.libraryBytes = [];
+      } else if (first) {
+        // a new long reply: the last packet of the library got lost
+        finishLibrary(false);
+        return false;
+      }
+      for (const b of data.slice(2)) state.libraryBytes.push(b);
+      if (state.libraryTimer) clearTimeout(state.libraryTimer);
+      state.libraryTimer = null;
+      if (last) finishLibrary(true);
+      else state.libraryTimer = setTimeout(() => finishLibrary(false), 5000);   // only if the last packet got lost
+      return true;
+    }
+
+function protoComplete(bytes) {
+      let i = 0;
+      while (i < bytes.length) {
+        const tag = readVarint(bytes, i);
+        if (!tag) return false;
+        i = tag.next;
+        const wire = tag.value & 7;
+        if (wire === 0) { const v = readVarint(bytes, i); if (!v) return false; i = v.next; }
+        else if (wire === 2) { const len = readVarint(bytes, i); if (!len) return false; i = len.next + len.value; }
+        else if (wire === 1) i += 8;
+        else if (wire === 5) i += 4;
+        else return false;
+      }
+      return i === bytes.length;
+    }
+
+function finishLibrary(lastSeen) {
+      if (state.libraryTimer) clearTimeout(state.libraryTimer);
+      state.libraryTimer = null;
+      state.libraryRx = null;
+      const bytes = state.libraryBytes;
+      const n = bytes.length;
+      const typed = n >= 4 && bytes[n - 4] === MSG.RetrieveLibraryContentResponse && !bytes[n - 3] && !bytes[n - 2] && !bytes[n - 1];
+      const complete = lastSeen && typed && protoComplete(bytes.slice(0, n - 4));
+      if (!complete) {
+        log('Library content incomplete (' + n + ' bytes' + (lastSeen ? '' : ', last packet missing') + ')' +
+          (state.libraryTries < 3 ? ' - asking again' : ' - showing what came'));
+        if (state.libraryTries < 3) {
+          state.libraryBytes = [];
+          if (state.stateMode === 'library') state.stateMode = 'idle';
+          setTimeout(() => requestLibraryContent(true), 500);
+          return;
+        }
+      } else {
+        log('Library content: ' + n + ' bytes, complete');
+      }
+      parseLibraryContent(bytes);
+    }
+
 function utf8(bytes) {
       return new TextDecoder().decode(new Uint8Array(bytes));
+    }
+
+function captureVersionOf(field) {
+      if (!field || !field[0]) return '1';
+      const raw = field[0].wire === 2 ? utf8(field[0].raw).trim() : String(field[0].value ?? '');
+      const digits = raw.match(/\d+/);
+      return digits ? digits[0] : (raw || '1');
     }
 
 function parseLibraryContent(bytes) {
@@ -2326,6 +3003,7 @@ function parseLibraryContent(bytes) {
             index,
             name: text(2),
             type: text(6) || 'default',
+            version: captureVersionOf(record[12]),
             tags: (record[7] || []).filter(t => t.wire === 2).map(t => utf8(t.raw).trim()).filter(Boolean),
             instrument: text(10),
             author: author[2] && author[2][0] ? utf8(author[2][0].raw).trim() : '',
@@ -2350,10 +3028,15 @@ function parseLibraryContent(bytes) {
       };
       state.libraryBytes = [];
       log('Capture library: ' + state.library.factory.length + ' factory, ' + state.library.user.length + ' user captures');
+      const versions = {};
+      state.library.factory.concat(state.library.user).forEach(item => { versions[item.version] = (versions[item.version] || 0) + 1; });
+      log('Capture versions: ' + (Object.keys(versions).sort().map(v => 'V' + v + ' ' + versions[v]).join(', ') || 'none'));
       log('Cab/IR library: ' + state.library.irFactory.length + ' factory, ' + state.library.irUser.length + ' user IRs');
       renderShared();   // what each shared preset needs: on the Nano or not
       renderCaptureIR();
       if (!$('libraryOverlay').hidden) renderLibraryBrowser();
+      renderOrganizer();
+      if (state.viaController) setTimeout(fsLinkStart, 100);   // the controller's footswitches and FX presets
     }
 
 async function loadLibraryCapture(kind, index) {
@@ -2620,6 +3303,7 @@ function filterLibrary(entries, skip = null) {
       const q = f.q.trim().toLowerCase();
       return entries.filter(item =>
         (skip === 'source' || f.source === 'all' || item.kind === f.source) &&
+        (skip === 'version' || f.version === 'all' || item.version === f.version) &&
         (skip === 'type' || f.type === 'all' || captureTypeInfo(item.type).key === f.type) &&
         (skip === 'instrument' || f.instrument === 'all' || item.instrument === f.instrument) &&
         (skip === 'tags' || !f.tags.size || f.tags.has(item.groupKey)) &&
@@ -2642,6 +3326,14 @@ function renderChipRow(id, label, chips) {
 
 function renderLibraryBrowser() {
       const f = state.libBrowser;
+      const ir = f.mode === 'ir';
+      const panel = $('libraryOverlay');
+      panel.querySelector('.dlg-title').textContent = ir ? 'Cab / IR Library' : 'Capture Library';
+      panel.querySelector('.tuner-head .fx-icon').style.setProperty('--icon', 'var(--ico-' + (ir ? 'cab' : 'capture') + ')');
+      panel.querySelector('.lib-panel').setAttribute('aria-label', ir ? 'Cab / IR library' : 'Capture library');
+      $('librarySearch').placeholder = ir ? 'Search name …' : 'Search name, tag, author …';
+      ['libVersion', 'libTypes', 'libInstruments', 'libTags'].forEach(id => { $(id).hidden = ir; });
+      if (ir) { renderIrBrowser(); return; }
       const entries = libraryEntries();
       const set = change => { Object.assign(f, change); renderLibraryBrowser(); };
 
@@ -2651,6 +3343,12 @@ function renderLibraryBrowser() {
         { text: 'Factory', count: bySource.filter(i => i.kind === 'factory').length, active: f.source === 'factory', onClick: () => set({ source: 'factory' }) },
         { text: 'User', count: bySource.filter(i => i.kind === 'user').length, active: f.source === 'user', onClick: () => set({ source: 'user' }) }
       ]);
+
+      // Neural Capture version: V1 and V2 always, any other the Nano names when it is there.
+      const byVersion = filterLibrary(entries, 'version');
+      const versions = Array.from(new Set(['1', '2'].concat(entries.map(i => i.version)))).sort();
+      renderChipRow('libVersion', 'Version', [{ text: 'All', count: byVersion.length, active: f.version === 'all', onClick: () => set({ version: 'all' }) }]
+        .concat(versions.map(v => ({ text: 'V' + v, count: byVersion.filter(i => i.version === v).length, active: f.version === v, onClick: () => set({ version: f.version === v ? 'all' : v }) }))));
 
       const byType = filterLibrary(entries, 'type');
       renderChipRow('libTypes', 'Category', [{ text: 'All', count: byType.length, active: f.type === 'all', onClick: () => set({ type: 'all' }) }]
@@ -2702,14 +3400,13 @@ function renderLibraryBrowser() {
           list.appendChild(h);
         }
         const type = captureTypeInfo(item.type);
-        const meta = [item.author, capitalize(item.instrument), type.label, item.kind === 'user' ? 'User' : 'Factory'].filter(Boolean)
+        const meta = [item.author, capitalize(item.instrument), type.label, 'V' + item.version, item.kind === 'user' ? 'User' : 'Factory'].filter(Boolean)
           .map(v => '<span>' + escapeHTML(v) + '</span>').join('<span>·</span>');
         const tagsHTML = '<span class="lib-tag' + (f.tags.has(item.groupKey) ? ' hit' : '') + '">' + escapeHTML(item.group) + '</span>';
         const row = document.createElement('button');
         row.className = 'lib-item' + (item.name.trim().toLowerCase() === currentName ? ' current' : '');
         row.title = item.description || item.name;
-        row.innerHTML = '<span class="fx-icon" style="--icon: var(--ico-' + type.icon + ')"></span>' +
-          '<span style="min-width:0"><div class="lib-name">' + escapeHTML(item.name) + '</div><div class="lib-meta">' + meta + tagsHTML + '</div></span>';
+        libraryRowBody(row, item, type.icon, meta, tagsHTML);
         row.addEventListener('click', () => {
           closeLibraryBrowser();
           loadLibraryCapture(item.kind, item.index);
@@ -2718,8 +3415,146 @@ function renderLibraryBrowser() {
       });
     }
 
+function renderIrBrowser() {
+      const f = state.libBrowser;
+      const entries = state.library.irFactory.map(item => ({ ...item, kind: 'irFactory' }))
+        .concat(state.library.irUser.map(item => ({ ...item, kind: 'irUser' })))
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+      const q = f.irQ.trim().toLowerCase();
+      const byQuery = entries.filter(item => !q || item.name.toLowerCase().includes(q));
+      const set = change => { Object.assign(f, change); renderLibraryBrowser(); };
+      renderChipRow('libSource', 'Source', [
+        { text: 'All', count: byQuery.length, active: f.irSource === 'all', onClick: () => set({ irSource: 'all' }) },
+        { text: 'Factory cabs', count: byQuery.filter(i => i.kind === 'irFactory').length, active: f.irSource === 'irFactory', onClick: () => set({ irSource: 'irFactory' }) },
+        { text: 'User IRs', count: byQuery.filter(i => i.kind === 'irUser').length, active: f.irSource === 'irUser', onClick: () => set({ irSource: 'irUser' }) }
+      ]);
+      const results = byQuery.filter(item => f.irSource === 'all' || item.kind === f.irSource);
+      $('libCount').textContent = results.length + ' of ' + entries.length + ' cabs / IRs' + (state.library.loaded ? '' : ' (loading…)');
+      const list = $('libList');
+      list.innerHTML = '';
+      if (!results.length) {
+        list.innerHTML = '<div class="lib-empty">' + (entries.length ? 'No cabs / IRs match.' : 'The library has not been loaded from the Nano yet.') + '</div>';
+        return;
+      }
+      const current = String(state.currentIR.shortName || '').trim().toLowerCase();
+      let letter = null;
+      results.forEach(item => {
+        const first = item.name.charAt(0).toUpperCase();
+        const heading = /[A-Z]/.test(first) ? first : '#';
+        if (heading !== letter) {
+          letter = heading;
+          const h = document.createElement('div');
+          h.className = 'lib-letter';
+          h.textContent = heading;
+          list.appendChild(h);
+        }
+        const row = document.createElement('button');
+        row.className = 'lib-item' + (item.name.trim().toLowerCase() === current ? ' current' : '');
+        row.title = item.name;
+        libraryRowBody(row, item, 'cab', '<span>' + (item.kind === 'irFactory' ? 'Factory cab' : 'User IR') + '</span>', '');
+        row.addEventListener('click', () => {
+          closeLibraryBrowser();
+          loadLibraryCab(item.kind, item.index);
+        });
+        list.appendChild(row);
+      });
+    }
+
 function closeLibraryBrowser() {
       $('libraryOverlay').hidden = true;
+      if (audition.current) auditionStop();   // as the app: leaving the page ends the listening
+    }
+
+const AUD_PLAY = '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>';
+
+const AUD_STOP = '<svg viewBox="0 0 24 24" style="width:12px;height:12px"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+
+const AUD_EQ = '<span class="aud-eq"><i></i><i></i><i></i></span>';
+
+const audition = { current: null, pending: false, startedAt: 0 };
+
+const isIrKind = kind => kind === 'irFactory' || kind === 'irUser';
+
+function libraryRowBody(row, item, icon, meta, tagsHTML) {
+      const playing = auditionIs(item);
+      if (playing) row.classList.add('aud');
+      row.innerHTML = '<span class="fx-icon" style="--icon: var(--ico-' + icon + ')"></span>' +
+        '<span style="min-width:0"><div class="lib-name">' + escapeHTML(item.name) + '</div><div class="lib-meta">' +
+        (playing ? '<span class="aud-live">' + AUD_EQ + 'Listening</span><span>·</span>' : '') + meta + tagsHTML + '</div></span>' +
+        '<span class="aud-play' + (playing ? ' on' : '') + (audition.pending ? ' wait' : '') + '" role="button" tabindex="0" title="' +
+        (playing ? 'Stop listening' : 'Listen without loading it into a slot') + '" aria-label="' + (playing ? 'Stop listening' : 'Listen') + '">' +
+        (playing ? AUD_STOP : AUD_PLAY) + '</span>';
+      const play = row.querySelector('.aud-play');
+      const toggle = e => { e.stopPropagation(); e.preventDefault(); if (auditionIs(item)) auditionStop(); else auditionStart(item); };
+      play.addEventListener('click', toggle);
+      play.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') toggle(e); });
+    }
+
+const auditionIs = item => Boolean(audition.current && audition.current.kind === item.kind && audition.current.index === item.index);
+
+const varintBig = value => { const out = []; let v = Math.floor(value); while (v > 0x7F) { out.push((v % 128) | 0x80); v = Math.floor(v / 128); } out.push(v); return out; };
+
+function auditionStart(item) {
+      if (!state.connected) { toast('Connect the Nano first.', 'error'); return; }
+      const nameBytes = Array.from(new TextEncoder().encode(item.name));
+      const identifier = [0x08, ...encodeVarint(item.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
+      const ir = isIrKind(item.kind);
+      // the IR request has the same shape: { 3: factory IR { 1: index, 2: name } | 4: user IR { ... } }
+      const frame = buildFrame([item.kind === 'factory' || item.kind === 'irFactory' ? 0x1A : 0x22, ...encodeVarint(identifier.length), ...identifier],
+        ir ? MSG.AuditioningListenIrRequest : MSG.AuditioningListenCaptureRequest);
+      if (frame.length - 2 > 255) { toast('The name is too long.', 'error'); return; }
+      if (audition.current && isIrKind(audition.current.kind) !== ir) auditionStop();   // one at a time
+      audition.current = { kind: item.kind, index: item.index, name: item.name };
+      audition.pending = true;
+      audition.startedAt = Date.now();
+      writeC304('Listen to ' + (item.kind === 'factory' || item.kind === 'irFactory' ? 'factory' : 'user') + (ir ? ' IR ' : ' capture ') + item.index + ' "' + item.name + '"', frame);
+      renderAudition();
+    }
+
+function auditionStop() {
+      if (!audition.current) return;
+      const ir = isIrKind(audition.current.kind);
+      audition.current = null;
+      audition.pending = false;
+      // { 2: requestId, 3: enableCaptureAuditioning false } or { 2: requestId, 4: enableIrAuditioning false }
+      if (state.connected) writeC304('Listening off' + (ir ? ' (IR)' : ''), buildFrame([0x10, ...varintBig(Date.now()), ir ? 0x20 : 0x18, 0x00], MSG.AuditioningEnableDisableRequest));
+      renderAudition();
+    }
+
+function auditionEnded(text) {
+      if (!audition.current) return;
+      audition.current = null;
+      audition.pending = false;
+      if (text) toast(text, 'info', 3500);
+      renderAudition();
+    }
+
+function handleAuditionResponse(type, data) {
+      const fields = framePayloadFields(data);
+      const status = fields[3] && fields[3][0] ? fields[3][0].value : 0;
+      const message = fields[5] && fields[5][0] && fields[5][0].wire === 2 ? utf8(fields[5][0].raw) : '';
+      const listen = type === MSG.AuditioningListenCaptureResponse || type === MSG.AuditioningListenIrResponse;
+      log('RX ' + (listen ? 'listen' : 'listening on/off') + ' reply: status ' + status + (message ? ' "' + message + '"' : '') + ' ' + hex(data));
+      if (!listen || !audition.current || (type === MSG.AuditioningListenIrResponse) !== isIrKind(audition.current.kind)) return;
+      audition.pending = false;
+      if (status !== 1) auditionEnded('The Nano did not play ' + (isIrKind(audition.current.kind) ? 'the IR' : 'the capture') + (message ? ': ' + message : '.'));   // OperationStatus 1 = success
+      else renderAudition();
+    }
+
+function renderAudition() {
+      const a = audition.current;
+      $('audBar').hidden = !a;
+      if (a) {
+        $('audBarName').textContent = a.name;
+        $('audBarStop').innerHTML = AUD_STOP;
+        $('audBarNote').textContent = audition.pending ? 'Starting…' : 'Listening – your slot and preset stay as they are';
+      }
+      if (!$('libraryOverlay').hidden) {   // keep the list where it is
+        const list = $('libList'), top = list.scrollTop;
+        renderLibraryBrowser();
+        list.scrollTop = top;
+      }
+      renderOrganizer();
     }
 
 async function loadLibraryCab(kind, index) {
@@ -2741,6 +3576,218 @@ async function loadLibraryCab(kind, index) {
       state.pendingCabAssignment = { slot, name: item.name };
       await writeC304('Load library cab "' + item.name + '" into cab slot ' + slot, frame);
       return await waitUntil(() => sameName(state.irNames.get(slot), item.name), 6000) ? slot : null;
+    }
+
+const org = { mode: 'capture', q: '', show: 'all', tidy: '', sel: new Set(), busy: false, status: '', waiting: null, drag: null };
+
+const orgKey = item => item.kind + ':' + item.index;
+
+const orgIsIr = () => org.mode === 'ir';
+
+function orgLibrary() {
+      const L = state.library;
+      const list = orgIsIr()
+        ? L.irFactory.map(i => ({ ...i, kind: 'irFactory' })).concat(L.irUser.map(i => ({ ...i, kind: 'irUser' })))
+        : L.factory.map(i => ({ ...i, kind: 'factory' })).concat(L.user.map(i => ({ ...i, kind: 'user' })));
+      return list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+    }
+
+const orgUser = item => item.kind === 'user' || item.kind === 'irUser';
+
+const orgSlotCount = () => (orgIsIr() ? 5 : 25);
+
+const orgSlotName = slot => (orgIsIr() ? state.irNames : state.captureNames).get(slot) || '';
+
+const orgSlotsOf = item => { const out = []; for (let s = 1; s <= orgSlotCount(); s++) if (sameName(orgSlotName(s), item.name)) out.push(s); return out; };
+
+const orgSlotLabel = s => (orgIsIr() ? 'Cab ' + s : Math.ceil(s / 5) + '-' + ((s - 1) % 5 + 1));
+
+function orgPresetsOf(item) {
+      const u = state.slotUsage;
+      if (!u || !u.captureNames) return null;
+      const list = orgIsIr() ? u.cabNames : u.captureNames;
+      return list.filter(x => sameName(x.name, item.name) || sameName(x.full, item.name)).map(x => x.preset);
+    }
+
+const orgSlotUsers = slot => (state.slotUsage ? (state.slotUsage[orgIsIr() ? 'cab' : 'capture'][slot] || []) : null);
+
+const orgCurrentSlot = () => (orgIsIr() ? (state.cabIR.on ? state.cabIR.stateSlot : null) : (state.capture.on ? state.capture.activeSlot : null));
+
+function renderOrganizer() {
+      const overlay = $('orgOverlay');
+      if (!overlay || overlay.hidden) return;
+      const ir = orgIsIr();
+      $('ogTitle').textContent = ir ? 'Organize cabs / IRs' : 'Organize captures';
+      $('ogMode').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === org.mode));
+      $('ogScan').disabled = org.busy;
+      $('ogScan').textContent = org.busy ? 'Checking…' : state.slotUsage && state.slotUsage.captureNames ? 'Check again' : 'Check which presets use what';
+      $('ogSlotsHint').textContent = (ir ? 'Cab slots' : 'Slots') + ' – drag one onto another to swap · drop from the list below to load' +
+        (state.slotUsage ? ' · the number: presets using the slot' : '');
+
+      // the slots: five bank columns (captures) or one row of five (cabs)
+      const slots = $('ogSlots');
+      slots.className = 'og-banks' + (ir ? ' cabs' : '');
+      slots.innerHTML = '';
+      const current = orgCurrentSlot();
+      const columns = ir ? 1 : 5;
+      for (let col = 0; col < columns; col++) {
+        const column = document.createElement('div');
+        column.className = 'og-bankcol';
+        column.innerHTML = '<span class="bn">' + (ir ? 'CAB SLOTS' : 'BANK ' + (col + 1)) + '</span>';
+        const rows = ir ? 5 : 5;
+        for (let r = 0; r < rows; r++) {
+          const slot = ir ? r + 1 : col * 5 + r + 1;
+          const name = orgSlotName(slot);
+          const users = orgSlotUsers(slot);
+          const cell = document.createElement('div');
+          cell.className = 'og-slot' + (name ? '' : ' empty') + (slot === current ? ' cur' : '');
+          cell.draggable = Boolean(name) && !org.busy;
+          cell.dataset.slot = String(slot);
+          cell.title = (name || 'Empty') + (slot === current ? ' – this preset' : '') +
+            (users ? ' – ' + (users.length ? 'used by preset ' + users.join(', ') : 'no preset uses it') : '');
+          cell.innerHTML = '<span class="n">' + (ir ? slot : r + 1) + '</span><span class="t">' + escapeHTML(name || 'empty') + '</span>' +
+            (users && users.length ? '<span class="og-use busy">' + users.length + '</span>' : '');
+          cell.addEventListener('dragstart', e => { org.drag = { slot }; e.dataTransfer.setData('text/plain', 'slot:' + slot); e.dataTransfer.effectAllowed = 'move'; cell.classList.add('drag'); });
+          cell.addEventListener('dragend', () => { cell.classList.remove('drag'); org.drag = null; });
+          cell.addEventListener('dragover', e => { if (org.drag && !org.busy) { e.preventDefault(); cell.classList.add('drop'); } });
+          cell.addEventListener('dragleave', () => cell.classList.remove('drop'));
+          cell.addEventListener('drop', e => { e.preventDefault(); cell.classList.remove('drop'); const d = org.drag; org.drag = null; if (d) orgDrop(d, slot); });
+          column.appendChild(cell);
+        }
+        slots.appendChild(column);
+      }
+
+      // filters
+      const all = orgLibrary();
+      const q = org.q.trim().toLowerCase();
+      const byQuery = all.filter(i => !q || i.name.toLowerCase().includes(q));
+      const counts = {};
+      byQuery.forEach(i => { const k = i.name.trim().toLowerCase(); counts[k] = (counts[k] || 0) + 1; });
+      const tidyTest = {
+        noslot: i => !orgSlotsOf(i).length,
+        unused: i => { const p = orgPresetsOf(i); return p !== null && !p.length && !orgSlotsOf(i).length; },
+        twice: i => counts[i.name.trim().toLowerCase()] > 1
+      };
+      const shown = byQuery.filter(i => (org.show === 'all' || (org.show === 'user') === orgUser(i)) && (!org.tidy || tidyTest[org.tidy](i)));
+      const chip = (text, count, on, click, disabled, title) => {
+        const b = document.createElement('button');
+        b.className = 'og-chip' + (on ? ' on' : '');
+        b.disabled = Boolean(disabled);
+        if (title) b.title = title;
+        b.innerHTML = escapeHTML(text) + (count !== undefined ? ' <span class="n">' + count + '</span>' : '');
+        b.addEventListener('click', click);
+        return b;
+      };
+      const showBox = $('ogShow'), tidyBox = $('ogTidy');
+      showBox.innerHTML = tidyBox.innerHTML = '';
+      [['all', 'All', byQuery.length], ['user', ir ? 'User IRs' : 'User', byQuery.filter(orgUser).length],
+        ['factory', ir ? 'Factory cabs' : 'Factory', byQuery.filter(i => !orgUser(i)).length]]
+        .forEach(([key, text, count]) => showBox.appendChild(chip(text, count, org.show === key, () => { org.show = key; renderOrganizer(); })));
+      const unusedKnown = Boolean(state.slotUsage && state.slotUsage.captureNames);
+      [['noslot', 'Not in a slot', 'In none of the slots'], ['unused', 'Not used by a preset', unusedKnown ? 'In no slot and no preset uses it' : 'Check which presets use what first'],
+        ['twice', 'Same name twice', 'The same name more than once (factory and user, or twice in user)']]
+        .forEach(([key, text, title]) => tidyBox.appendChild(chip(text, byQuery.filter(tidyTest[key]).length, org.tidy === key,
+          () => { org.tidy = org.tidy === key ? '' : key; renderOrganizer(); }, key === 'unused' && !unusedKnown, title)));
+
+      // the library
+      const list = $('ogList'), top = list.scrollTop;
+      list.innerHTML = '';
+      if (!shown.length) list.innerHTML = '<div class="lib-empty">' + (all.length ? 'Nothing matches.' : state.library.loaded ? 'The library is empty.' : 'Reading the library from the Nano …') + '</div>';
+      shown.forEach(item => {
+        const key = orgKey(item), user = orgUser(item), inSlots = orgSlotsOf(item), presets = orgPresetsOf(item);
+        const row = document.createElement('div');
+        row.className = 'og-lib-row' + (org.sel.has(key) ? ' sel' : '') + (auditionIs(item) ? ' aud' : '');
+        row.draggable = !org.busy;
+        const type = ir ? null : captureTypeInfo(item.type);
+        row.innerHTML = '<span class="og-chk' + (org.sel.has(key) ? ' on' : '') + '" role="checkbox" aria-checked="' + org.sel.has(key) + '">' + (org.sel.has(key) ? '✓' : '') + '</span>' +
+          '<span class="fx-icon" style="--icon: var(--ico-' + (ir ? 'cab' : type.icon) + ');--block-color:#f2f2f2"></span>' +
+          '<span style="min-width:0"><div class="og-name">' + escapeHTML(item.name) + '</div><div class="og-meta">' +
+          (auditionIs(item) ? '<span class="aud-live">' + AUD_EQ + 'Listening</span> · ' : '') +
+          (user ? (ir ? 'User IR' : 'User') : (ir ? 'Factory cab' : 'Factory')) + (ir ? '' : ' · ' + type.label + (item.version ? ' · V' + item.version : '')) +
+          (presets && presets.length ? ' · presets ' + escapeHTML(presets.slice(0, 8).join(', ') + (presets.length > 8 ? ' …' : '')) : '') + '</div></span>' +
+          '<span class="og-badges">' + (inSlots.length ? '<span class="og-badge slot">' + (ir ? '' : 'Slot ') + inSlots.map(orgSlotLabel).join(', ') + '</span>' : '') +
+          (presets && presets.length ? '<span class="og-badge warn">' + presets.length + ' preset' + (presets.length > 1 ? 's' : '') + '</span>' : '') + '</span>' +
+          '<span class="aud-play' + (auditionIs(item) ? ' on' : '') + '" role="button" tabindex="0" title="' + (auditionIs(item) ? 'Stop listening' : 'Listen without loading it') + '">' +
+          (auditionIs(item) ? AUD_STOP : AUD_PLAY) + '</span>';
+        row.addEventListener('click', e => {
+          if (e.target.closest('.aud-play')) { e.stopPropagation(); if (auditionIs(item)) auditionStop(); else auditionStart(item); return; }
+          if (org.sel.has(key)) org.sel.delete(key); else org.sel.add(key);
+          renderOrganizer();
+        });
+        row.addEventListener('dragstart', e => { org.drag = { item }; e.dataTransfer.setData('text/plain', 'item:' + key); e.dataTransfer.effectAllowed = 'copy'; });
+        row.addEventListener('dragend', () => { org.drag = null; });
+        list.appendChild(row);
+      });
+      list.scrollTop = top;
+
+      // footer
+      const selected = all.filter(i => org.sel.has(orgKey(i)));
+      const deletable = selected.filter(orgUser);
+      const hit = deletable.flatMap(i => orgPresetsOf(i) || []);
+      $('ogInfo').textContent = org.status || (selected.length
+        ? selected.length + ' selected' + (deletable.length < selected.length ? ' · factory ' + (ir ? 'cabs' : 'captures') + ' cannot be deleted' : '') +
+          (hit.length ? ' · used by preset' + (hit.length > 1 ? 's ' : ' ') + Array.from(new Set(hit)).sort((a, b) => a - b).join(', ') + ' (they would lose it)'
+            : deletable.length && !unusedKnown ? ' · not checked which presets use them' : '')
+        : 'Click to select · drag onto a slot to load · ▶ listens without loading');
+      $('ogNone').hidden = !selected.length;
+      $('ogLoad').disabled = selected.length !== 1 || org.busy;
+      $('ogDelete').disabled = !deletable.length || org.busy;
+      $('ogDelete').textContent = deletable.length ? 'Delete ' + deletable.length + ' from the Nano…' : 'Delete…';
+    }
+
+async function orgLoad(item, slot) {
+      const ir = isIrKind(item.kind);
+      const nameBytes = Array.from(new TextEncoder().encode(item.name));
+      const identifier = [0x08, ...encodeVarint(item.index), 0x12, ...encodeVarint(nameBytes.length), ...nameBytes];
+      const user = item.kind === 'user' || item.kind === 'irUser';
+      const frame = ir
+        ? buildFrame([0x18, ...encodeVarint(slot - 1), user ? 0x2A : 0x22, ...encodeVarint(identifier.length), ...identifier], MSG.SetCabinetSlotContentRequest)
+        : buildFrame([0x18, ...encodeVarint(slot - 1), user ? 0x2A : 0x22, ...encodeVarint(identifier.length), ...identifier], MSG.SetCaptureSlotContentRequest);
+      if (frame.length - 2 > 255) { toast('The name is too long.', 'error'); return false; }
+      if (ir) state.pendingCabAssignment = { slot, name: item.name, quiet: true };
+      else state.pendingSlotAssignment = { slot, name: item.name };
+      await writeC304('Load library ' + (ir ? 'cab' : 'capture') + ' "' + item.name + '" into ' + (ir ? 'cab ' : '') + 'slot ' + slot, frame);
+      const names = ir ? state.irNames : state.captureNames;
+      const ok = await waitUntil(() => sameName(names.get(slot), item.name), 6000);
+      renderOrganizer();
+      return ok;
+    }
+
+function orgItemNamed(name) {
+      const all = orgLibrary();
+      return all.find(i => orgUser(i) && sameName(i.name, name)) || all.find(i => sameName(i.name, name)) || null;
+    }
+
+async function orgDrop(drag, slot) {
+      if (org.busy) return;
+      org.busy = true;
+      renderOrganizer();
+      try {
+        if (drag.item) {   // from the library: load it into the slot
+          org.status = 'Loading "' + drag.item.name + '" into ' + (orgIsIr() ? 'cab slot ' : 'slot ') + orgSlotLabel(slot) + ' …';
+          renderOrganizer();
+          const ok = await orgLoad(drag.item, slot);
+          org.status = ok ? '"' + drag.item.name + '" is in ' + (orgIsIr() ? 'cab slot ' : 'slot ') + orgSlotLabel(slot) + '.' : 'The Nano did not confirm the load.';
+          return;
+        }
+        if (drag.slot === slot) return;
+        // slot onto slot: swap (each one loaded from the library into the other slot)
+        const a = orgSlotName(drag.slot), b = orgSlotName(slot);
+        const itemA = orgItemNamed(a), itemB = b ? orgItemNamed(b) : null;
+        if (!itemA || (b && !itemB)) {
+          org.status = '"' + (!itemA ? a : b) + '" is not in the library – it cannot be moved (only loaded slots can be swapped).';
+          return;
+        }
+        org.status = 'Swapping ' + orgSlotLabel(drag.slot) + ' and ' + orgSlotLabel(slot) + ' …';
+        renderOrganizer();
+        const first = await orgLoad(itemA, slot);
+        const second = first && itemB ? await orgLoad(itemB, drag.slot) : first;
+        org.status = first && second ? (b ? 'Swapped: ' + orgSlotLabel(drag.slot) + ' ⇄ ' + orgSlotLabel(slot) + '. Presets keep their ' + (orgIsIr() ? 'cabs.' : 'captures.')
+          : '"' + a + '" is now also in ' + orgSlotLabel(slot) + ' (a slot cannot be emptied).') : 'The Nano did not confirm the swap – check the slots.';
+      } finally {
+        org.busy = false;
+        renderOrganizer();
+      }
     }
 
 state.slotUsage = null;
@@ -2770,6 +3817,10 @@ function handleCabinetSlotContentResponse(data) {
       log('Library cab loaded' + (pending ? ': "' + pending.name + '" in cab slot ' + pending.slot : ''));
       if (!pending) return;
       state.irNames.set(pending.slot, pending.name);
+      if (pending.quiet) {   // organizing the slots: the preset keeps its cab slot
+        setTimeout(requestCurrentPresetState, 300);
+        return;
+      }
       state.currentIR = { shortName: pending.name, fullName: pending.name, inBank: true, slot: pending.slot };
       selectCabIRSlot(pending.slot); // activate the slot, then re-read state and cab parameters
     }
@@ -2796,6 +3847,330 @@ function closeTuner(send = true) {
       state.tuner.open = false;
       $('tunerOverlay').hidden = true;
       if (send && state.connected) writeC304('Tuner off', tunerModeFrame(false));
+    }
+
+const rot = { quietUntil: 0, on: false, cab: false, from: 0, bank: 1, last: 0, timer: null, readTimer: null };
+
+function handleSelector(data) {
+      const fields = framePayloadFields(data);
+      const num = n => (fields[n] && fields[n][0] && fields[n][0].wire === 0 ? fields[n][0].value : 0);
+      const which = num(3), value = num(4);
+      log('RX selector ' + which + ' = ' + value);
+      clearTimeout(rot.readTimer);   // the editor's cards follow with the next state (one read for several steps)
+      rot.readTimer = setTimeout(() => { if (state.connected) requestCurrentPresetState(); }, 450);
+      if (Date.now() < rot.quietUntil) return;
+      const active = state.capture.activeSlot || 0;
+      const bank = active ? Math.floor((active - 1) / 5) + 1 : rot.bank;
+      const position = active ? (active - 1) % 5 + 1 : 0;
+      let cab = false, slot;
+      if (which === 1) { slot = value ? (bank - 1) * 5 + value : 0; rot.bank = bank; }
+      else if (which === 0) { if (value < 1 || value > 5) return; rot.bank = value; slot = position ? (value - 1) * 5 + position : 0; }
+      else if (which === 3) { cab = true; slot = value; }
+      else return;
+      const before = cab ? (state.cabIR.on ? state.cabIR.stateSlot || state.cabIR.selectedSlot || 0 : 0) : active;
+      if (!rot.on || rot.cab !== cab || Date.now() - rot.last > 2500) rot.from = before;
+      rot.on = true;
+      rot.cab = cab;
+      rot.last = Date.now();
+      if (cab) state.cabIR.selectedSlot = slot;
+      else { state.capture.activeSlot = slot || null; if (slot) rot.bank = Math.floor((slot - 1) / 5) + 1; }
+      showWheel(cab, slot);
+    }
+
+function wheelName(cab, slot) {
+      if (!slot) return 'Bypass';
+      const name = cab ? state.irNames.get(slot) : state.captureNames.get(slot);
+      return String(name || (cab ? 'Cab slot ' + slot : 'Capture slot ' + slot));
+    }
+
+function showWheel(cab, slot) {
+      let overlay = $('wheelOverlay');
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'wheelOverlay';
+        overlay.className = 'wheel-overlay';
+        overlay.innerHTML = '<div class="wheel-panel" role="dialog" aria-label="Turned on the Nano"><div class="wheel-head"><span class="fx-icon" id="wheelIcon"></span>' +
+          '<div><div class="wheel-cap" id="wheelCap"></div><div class="wheel-where" id="wheelWhere"></div></div><span class="wheel-dots" id="wheelDots"></span></div>' +
+          '<div class="wheel-prev" id="wheelPrev"></div><div class="wheel-now" id="wheelNow"></div><div class="wheel-next" id="wheelNext"></div>' +
+          '<div class="wheel-foot"><span>closes by itself after 2 s</span><button class="aud-btn" id="wheelBack"></button></div></div>';
+        document.body.appendChild(overlay);
+        overlay.addEventListener('click', e => { if (e.target === overlay) closeWheel(); });
+        $('wheelBack').addEventListener('click', () => {
+          const from = rot.from, wasCab = rot.cab;
+          closeWheel();
+          if (wasCab) selectCabIRSlot(from);
+          else if (!from) selectCaptureSlot(0);
+          else {   // slot 1-25 over all banks: "bank and capture" (selector 4), as the library load does it
+            rot.quietUntil = Date.now() + 700;
+            writeC304('Capture slot ' + from + ' (back)', buildFrame([0x18, 0x04, 0x20, from - 1], MSG.Selector));
+            setTimeout(requestCurrentPresetState, 300);
+          }
+        });
+      }
+      const base = cab ? 0 : (rot.bank - 1) * 5;
+      const position = cab ? slot : (slot ? (slot - 1) % 5 + 1 : 0);
+      const prev = position === 0 ? 5 : position - 1, next = position === 5 ? 0 : position + 1;
+      $('wheelIcon').style.setProperty('--icon', 'var(--ico-' + (cab ? 'cab' : 'capture') + ')');
+      $('wheelCap').textContent = cab ? 'CAB / IR · FOOTSWITCH II' : 'CAPTURE · FOOTSWITCH I';
+      $('wheelWhere').textContent = cab ? (slot ? 'Slot ' + slot + ' of 5' : 'Bypass') : 'Bank ' + rot.bank + ' · ' + (slot ? 'slot ' + position : 'bypass');
+      $('wheelDots').innerHTML = [1, 2, 3, 4, 5].map(i => '<i class="' + (i === position ? 'on' : '') + '"></i>').join('');
+      $('wheelPrev').textContent = wheelName(cab, prev ? base + prev : 0);
+      $('wheelNow').textContent = wheelName(cab, slot);
+      $('wheelNext').textContent = wheelName(cab, next ? base + next : 0);
+      $('wheelBack').hidden = rot.from === slot;
+      $('wheelBack').textContent = 'Back to ' + wheelName(cab, rot.from);
+      overlay.hidden = false;
+      clearTimeout(rot.timer);
+      rot.timer = setTimeout(closeWheel, 2000);
+    }
+
+function closeWheel() {
+      clearTimeout(rot.timer);
+      const overlay = $('wheelOverlay');
+      if (overlay) overlay.hidden = true;
+      rot.on = false;
+    }
+
+const METRO_STORE = 'nanoMetronome';
+
+const METRO_TIME_SIGS = ['2/4', '3/4', '4/4', '5/4', '6/4', '7/4', '8/4', '9/4', '10/4', '11/4', '12/4', '13/4', '3/8', '6/8', '9/8', '12/8',
+      '5/8 (3+2)', '5/8 (2+3)', '7/8 (3+2+2)', '7/8 (2+3+2)', '7/8 (2+2+3)'];
+
+const METRO_NOTES = ['1/4', '1/8', '1/8T', '1/16'];
+
+const METRO_SOUNDS = ['Blip', 'Digital'];
+
+const METRO_BPM = [40, 240], METRO_VOL = [-60, 9];
+
+const metro = { firmware: '', tempo: 120, global: true, extClock: false, open: false, editing: false, sendTimer: null, taps: [], beat: 0, beatTimer: null,
+      settings: { muted: true, volume: 0, timeSig: 2, note: 0, sound: 0 } };
+
+const saveMetro = () => { try { localStorage.setItem(METRO_STORE, JSON.stringify(metro.settings)); } catch (e) { /* storage unavailable */ } };
+
+function metroSupported() {
+      const m = /^(\d+)\.(\d+)/.exec(metro.firmware || '');
+      return Boolean(state.connected && m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 3)));
+    }
+
+function tempoFrame(active) {
+      if (!active) return buildFrame([0x18, 0x00], MSG.TempoScreen);
+      const s = metro.settings;
+      return buildFrame([0x18, 0x01, 0x20, metro.global ? 1 : 0, 0x2D, ...float32LE(metro.tempo), 0x30, metro.extClock ? 1 : 0,
+        0x3D, ...float32LE(s.volume), 0x40, s.muted ? 1 : 0, 0x48, s.timeSig, 0x50, s.note, 0x58, s.sound], MSG.TempoScreen);
+    }
+
+function metroSend(now = false) {
+      if (!metro.open || !state.connected) return;
+      clearTimeout(metro.sendTimer);
+      const send = () => {
+        const s = metro.settings;
+        writeC304('Tempo ' + metro.tempo.toFixed(1) + ' BPM' + (metro.global ? ' (global)' : ' (preset)') + ', metronome ' + (s.muted ? 'off' : 'on ' + s.volume.toFixed(1) + ' dB') +
+          ', ' + METRO_TIME_SIGS[s.timeSig] + ', ' + METRO_NOTES[s.note] + ', ' + METRO_SOUNDS[s.sound], tempoFrame(true), 'tempo');
+      };
+      if (now) send(); else metro.sendTimer = setTimeout(send, 120);
+    }
+
+function handleTempoScreen(data) {
+      const fields = framePayloadFields(data);
+      const num = n => (fields[n] && fields[n][0] && fields[n][0].wire === 0 ? fields[n][0].value : 0);
+      const f32 = n => (fields[n] && fields[n][0] && fields[n][0].wire === 5 ? new DataView(Uint8Array.from(fields[n][0].raw).buffer).getFloat32(0, true) : null);
+      log('RX tempo screen: ' + hex(data));
+      const tempo = f32(5), volume = f32(7);
+      if (tempo !== null && tempo >= 20 && tempo <= 400) metro.tempo = Math.round(tempo * 10) / 10;
+      if (fields[4]) metro.global = Boolean(num(4));
+      if (fields[6]) metro.extClock = Boolean(num(6));
+      if (volume !== null) {   // a whole message from the Nano: its metronome settings
+        const s = metro.settings;
+        Object.assign(s, { volume: clamp(Math.round(volume * 10) / 10, METRO_VOL[0], METRO_VOL[1]), muted: Boolean(num(8)),
+          timeSig: METRO_TIME_SIGS[num(9)] ? num(9) : s.timeSig, note: METRO_NOTES[num(10)] ? num(10) : s.note, sound: METRO_SOUNDS[num(11)] ? num(11) : s.sound });
+        saveMetro();
+      }
+      const active = Boolean(num(3));
+      if (active && !metro.open) openMetro(true);
+      else if (!active && metro.open && fields[3]) closeMetro(false);
+      else metroRefresh();
+    }
+
+function metroBar() {
+      const ts = METRO_TIME_SIGS[metro.settings.timeSig];
+      const m = /^(\d+)\/(\d+)/.exec(ts);
+      return { beats: Math.min(13, Number(m[1])), perMinute: metro.tempo * (Number(m[2]) / 4) };
+    }
+
+const metroBeats = (count, now) => '<span class="mt-beats">' +
+      Array.from({ length: count }, (_, i) => '<i class="' + (i === 0 ? 'acc' : '') + (i === now ? ' now' : '') + '"></i>').join('') + '</span>';
+
+function metroAnimate() {
+      clearInterval(metro.beatTimer);
+      metro.beatTimer = null;
+      const running = !metro.settings.muted && metroSupported() && !metro.extClock;
+      document.querySelectorAll('.mt-beats').forEach(el => el.querySelectorAll('i').forEach(i => i.classList.remove('now')));
+      if (!running) return;
+      const bar = metroBar();
+      metro.beat = 0;
+      const step = () => {
+        document.querySelectorAll('.mt-beats').forEach(el => el.querySelectorAll('i').forEach((dot, i) => dot.classList.toggle('now', i === metro.beat % bar.beats)));
+        metro.beat++;
+      };
+      step();
+      metro.beatTimer = setInterval(step, 60000 / bar.perMinute);
+    }
+
+function renderTempoNode(node) {
+      node.id = 'tempoNode';
+      const s = metro.settings, bar = metroBar();
+      node.title = 'Tempo ' + metro.tempo.toFixed(1) + ' BPM (' + (metro.global ? 'global' : 'this preset') + '), metronome ' + (s.muted ? 'off' : 'on') +
+        (metro.extClock ? ' – MIDI clock from outside' : '') + ' – click for tempo and metronome';
+      node.innerHTML = '<div class="sc-tile io tempo' + (s.muted ? '' : ' on') + '"><b>' + Math.round(metro.tempo) + '</b>' + metroBeats(Math.min(8, bar.beats), -1) + '</div>' +
+        '<span class="sc-lbl">Tempo</span><span class="sc-sub">' + escapeHTML(METRO_TIME_SIGS[s.timeSig].split(' ')[0]) + '</span>';   // filled = metronome on
+      node.addEventListener('click', () => openMetro(false));
+      if (metro.beatTimer || !s.muted) setTimeout(metroAnimate, 0);   // once the tile is in the page
+    }
+
+function metroDialog() {
+      let overlay = $('metroOverlay');
+      if (overlay) return overlay;
+      overlay = document.createElement('div');
+      overlay.id = 'metroOverlay';
+      overlay.className = 'ask-overlay';
+      overlay.hidden = true;
+      overlay.innerHTML = '<div class="mt-panel" role="dialog" aria-label="Tempo and metronome">' +
+        '<div class="mt-head"><h2><span class="ico" style="--icon: var(--ico-metronome);width:18px;height:18px"></span>Tempo &amp; metronome</h2>' +
+        '<div class="mt-tools"><span class="mt-seg" id="mtScope" role="group" aria-label="Tempo for"><button data-v="1" title="One tempo for all presets">Global</button>' +
+        '<button data-v="0" title="Each preset keeps its own tempo (saved with the preset)">Preset</button></span>' +
+        '<button id="mtClose" class="dlg-close" title="Close (Esc)" aria-label="Close"><span class="ico" style="--icon: var(--ico-close)"></span></button></div></div>' +
+        '<div class="mt-body"><div><div class="mt-dial" id="mtDial" tabindex="0" title="Drag up / down or scroll; arrow keys: 1 BPM, with Shift 0.1">' +
+        '<svg viewBox="0 0 300 300"><path id="mtTrack" stroke="#1d2024" stroke-width="10" fill="none" stroke-linecap="round"/>' +
+        '<path id="mtArc" stroke="#45F862" stroke-width="10" fill="none" stroke-linecap="round"/></svg>' +
+        '<div class="c"><input id="mtBpm" type="text" inputmode="decimal" aria-label="Tempo (BPM)"><small>BPM · DRAG OR SCROLL</small><span id="mtBeats"></span></div></div>' +
+        '<button class="mt-tap" id="mtTap" title="Tap the tempo (T)">TAP</button></div>' +
+        '<div class="mt-side"><div class="row"><div class="row line"><span class="mt-q">Metronome</span>' +
+        '<div id="mtOn" class="toggle-switch" role="switch" aria-label="Metronome" style="--block-color:#45F862"><div class="toggle-dot"></div></div></div>' +
+        '<div class="mt-bar" id="mtVol" tabindex="0" role="slider" aria-label="Metronome volume" aria-valuemin="-60" aria-valuemax="9"><i></i><span>Volume</span><b></b></div></div>' +
+        '<div class="row"><span class="mt-q">Time signature</span><select id="mtSig" aria-label="Time signature">' +
+        METRO_TIME_SIGS.map((t, i) => '<option value="' + i + '">' + t + '</option>').join('') + '</select></div>' +
+        '<div class="row"><span class="mt-q">Note</span><span class="mt-seg" id="mtNote">' + METRO_NOTES.map((t, i) => '<button data-v="' + i + '">' + t + '</button>').join('') + '</span></div>' +
+        '<div class="row"><span class="mt-q">Sound</span><span class="mt-seg" id="mtSound">' + METRO_SOUNDS.map((t, i) => '<button data-v="' + i + '">' + t + '</button>').join('') + '</span></div>' +
+        '<div class="mt-note" id="mtNoteText"></div></div></div></div>';
+      document.body.appendChild(overlay);
+      overlay.addEventListener('click', e => { if (e.target === overlay) closeMetro(); });
+      overlay.querySelector('#mtClose').addEventListener('click', () => closeMetro());
+      const set = (fn, now) => { fn(); saveMetro(); metroRefresh(); metroSend(now); };
+      const setTempo = bpm => { metro.tempo = Math.round(clamp(bpm, METRO_BPM[0], METRO_BPM[1]) * 10) / 10; metro.editing = true; metroRefresh(); metroSend(); };
+      overlay.querySelector('#mtScope').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { metro.global = b.dataset.v === '1'; metro.editing = true; metroRefresh(); metroSend(true); } });
+      overlay.querySelector('#mtOn').addEventListener('click', () => set(() => { metro.settings.muted = !metro.settings.muted; }, true));
+      overlay.querySelector('#mtSig').addEventListener('change', e => set(() => { metro.settings.timeSig = Number(e.target.value); }, true));
+      overlay.querySelector('#mtNote').addEventListener('click', e => { const b = e.target.closest('button'); if (b) set(() => { metro.settings.note = Number(b.dataset.v); }, true); });
+      overlay.querySelector('#mtSound').addEventListener('click', e => { const b = e.target.closest('button'); if (b) set(() => { metro.settings.sound = Number(b.dataset.v); }, true); });
+      const bpmInput = overlay.querySelector('#mtBpm');
+      bpmInput.addEventListener('change', () => { const v = parseFloat(bpmInput.value.replace(',', '.')); if (Number.isFinite(v)) setTempo(v); else metroRefresh(); });
+      bpmInput.addEventListener('keydown', e => { if (e.key === 'Enter') bpmInput.blur(); e.stopPropagation(); });
+      // the dial: drag up / down (1 BPM per 4 px), the wheel, the arrow keys
+      const dial = overlay.querySelector('#mtDial');
+      dial.addEventListener('pointerdown', e => {
+        if (e.target === bpmInput) return;
+        const y0 = e.clientY, t0 = metro.tempo;
+        dial.setPointerCapture(e.pointerId);
+        const move = ev => setTempo(t0 + Math.round((y0 - ev.clientY) / 4) * (ev.shiftKey ? 0.1 : 1));
+        const up = () => { dial.removeEventListener('pointermove', move); dial.removeEventListener('pointerup', up); dial.removeEventListener('pointercancel', up); };
+        dial.addEventListener('pointermove', move);
+        dial.addEventListener('pointerup', up);
+        dial.addEventListener('pointercancel', up);
+      });
+      dial.addEventListener('wheel', e => { e.preventDefault(); setTempo(metro.tempo + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.1 : 1)); }, { passive: false });
+      dial.addEventListener('keydown', e => {
+        const d = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 }[e.key];
+        if (d) { e.preventDefault(); setTempo(metro.tempo + d * (e.shiftKey ? 0.1 : 1)); }
+      });
+      // tap: the mean of the last intervals (as the app: 40-240 BPM, a pause of 2 s starts again)
+      const tap = () => {
+        const now = performance.now();
+        if (metro.taps.length && now - metro.taps[metro.taps.length - 1] > 2000) metro.taps = [];
+        metro.taps.push(now);
+        if (metro.taps.length > 6) metro.taps.shift();
+        const btn = overlay.querySelector('#mtTap');
+        btn.classList.add('hit');
+        setTimeout(() => btn.classList.remove('hit'), 90);
+        if (metro.taps.length < 2) return;
+        const ms = (metro.taps[metro.taps.length - 1] - metro.taps[0]) / (metro.taps.length - 1);
+        setTempo(Math.round(60000 / ms * 10) / 10);
+      };
+      overlay.querySelector('#mtTap').addEventListener('pointerdown', e => { e.preventDefault(); tap(); });
+      overlay.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { e.stopPropagation(); closeMetro(); }
+        else if ((e.key === 't' || e.key === 'T') && e.target.tagName !== 'INPUT' && e.target.tagName !== 'SELECT') { e.preventDefault(); tap(); }
+      });
+      // volume: a fill bar, drag or arrow keys (0.5 dB)
+      const vol = overlay.querySelector('#mtVol');
+      const volFrom = x => { const r = vol.getBoundingClientRect(); return METRO_VOL[0] + clamp((x - r.left) / r.width, 0, 1) * (METRO_VOL[1] - METRO_VOL[0]); };
+      vol.addEventListener('pointerdown', e => {
+        vol.setPointerCapture(e.pointerId);
+        const apply = ev => set(() => { metro.settings.volume = Math.round(volFrom(ev.clientX) * 2) / 2; }, false);
+        apply(e);
+        const up = () => { vol.removeEventListener('pointermove', apply); vol.removeEventListener('pointerup', up); vol.removeEventListener('pointercancel', up); };
+        vol.addEventListener('pointermove', apply);
+        vol.addEventListener('pointerup', up);
+        vol.addEventListener('pointercancel', up);
+      });
+      vol.addEventListener('keydown', e => {
+        const d = { ArrowUp: 0.5, ArrowRight: 0.5, ArrowDown: -0.5, ArrowLeft: -0.5 }[e.key];
+        if (d) { e.preventDefault(); set(() => { metro.settings.volume = clamp(metro.settings.volume + d, METRO_VOL[0], METRO_VOL[1]); }, false); }
+      });
+      return overlay;
+    }
+
+function metroRefresh() {
+      const node = $('tempoNode');
+      if (Boolean(node) !== metroSupported()) renderSignalChain();
+      else if (node) { const fresh = node.cloneNode(false); node.replaceWith(fresh); renderTempoNode(fresh); }
+      const overlay = $('metroOverlay');
+      if (!overlay || overlay.hidden) return;
+      const s = metro.settings, bar = metroBar();
+      if (document.activeElement !== $('mtBpm')) $('mtBpm').value = metro.tempo.toFixed(1);
+      const R = 130, cx = 150, cy = 150, a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
+      const arc = (from, to) => { const p = a => [cx + R * Math.cos(a), cy + R * Math.sin(a)]; const [x0, y0] = p(from), [x1, y1] = p(to);
+        return 'M' + x0.toFixed(1) + ',' + y0.toFixed(1) + ' A' + R + ',' + R + ' 0 ' + (to - from > Math.PI ? 1 : 0) + ' 1 ' + x1.toFixed(1) + ',' + y1.toFixed(1); };
+      $('mtTrack').setAttribute('d', arc(a0, a1));
+      $('mtArc').setAttribute('d', arc(a0, a0 + Math.max(0.001, (a1 - a0) * (clamp(metro.tempo, METRO_BPM[0], METRO_BPM[1]) - METRO_BPM[0]) / (METRO_BPM[1] - METRO_BPM[0]))));
+      $('mtBeats').innerHTML = metroBeats(bar.beats, -1);
+      $('mtScope').querySelectorAll('button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === metro.global));
+      $('mtOn').classList.toggle('on', !s.muted);
+      $('mtOn').setAttribute('aria-checked', String(!s.muted));
+      const vol = $('mtVol');
+      vol.classList.toggle('off', s.muted);
+      vol.style.setProperty('--v', ((s.volume - METRO_VOL[0]) / (METRO_VOL[1] - METRO_VOL[0]) * 100).toFixed(1) + '%');
+      vol.querySelector('b').innerHTML = dbText(s.volume, true) + '<small>dB</small>';
+      vol.setAttribute('aria-valuenow', String(s.volume));
+      $('mtSig').value = String(s.timeSig);
+      $('mtNote').querySelectorAll('button').forEach(b => b.classList.toggle('on', Number(b.dataset.v) === s.note));
+      $('mtSound').querySelectorAll('button').forEach(b => b.classList.toggle('on', Number(b.dataset.v) === s.sound));
+      $('mtNoteText').textContent = (metro.extClock ? 'The tempo comes from an external MIDI clock. ' : '') +
+        'The metronome plays on the Nano\'s outputs. Global: one tempo for all presets · Preset: each preset keeps its own (saved with the preset).';
+      metroAnimate();
+    }
+
+function openMetro(fromDevice) {
+      if (!metroSupported()) return;
+      const overlay = metroDialog();
+      metro.open = true;
+      overlay.hidden = false;
+      metroRefresh();
+      $('mtClose').focus();
+      if (!fromDevice) metroSend(true);
+    }
+
+function closeMetro(send = true) {
+      if (!metro.open) return;
+      metro.open = false;
+      clearTimeout(metro.sendTimer);
+      const overlay = $('metroOverlay');
+      if (overlay) overlay.hidden = true;
+      if (send && state.connected) {
+        writeC304('Tempo screen off', tempoFrame(false));
+        if (metro.editing) setTimeout(() => { if (state.connected) requestCurrentPresetState(); }, 300);   // the preset may be marked edited now
+      }
+      metro.editing = false;
+      metroRefresh();
     }
 
 function handleTunerMetering(data) {
@@ -2834,6 +4209,7 @@ async function setCapture(slot) {
       state.capture.on = true;
       state.capture.lastActiveSlot = slot;
 
+      rot.quietUntil = Date.now() + 700;
       await writeC304('08C0 capture change ' + slot, new Uint8Array([0x08, 0xC0, 0x18, 0x04, 0x20, index, 0x1C, 0x00, 0x00, 0x00]));
 
       renderCaptureIR();
@@ -3016,6 +4392,8 @@ async function setGateReduction(percent) {
       await writeC304('Gate reduction ' + pct + '%', payload, 'gate-reduction');
     }
 
+const modelAsked = {};
+
 async function setFXModel(blockKey, modelName, readBack = true) {
       const cfg = blockSlotConfig[blockKey];
       const block = state.blocks[blockKey];
@@ -3045,6 +4423,9 @@ async function setFXModel(blockKey, modelName, readBack = true) {
       );
 
       await writeC304(cfg.label + ' model select ' + model.name, payload);
+      // Did the Nano take it? Its state shortly after tells (unless a preset load reads it anyway).
+      modelAsked[blockKey] = { name: model.name, at: Date.now(), preset: state.selectedPreset };
+      setTimeout(() => { if (modelAsked[blockKey] && !state.presetLoadTimer) requestCurrentPresetState(); }, 700);
 
       if (!readBack || !block.on) return;
       setTimeout(() => {
@@ -3116,11 +4497,7 @@ function paramValueToNormalized(param) {
         return clamp(param.value / maxIndex, 0, 1);
       }
 
-      const normalized = clamp((Number(param.value) - meta.min) / (meta.max - meta.min), 0, 1);
-      if (meta.normalizedReversePower) {
-        return 1 - Math.pow(1 - normalized, 1 / meta.normalizedReversePower);
-      }
-      return Math.pow(normalized, 1 / (meta.normalizedPower || 1));
+      return shareToTravel(meta, clamp((Number(param.value) - meta.min) / (meta.max - meta.min), 0, 1));
     }
 
 async function setFXParam(blockKey, param, rawValue = null, fromPreset = false) {
@@ -3172,7 +4549,13 @@ function sendParamValue(blockKey, param) {
 function updateKnobVisual(knobEl, valueEl, normalized, text) {
       knobEl.style.setProperty('--pct', Math.round(normalized * 73) + '%');
       knobEl.style.setProperty('--angle', (-135 + normalized * 270) + 'deg');
-      valueEl.textContent = text;
+      setValueText(valueEl, text);
+    }
+
+function setValueText(el, text) {
+      const split = barLook() ? /^(.*\d)\s*([^\d\s][^\d]*)$/.exec(String(text)) : null;
+      if (split) el.innerHTML = '<b>' + escapeHTML(split[1]) + '</b><small>' + escapeHTML(split[2]) + '</small>';
+      else el.textContent = text;
     }
 
     function askText() { /* replaced by pro/ui.js */ }
@@ -3269,8 +4652,81 @@ function isFactoryCabIR() {
 
 const CAB_RANGES = { level: [-96, 12, 0.1], highPass: [20, 800, 1, 1.68], lowPass: [1000, 20000, 1, 1.68] };
 
+const CAB_MICS = [
+      { name: 'Dynamic 57', short: '57', icon: 'mic-57' },
+      { name: 'Dynamic 421', short: '421', icon: 'mic-421' },
+      { name: 'Condenser 184', short: '184', icon: 'mic-184' },
+      { name: 'Condenser 414', short: '414', icon: 'mic-414' },
+      { name: 'Ribbon 160', short: '160', icon: 'mic-160' }
+    ];
+
+function micSpeaker(pos, places, id) {
+      const x = p => 50 + (p - 1) * 7.6;
+      let dots = '';
+      for (let p = 1; p <= 6; p++) {
+        dots += '<circle cx="' + x(p) + '" cy="50" r="' + (p === pos ? 0 : 2.1) + '" class="spk-dot"/>' +
+                (places ? '<circle cx="' + x(p) + '" cy="50" r="4.6" class="spk-hit" data-pos="' + p + '"><title>Position ' + p + '</title></circle>' : '');
+      }
+      return '<svg class="spk" viewBox="0 0 100 100" aria-label="Mic position ' + pos + '">' +
+          '<defs><radialGradient id="' + id + '" cx=".5" cy=".5" r=".5"><stop offset=".28" stop-color="#2a2e33"/><stop offset=".3" stop-color="#16181b"/>' +
+          '<stop offset=".92" stop-color="#202327"/><stop offset="1" stop-color="#2c3035"/></radialGradient></defs>' +
+          '<circle cx="50" cy="50" r="48" class="spk-rim"/><circle cx="50" cy="50" r="42" fill="url(#' + id + ')"/>' +
+          '<circle cx="50" cy="50" r="12.5" class="spk-cap"/>' +
+          '<line x1="50" y1="50" x2="' + x(6) + '" y2="50" class="spk-axis"/>' + dots +
+          '<circle cx="' + x(pos) + '" cy="50" r="7.5" class="spk-glow"/><circle cx="' + x(pos) + '" cy="50" r="5.2" class="spk-mic"/>' +
+          '<circle cx="' + x(pos) + '" cy="50" r="1.9" class="spk-mic-core"/>' +
+        '</svg>';
+    }
+
+function micInfo(name) {
+      const known = CAB_MICS.find(m => sameName(m.name, name));
+      if (known) return known;
+      const text = String(name || '').trim();
+      const icon = /^condenser/i.test(text) ? 'mic-414' : /^ribbon/i.test(text) ? 'mic-160' : /421/.test(text) ? 'mic-421' : 'mic-57';
+      return { name: text, short: text.replace(/^(dynamic|condenser|ribbon)\s+/i, '') || text, icon };
+    }
+
+function cabMics() {
+      const named = state.cabIR.micsByCab[String(state.currentIR.shortName || '').trim().toLowerCase()];
+      const names = named && named.length ? named.slice() : CAB_MICS.map(m => m.name);
+      if (state.cabIR.mic && !names.some(n => sameName(n, state.cabIR.mic))) names.push(state.cabIR.mic);
+      return names.map(micInfo);
+    }
+
+const micNow = () => ({ pos: clamp(Math.round(Number(state.cabIR.position) || 1), 1, 6), mic: micInfo(state.cabIR.mic || cabMics()[0].name) });
+
+function openMic() {
+      if (!state.cabIR.on || !isFactoryCabIR()) return;
+      // the mics of this cab: the Nano names them with the cab's settings
+      if (state.connected && !state.cabIR.micsByCab[String(state.currentIR.shortName || '').trim().toLowerCase()]) requestCabIRParamRefresh();
+      $('micOverlay').hidden = false;
+      renderMicStage();
+      $('micClose').focus();
+    }
+
 function closeMic() {
       $('micOverlay').hidden = true;
+    }
+
+function renderMicStage() {
+      const stage = $('micStage');
+      const { pos, mic } = micNow();
+      $('micCab').textContent = state.currentIR.shortName || '';
+      stage.innerHTML = micSpeaker(pos, true, 'spkCone') +
+        '<div class="mic-side">' +
+          '<div class="mic-label">Mic <span>' + escapeHTML(mic.name) + '</span></div>' +
+          '<div class="mic-choice">' + cabMics().map(m => '<button class="' + (sameName(m.name, mic.name) ? 'on' : '') + '" data-mic="' + escapeHTML(m.name) + '" title="' + escapeHTML(m.name) + '">' +
+            '<span class="ico" style="--icon: var(--ico-' + m.icon + ')"></span>' + escapeHTML(m.short) + '</button>').join('') + '</div>' +
+          '<div class="mic-label">Position</div>' +
+          '<div class="mic-pos">' + [1, 2, 3, 4, 5, 6].map(p => '<button class="' + (p === pos ? 'on' : '') + '" data-pos="' + p + '" title="Position ' + p +
+            (p === 1 ? ' (centre)' : p === 6 ? ' (edge)' : '') + '">' + p + '</button>').join('') + '</div>' +
+        '</div>';
+      stage.onclick = e => {
+        const target = e.target.closest('[data-mic], [data-pos]');
+        if (!target || !state.cabIR.on) return;
+        if (target.dataset.mic) setCabIRMicPosition(target.dataset.mic, state.cabIR.position);
+        else setCabIRMicPosition(state.cabIR.mic || mic.name, Number(target.dataset.pos));
+      };
     }
 
 function formatCabValue(key, value) {
@@ -3293,6 +4749,34 @@ function currentCaptureType() {
       if (!name || !state.library || !state.library.loaded) return null;
       const item = state.library.factory.concat(state.library.user).find(x => String(x.name).trim().toLowerCase() === name);
       return item ? captureTypeInfo(item.type) : null;
+    }
+
+const AMALGAM_ALIAS = { BC30: ['BCAT', 'ER30'], ERA30: ['BCAT', 'ER30'], ERA: ['BCAT', 'ER30'], BC: ['BCAT'] };
+
+function amalgamFor(name) {
+      const all = window.AMALGAM_AMPS;
+      if (!all || !name) return null;
+      let words = String(name).toUpperCase().split(/[\s_\-]+/).filter(Boolean);
+      while (words.length > 2 && /^(AA|AAW|AMALGAM|BASS|DI)$/.test(words[0])) words.shift();
+      if (words[0] === 'AATR' && words[1] === 'SX3') words = ['TRCK', 'SSS', ...words.slice(2)];
+      else if (words[0] === 'BC' && words[1] === 'ERA') words = ['BCAT', 'ER30', ...words.slice(words[2] === '30' ? 3 : 2)];
+      else if (words[0] === 'ERA' && words[1] === '30') words = ['BCAT', 'ER30', ...words.slice(2)];
+      else if (AMALGAM_ALIAS[words[0]]) words = [...AMALGAM_ALIAS[words[0]], ...words.slice(1)];
+      let best = null, bestK = 1, bestLen = Infinity;
+      for (const [code, pic] of Object.entries(all)) {
+        const parts = code.toUpperCase().split('-').filter(part => !/^\d+$/.test(part) && part !== 'AMALGAM');
+        let k = 0;
+        while (k < parts.length && k < words.length && parts[k] === words[k]) k++;
+        if (k > bestK || (k === bestK && k >= 2 && parts.length < bestLen)) { best = pic; bestK = k; bestLen = parts.length; }
+      }
+      return bestK >= 2 ? best : null;
+    }
+
+function captureAmpPicture() {
+      if (!state.capture.on) return null;
+      const type = currentCaptureType();
+      if (type && /^(pedal|overdrive|fuzz|compressor)$/.test(type.key)) return null;   // a pedal capture
+      return amalgamFor(state.currentCapture.name);
     }
 
 const AMP_WRITE_IDS = {
@@ -3356,6 +4840,45 @@ function iconInk(color) {
       const [r, g, b] = [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16) / 255);
       return 0.2126 * r + 0.7152 * g + 0.0722 * b < 0.3 ? '#fff' : '#000';
     }
+
+const FXP_FAVOURITES = 4;
+
+const FXP_STORE = 'nanoFxPresetLib';
+
+const FXP_STORE_V1 = 'nanoFxPresets';
+
+const fxpId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+function fxpLibrary() {
+      try {
+        const lib = JSON.parse(localStorage.getItem(FXP_STORE));
+        if (lib && typeof lib === 'object') return lib;
+      } catch (e) { /* fall through to the old format */ }
+      // First start of this version: the four places per model become favourites.
+      const lib = {};
+      try {
+        const old = JSON.parse(localStorage.getItem(FXP_STORE_V1)) || {};
+        Object.entries(old).forEach(([model, places]) => {
+          const list = (places || []).filter(Boolean).map(p => ({ id: fxpId(), name: p.name, values: p.values, fav: true }));
+          if (list.length) lib[model] = list;
+        });
+      } catch (e) { /* nothing to take over */ }
+      try { localStorage.setItem(FXP_STORE, JSON.stringify(lib)); } catch (e) { /* storage unavailable */ }
+      return lib;
+    }
+
+function fxPresetsOf(model) {
+      return (fxpLibrary()[model] || []).slice();
+    }
+
+function fxpStoreLocal(model, list) {
+      const lib = fxpLibrary();
+      if (list.length) lib[model] = list;
+      else delete lib[model];
+      try { localStorage.setItem(FXP_STORE, JSON.stringify(lib)); } catch (e) { log('FX presets not stored: ' + e.message); }
+    }
+
+const fxpFavourites = list => list.filter(p => p.fav).slice(0, FXP_FAVOURITES);
 
 const PRESET_FILE_FORMAT = 'nano-cortex-preset';
 
@@ -3424,6 +4947,372 @@ function presetFileData() {
       if (state.cabIR.on && isFactoryCabIR()) Object.assign(data.cab, { mic: state.cabIR.mic, position: state.cabIR.position });
       if (state.exp.loaded && state.exp.preset === preset) data.expression = structuredClone({ ranges: state.exp.ranges, bypass: state.exp.bypass });
       return data;
+    }
+
+const CTL_FIRST = 60000;
+
+const ctl = { waiter: null, rx: null, busy: false };
+
+function showControllerMenu() {
+      $('ctlBackupBtn').hidden = $('ctlRestoreBtn').hidden = !(state.connected && state.viaController);
+    }
+
+function ctlFrame(type, payload = []) {
+      const frame = new Uint8Array(payload.length + 6);
+      frame[0] = payload.length + 4;
+      frame[1] = 0xC0;
+      frame.set(payload, 2);
+      for (let i = 0; i < 4; i++) frame[2 + payload.length + i] = (type >>> (8 * i)) & 0xFF;
+      return frame;
+    }
+
+function ctlMessage(message) {
+      // what the board sends on its own (the footswitch strip, a changed FX preset) is not an answer
+      if (message && message.length >= 4) {
+        const n = message.length;
+        const type = (message[n - 4] | (message[n - 3] << 8) | (message[n - 2] << 16) | (message[n - 1] << 24)) >>> 0;
+        if (CTL_PUSHES[type]) { CTL_PUSHES[type](message.slice(0, n - 4)); return; }
+      }
+      const waiter = ctl.waiter;
+      ctl.waiter = null;
+      ctl.rx = null;
+      if (!waiter) return;
+      clearTimeout(waiter.timer);
+      if (!message) { waiter.resolve(null); return; }
+      const n = message.length;
+      const type = (message[n - 4] | (message[n - 3] << 8) | (message[n - 2] << 16) | (message[n - 1] << 24)) >>> 0;
+      waiter.resolve({ type, body: message.slice(0, n - 4) });
+    }
+
+function ctlPacket(data) {
+      if (data.length < 2) return false;
+      const first = (data[1] & 0x40) !== 0, last = (data[1] & 0x80) !== 0;
+      if (first && last) {
+        // (not frameType(): a packet of 256 bytes or more carries the high bits of its length in the same byte)
+        const n = data.length;
+        const type = n >= 6 ? (data[n - 4] | (data[n - 3] << 8) | (data[n - 2] << 16) | (data[n - 1] << 24)) >>> 0 : 0;
+        if (type < CTL_FIRST || type > CTL_FIRST + 99) return false;
+        ctlMessage(data.slice(2));
+        return true;
+      }
+      if (!ctl.waiter || state.libraryRx) return false;      // nothing asked, or the library coming: the Nano's own long replies
+      if (first) ctl.rx = [];
+      if (!ctl.rx) return false;
+      for (const b of data.slice(2)) ctl.rx.push(b);
+      if (last) {
+        const message = Uint8Array.from(ctl.rx);
+        const n = message.length;
+        const type = n >= 4 ? (message[n - 4] | (message[n - 3] << 8) | (message[n - 2] << 16) | (message[n - 1] << 24)) >>> 0 : 0;
+        if (type >= CTL_FIRST && type <= CTL_FIRST + 99) ctlMessage(message);
+        else ctl.rx = null;                                   // (a long reply of the Nano that came in between)
+      }
+      return true;
+    }
+
+function ctlRequest(label, type, payload = [], ms = 4000) {
+      // one at a time (the strip, the FX presets and a backup may ask at the same time)
+      const run = () => new Promise(resolve => {
+        ctl.waiter = { resolve, timer: setTimeout(() => ctlMessage(null), ms) };
+        writeC304(label, ctlFrame(type, payload));
+      });
+      const done = (ctl.queue || Promise.resolve()).then(run, run);
+      ctl.queue = done.catch(() => {});
+      return done;
+    }
+
+const fsLink = { tiles: {}, settings: null, asked: false, open: 0, folded: false, synced: false, syncing: false };
+
+const SWITCH1_NAMES = ['FX / presets', 'FX / scenes', 'Presets / scenes', 'Presets, scenes, FX'];
+
+const BANK_COLORS = ['#F2F2F2', '#FF4D4D', '#FF7000', '#FFD236', '#45F862', '#00FFDD', '#3D8BFF', '#8A5CFF', '#FF5CC8', '#9A9A9A'];
+
+const BANK_SYMBOLS = [
+      ["Clean", "<path d=\"M11 3Q12 11 20 12Q12 13 11 21Q10 13 2 12Q10 11 11 3Z\"/><path d=\"M19 2.5Q19.4 4.6 21.5 5Q19.4 5.4 19 7.5Q18.6 5.4 16.5 5Q18.6 4.6 19 2.5Z\"/>"],
+      ["Edge", "<path d=\"M2.00 12.00L2.25 10.72L2.50 9.55L2.75 8.54L3.00 7.73L3.25 7.11L3.50 6.65L3.75 6.31L4.00 6.07L4.25 5.90L4.50 5.78L4.75 5.70L5.00 5.64L5.25 5.59L5.50 5.56L5.75 5.54L6.00 5.52L6.25 5.51L6.50 5.51L6.75 5.50L7.00 5.50L7.25 5.50L7.50 5.51L7.75 5.51L8.00 5.52L8.25 5.54L8.50 5.56L8.75 5.59L9.00 5.64L9.25 5.70L9.50 5.78L9.75 5.90L10.00 6.07L10.25 6.31L10.50 6.65L10.75 7.11L11.00 7.73L11.25 8.54L11.50 9.55L11.75 10.72L12.00 12.00L12.25 13.28L12.50 14.45L12.75 15.46L13.00 16.27L13.25 16.89L13.50 17.35L13.75 17.69L14.00 17.93L14.25 18.10L14.50 18.22L14.75 18.30L15.00 18.36L15.25 18.41L15.50 18.44L15.75 18.46L16.00 18.48L16.25 18.49L16.50 18.49L16.75 18.50L17.00 18.50L17.25 18.50L17.50 18.49L17.75 18.49L18.00 18.48L18.25 18.46L18.50 18.44L18.75 18.41L19.00 18.36L19.25 18.30L19.50 18.22L19.75 18.10L20.00 17.93L20.25 17.69L20.50 17.35L20.75 16.89L21.00 16.27L21.25 15.46L21.50 14.45L21.75 13.28L22.00 12.00\"/>"],
+      ["Drive", "<path d=\"M12 22C7.8 22 5.5 19 5.5 15.6C5.5 12.2 8 10.3 9 7.8C9.8 9.6 10.6 10.5 11.6 11C11.4 7.6 13 4.6 15.4 2.5C15.2 5.6 16.6 7.6 17.6 9.4C18.3 10.8 18.5 12.2 18.5 13.8C18.5 18.8 15.8 22 12 22Z\"/><path d=\"M12 22C10.2 22 9 20.7 9 19C9 17.2 10.4 16.1 11.2 14.4C11.8 15.6 12.5 16.2 13.4 16.6C13.9 15.8 14.2 15 14.3 14C15.2 15.2 15.8 16.5 15.8 17.9C15.8 20.3 14.2 22 12 22Z\"/>"],
+      ["Solo", "<path d=\"M12.00 2.80L14.41 9.48L21.51 9.71L15.90 14.07L17.88 20.89L12.00 16.90L6.12 20.89L8.10 14.07L2.49 9.71L9.59 9.48Z\"/>"],
+      ["Fuzz", "<path d=\"M12.00 2.00L13.33 5.33L15.83 2.76L15.78 6.35L19.07 4.93L17.65 8.22L21.24 8.17L18.67 10.67L22.00 12.00L18.67 13.33L21.24 15.83L17.65 15.78L19.07 19.07L15.78 17.65L15.83 21.24L13.33 18.67L12.00 22.00L10.67 18.67L8.17 21.24L8.22 17.65L4.93 19.07L6.35 15.78L2.76 15.83L5.33 13.33L2.00 12.00L5.33 10.67L2.76 8.17L6.35 8.22L4.93 4.93L8.22 6.35L8.17 2.76L10.67 5.33Z\"/>"],
+      ["Atmospheric", "<path d=\"M19.5 15.5A8.5 8.5 0 1 1 9 4.2A7 7 0 0 0 19.5 15.5Z\"/><circle cx=\"16.5\" cy=\"4.5\" r=\"1\" fill=\"currentColor\"/><circle cx=\"21\" cy=\"9.5\" r=\"0.8\" fill=\"currentColor\"/><circle cx=\"13\" cy=\"9\" r=\"0.6\" fill=\"currentColor\"/>"],
+      ["Metal", "<path d=\"M13.5 2L5 13.5H11.5L10.5 22L19 10.5H12.5Z\"/>"],
+      ["Boost", "<path d=\"M5 12.5L12 5.5L19 12.5\"/><path d=\"M5 19L12 12L19 19\"/>"],
+      ["Rhythm", "<path d=\"M9.8 3H14.2L17.5 21H6.5Z\"/><path d=\"M12 17.5L17.5 6\"/><path d=\"M5 21H19\"/><circle cx=\"15.6\" cy=\"10\" r=\"1.3\" fill=\"currentColor\"/>"],
+      ["Bass", "<path d=\"M5.2 8.6C5.2 5.6 7.6 3.5 10.6 3.5C14.2 3.5 16.2 6 16.2 9.6C16.2 15 11.4 19.4 5 21.5\"/><circle cx=\"6.6\" cy=\"8.6\" r=\"1.7\" fill=\"currentColor\"/><circle cx=\"19.4\" cy=\"7\" r=\"1\" fill=\"currentColor\"/><circle cx=\"19.4\" cy=\"12\" r=\"1\" fill=\"currentColor\"/>"],
+      ["Acoustic", "<path d=\"M12 8.2C9.3 8.2 8.2 9.6 8.6 11.2C8.9 12.3 8.1 12.8 7.3 13.7C6 15.1 5.8 17.1 6.6 18.9C7.6 21 9.8 22 12 22C14.2 22 16.4 21 17.4 18.9C18.2 17.1 18 15.1 16.7 13.7C15.9 12.8 15.1 12.3 15.4 11.2C15.8 9.6 14.7 8.2 12 8.2Z\"/><circle cx=\"12\" cy=\"15.2\" r=\"1.9\"/><path d=\"M11 8.2V2H13V8.2\"/><path d=\"M10.2 19.2H13.8\"/>"],
+      ["Blues", "<circle cx=\"9.5\" cy=\"17.5\" r=\"3\"/><path d=\"M12.5 17.5V3C12.5 6 18 6.5 18 11\"/>"],
+      ["Live", "<rect x=\"9\" y=\"2.5\" width=\"6\" height=\"11\" rx=\"3\"/><path d=\"M6 10.5A6 6 0 0 0 18 10.5\"/><path d=\"M12 16.5V21\"/><path d=\"M8.5 21H15.5\"/>"],
+      ["Favorite", "<path d=\"M12 20.5C6.2 16.6 3 13.1 3 9.3C3 6.6 5 4.5 7.6 4.5C9.5 4.5 11 5.5 12 7.1C13 5.5 14.5 4.5 16.4 4.5C19 4.5 21 6.6 21 9.3C21 13.1 17.8 16.6 12 20.5Z\"/>"],
+      ["Fuzz Wave", "<path d=\"M2 12V6.6L2.00 6.60L3.25 5.75L4.50 7.45L5.75 5.75L7.00 7.45L8.25 5.75L9.50 7.45L10.75 5.75L12.00 6.60\"/><path d=\"M12 6.6V17.4L12.00 17.40L13.25 16.55L14.50 18.25L15.75 16.55L17.00 18.25L18.25 16.55L19.50 18.25L20.75 16.55L22.00 17.40\"/><path d=\"M22 17.4V12\"/>"],
+      ["Guitarist", "<path fill=\"currentColor\" d=\"M6.2 11.6C6.2 10.2 7.2 9.8 9.0 9.8H13.8C15.6 9.8 16.6 10.2 16.6 11.6L13.8 15.6H9.2Z\"/><path fill=\"currentColor\" d=\"M9.2 15.0H11.4L8.2 23.0H6.2Z\"/><path fill=\"currentColor\" d=\"M11.8 15.0H13.8L17.2 23.0H15.2Z\"/><path stroke-width=\"1.6\" d=\"M6.8 11.6L6.0 14.0L9.8 15.6\"/><path stroke-width=\"1.4\" d=\"M16.0 11.6L17.4 13.4L19.8 10.6\"/><path class=\"cut\" stroke-width=\"1.1\" fill=\"currentColor\" d=\"M11.21 4.22L11.28 4.03L11.37 3.86L11.48 3.70L11.59 3.54L11.73 3.40L11.88 3.27L12.03 3.15L12.21 3.06L12.39 2.97L12.57 2.92L12.76 2.88L12.95 2.84L13.15 2.84L13.35 2.86L13.54 2.89L13.73 2.94L13.92 3.01L14.09 3.10L14.26 3.20L14.42 3.32L14.55 3.46L14.68 3.60L14.80 3.76L14.89 3.93L14.98 4.11L15.04 4.30L15.08 4.49L15.11 4.68L15.11 4.88L15.10 5.07L15.07 5.26L15.02 5.46L14.94 5.75L14.87 6.02L14.80 6.27L14.74 6.50L14.69 6.73L14.63 6.93L14.58 7.12L14.53 7.31L14.48 7.48L14.44 7.65L14.41 7.82L14.37 7.97L14.33 8.13L14.29 8.27L14.25 8.43L14.21 8.58L14.18 8.75L14.13 8.91L14.10 9.09L14.06 9.27L14.01 9.46L13.96 9.67L13.92 9.90L13.87 10.13L13.05 8.60L11.92 9.50L11.62 8.14L10.58 9.06L10.38 7.74L9.40 8.68L9.49 8.46L9.59 8.25L9.67 8.05L9.74 7.87L9.82 7.70L9.89 7.54L9.96 7.38L10.03 7.22L10.09 7.07L10.14 6.92L10.20 6.78L10.26 6.64L10.32 6.49L10.39 6.33L10.45 6.17L10.52 6.00L10.59 5.83L10.66 5.64L10.73 5.44L10.82 5.23L10.90 5.01L11.00 4.76L11.10 4.50L11.21 4.22Z\"/><path fill=\"currentColor\" d=\"M11.21 4.22L11.28 4.03L11.37 3.86L11.48 3.70L11.59 3.54L11.73 3.40L11.88 3.27L12.03 3.15L12.21 3.06L12.39 2.97L12.57 2.92L12.76 2.88L12.95 2.84L13.15 2.84L13.35 2.86L13.54 2.89L13.73 2.94L13.92 3.01L14.09 3.10L14.26 3.20L14.42 3.32L14.55 3.46L14.68 3.60L14.80 3.76L14.89 3.93L14.98 4.11L15.04 4.30L15.08 4.49L15.11 4.68L15.11 4.88L15.10 5.07L15.07 5.26L15.02 5.46L14.94 5.75L14.87 6.02L14.80 6.27L14.74 6.50L14.69 6.73L14.63 6.93L14.58 7.12L14.53 7.31L14.48 7.48L14.44 7.65L14.41 7.82L14.37 7.97L14.33 8.13L14.29 8.27L14.25 8.43L14.21 8.58L14.18 8.75L14.13 8.91L14.10 9.09L14.06 9.27L14.01 9.46L13.96 9.67L13.92 9.90L13.87 10.13L13.05 8.60L11.92 9.50L11.62 8.14L10.58 9.06L10.38 7.74L9.40 8.68L9.49 8.46L9.59 8.25L9.67 8.05L9.74 7.87L9.82 7.70L9.89 7.54L9.96 7.38L10.03 7.22L10.09 7.07L10.14 6.92L10.20 6.78L10.26 6.64L10.32 6.49L10.39 6.33L10.45 6.17L10.52 6.00L10.59 5.83L10.66 5.64L10.73 5.44L10.82 5.23L10.90 5.01L11.00 4.76L11.10 4.50L11.21 4.22Z\"/><path class=\"cut\" stroke-width=\"2.2\" fill=\"currentColor\" d=\"M7.73 15.63C7.31 14.10 8.62 12.92 10.01 13.19C10.42 12.01 12.08 10.89 13.33 11.85C15.07 13.09 15.50 15.52 13.71 17.33C11.91 19.14 9.49 19.57 8.51 18.12C7.95 17.29 7.95 16.39 7.73 15.63Z\"/><path class=\"cut\" stroke-width=\"2.4\" d=\"M14.20 13.14L20.87 8.64\"/><path fill=\"currentColor\" d=\"M7.73 15.63C7.31 14.10 8.62 12.92 10.01 13.19C10.42 12.01 12.08 10.89 13.33 11.85C15.07 13.09 15.50 15.52 13.71 17.33C11.91 19.14 9.49 19.57 8.51 18.12C7.95 17.29 7.95 16.39 7.73 15.63Z\"/><path stroke-width=\"0.95\" d=\"M14.20 13.14L20.87 8.64\"/><path stroke-width=\"1.6\" d=\"M20.87 8.64L22.20 7.74\"/>"],
+      ["Rocket", "<path d=\"M19.48 4.52C20.02 8.41 17.88 12.08 12.76 16.73L7.27 11.24C11.92 6.12 15.59 3.98 19.48 4.52Z\"/><path d=\"M10.32 8.49L5.13 9.10L2.84 11.39L6.50 12.00\"/><path d=\"M15.51 13.68L14.90 18.87L12.61 21.16L12.00 17.50\"/><path d=\"M7.11 14.44Q5.28 16.89 4.36 19.64Q7.11 18.72 9.56 16.89\"/><circle cx=\"14.60\" cy=\"9.40\" r=\"1.7\"/>"],
+      ["Space", "<path d=\"M17.71 14.35L17.60 14.65L17.48 14.94L17.35 15.22L17.20 15.50L17.03 15.77L16.85 16.03L16.66 16.28L16.46 16.51L16.24 16.74L16.01 16.96L15.78 17.16L15.53 17.35L15.27 17.53L15.00 17.70L14.72 17.85L14.44 17.98L14.15 18.10L13.85 18.21L13.55 18.30L13.25 18.37L12.94 18.43L12.63 18.47L12.31 18.49L12.00 18.50L11.69 18.49L11.37 18.47L11.06 18.43L10.75 18.37L10.45 18.30L10.15 18.21L9.85 18.10L9.56 17.98L9.28 17.85L9.00 17.70L8.73 17.53L8.47 17.35\"/><path d=\"M7.15 16.03L6.97 15.77L6.80 15.50L6.65 15.22L6.52 14.94L6.40 14.65L6.29 14.35L6.20 14.05L6.13 13.75L6.07 13.44L6.03 13.13L6.01 12.81L6.00 12.50L6.01 12.19L6.03 11.87L6.07 11.56L6.13 11.25L6.20 10.95L6.29 10.65L6.40 10.35L6.52 10.06L6.65 9.78L6.80 9.50L6.97 9.23L7.15 8.97L7.34 8.72L7.54 8.49L7.76 8.26L7.99 8.04L8.22 7.84L8.47 7.65L8.73 7.47L9.00 7.30L9.28 7.15L9.56 7.02L9.85 6.90L10.15 6.79L10.45 6.70L10.75 6.63L11.06 6.57L11.37 6.53L11.69 6.51L12.00 6.50L12.31 6.51L12.63 6.53L12.94 6.57L13.25 6.63L13.55 6.70L13.85 6.79L14.15 6.90L14.44 7.02L14.72 7.15L15.00 7.30L15.27 7.47L15.53 7.65L15.78 7.84L16.01 8.04L16.24 8.26L16.46 8.49L16.66 8.72L16.85 8.97L17.03 9.23L17.20 9.50L17.35 9.78L17.48 10.06L17.60 10.35L17.71 10.65L17.80 10.95L17.87 11.25L17.93 11.56L17.97 11.87L17.99 12.19L18.00 12.50\"/><path d=\"M22.08 9.22L22.12 9.38L22.13 9.55L22.11 9.73L22.06 9.91L21.99 10.10L21.88 10.30L21.75 10.50L21.60 10.71L21.42 10.92L21.21 11.14L20.98 11.36L20.72 11.58L20.44 11.81L20.13 12.04L19.81 12.27L19.46 12.50L19.09 12.73L18.70 12.96L18.29 13.19L17.87 13.42L17.43 13.64L16.98 13.86L16.51 14.08L16.03 14.29L15.53 14.50L15.03 14.70L14.52 14.90L14.01 15.09L13.48 15.27L12.96 15.45L12.43 15.62L11.90 15.77L11.37 15.92L10.84 16.06L10.32 16.20L9.80 16.32L9.28 16.43L8.77 16.53L8.28 16.61L7.79 16.69L7.31 16.76L6.85 16.81L6.40 16.85L5.97 16.88L5.55 16.90L5.15 16.91L4.77 16.90L4.41 16.88L4.07 16.85L3.75 16.81L3.45 16.76L3.18 16.69L2.93 16.61L2.71 16.53L2.51 16.43L2.34 16.32L2.19 16.20L2.07 16.07L1.98 15.93L1.92 15.78L1.88 15.62L1.87 15.45L1.89 15.27L1.94 15.09L2.01 14.90L2.12 14.70L2.25 14.50L2.40 14.29L2.58 14.08L2.79 13.86L3.02 13.64L3.28 13.42L3.56 13.19L3.87 12.96L4.19 12.73L4.54 12.50L4.91 12.27\"/><path d=\"M17.60 8.15L18.03 8.12L18.45 8.10L18.85 8.09L19.23 8.10L19.59 8.12L19.93 8.15L20.25 8.19L20.55 8.24L20.82 8.31L21.07 8.39L21.29 8.47L21.49 8.57L21.66 8.68L21.81 8.80L21.93 8.93L22.02 9.07L22.08 9.22\"/><circle cx=\"20\" cy=\"4\" r=\"0.9\" fill=\"currentColor\"/><circle cx=\"4.5\" cy=\"20\" r=\"0.7\" fill=\"currentColor\"/><circle cx=\"5\" cy=\"5.5\" r=\"0.6\" fill=\"currentColor\"/>"],
+      ["Swell", "<path d=\"M2.50 6.50L2.71 6.33L2.92 6.17L3.13 6.01L3.34 5.86L3.56 5.73L3.77 5.61L3.98 5.51L4.19 5.42L4.40 5.36L4.61 5.32L4.82 5.30L5.03 5.31L5.24 5.34L5.46 5.39L5.67 5.46L5.88 5.55L6.09 5.67L6.30 5.79L6.51 5.94L6.72 6.09L6.93 6.25L7.14 6.42L7.36 6.58L7.57 6.75L7.78 6.91L7.99 7.06L8.20 7.21L8.41 7.33L8.62 7.45L8.83 7.54L9.04 7.61L9.26 7.66L9.47 7.69L9.68 7.70L9.89 7.68L10.10 7.64L10.31 7.58L10.52 7.49L10.73 7.39L10.94 7.27L11.16 7.14L11.37 6.99L11.58 6.83L11.79 6.67L12.00 6.50L12.21 6.33L12.42 6.17L12.63 6.01L12.84 5.86L13.06 5.73L13.27 5.61L13.48 5.51L13.69 5.42L13.90 5.36L14.11 5.32L14.32 5.30L14.53 5.31L14.74 5.34L14.96 5.39L15.17 5.46L15.38 5.55L15.59 5.67L15.80 5.79L16.01 5.94L16.22 6.09L16.43 6.25L16.64 6.42L16.86 6.58L17.07 6.75L17.28 6.91L17.49 7.06L17.70 7.21L17.91 7.33L18.12 7.45L18.33 7.54L18.54 7.61L18.76 7.66L18.97 7.69L19.18 7.70L19.39 7.68L19.60 7.64L19.81 7.58L20.02 7.49L20.23 7.39L20.44 7.27L20.66 7.14L20.87 6.99L21.08 6.83L21.29 6.67L21.50 6.50\"/><path d=\"M2.50 12.00L2.71 11.75L2.92 11.50L3.13 11.27L3.34 11.05L3.56 10.84L3.77 10.66L3.98 10.51L4.19 10.38L4.40 10.29L4.61 10.23L4.82 10.20L5.03 10.21L5.24 10.25L5.46 10.33L5.67 10.44L5.88 10.58L6.09 10.75L6.30 10.94L6.51 11.15L6.72 11.38L6.93 11.63L7.14 11.87L7.36 12.13L7.57 12.37L7.78 12.62L7.99 12.85L8.20 13.06L8.41 13.25L8.62 13.42L8.83 13.56L9.04 13.67L9.26 13.75L9.47 13.79L9.68 13.80L9.89 13.77L10.10 13.71L10.31 13.62L10.52 13.49L10.73 13.34L10.94 13.16L11.16 12.95L11.37 12.73L11.58 12.50L11.79 12.25L12.00 12.00L12.21 11.75L12.42 11.50L12.63 11.27L12.84 11.05L13.06 10.84L13.27 10.66L13.48 10.51L13.69 10.38L13.90 10.29L14.11 10.23L14.32 10.20L14.53 10.21L14.74 10.25L14.96 10.33L15.17 10.44L15.38 10.58L15.59 10.75L15.80 10.94L16.01 11.15L16.22 11.38L16.43 11.63L16.64 11.87L16.86 12.13L17.07 12.37L17.28 12.62L17.49 12.85L17.70 13.06L17.91 13.25L18.12 13.42L18.33 13.56L18.54 13.67L18.76 13.75L18.97 13.79L19.18 13.80L19.39 13.77L19.60 13.71L19.81 13.62L20.02 13.49L20.23 13.34L20.44 13.16L20.66 12.95L20.87 12.73L21.08 12.50L21.29 12.25L21.50 12.00\"/><path d=\"M2.50 17.50L2.71 17.17L2.92 16.84L3.13 16.52L3.34 16.23L3.56 15.96L3.77 15.72L3.98 15.51L4.19 15.34L4.40 15.22L4.61 15.14L4.82 15.10L5.03 15.11L5.24 15.17L5.46 15.27L5.67 15.42L5.88 15.61L6.09 15.83L6.30 16.09L6.51 16.37L6.72 16.68L6.93 17.00L7.14 17.33L7.36 17.67L7.57 18.00L7.78 18.32L7.99 18.63L8.20 18.91L8.41 19.17L8.62 19.39L8.83 19.58L9.04 19.73L9.26 19.83L9.47 19.89L9.68 19.90L9.89 19.86L10.10 19.78L10.31 19.66L10.52 19.49L10.73 19.28L10.94 19.04L11.16 18.77L11.37 18.48L11.58 18.16L11.79 17.83L12.00 17.50L12.21 17.17L12.42 16.84L12.63 16.52L12.84 16.23L13.06 15.96L13.27 15.72L13.48 15.51L13.69 15.34L13.90 15.22L14.11 15.14L14.32 15.10L14.53 15.11L14.74 15.17L14.96 15.27L15.17 15.42L15.38 15.61L15.59 15.83L15.80 16.09L16.01 16.37L16.22 16.68L16.43 17.00L16.64 17.33L16.86 17.67L17.07 18.00L17.28 18.32L17.49 18.63L17.70 18.91L17.91 19.17L18.12 19.39L18.33 19.58L18.54 19.73L18.76 19.83L18.97 19.89L19.18 19.90L19.39 19.86L19.60 19.78L19.81 19.66L20.02 19.49L20.23 19.28L20.44 19.04L20.66 18.77L20.87 18.48L21.08 18.16L21.29 17.83L21.50 17.50\"/>"]
+    ];
+
+const bankSymbol = n => n > 0 && BANK_SYMBOLS[n - 1] ? '<svg class="bank-sym" viewBox="0 0 24 24" aria-hidden="true">' + BANK_SYMBOLS[n - 1][1] + '</svg>' : '';
+
+const AB_MODES = [['Tap: on / off', 'hold swaps A / B'], ['Tap: A / B', 'hold switches on / off'], ['Press: A / B', 'at once, no hold']];
+
+const FX_SLOT_KEYS = ['pre1', 'pre2', 'post1', 'post2', 'post3'];
+
+function modelType(model) {
+      if (!model || !model.id) return 0;
+      let value = 0, shift = 0;
+      for (const b of model.id) { value += (b & 0x7F) * 2 ** shift; shift += 7; if (!(b & 0x80)) break; }
+      return value;
+    }
+
+function modelOfType(type, slotKey) {
+      const keys = slotKey ? [slotKey] : FX_SLOT_KEYS;
+      for (const key of keys) { const m = state.blocks[key].models.find(x => x.id && modelType(x) === type); if (m) return m; }
+      return null;
+    }
+
+const u32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+
+const u32bytes = v => [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF];
+
+function readTexts(body, at, count) {
+      const out = [];
+      for (let i = 0; i < count; i++) { const n = body[at] || 0; out.push(new TextDecoder().decode(body.slice(at + 1, at + 1 + n))); at += 1 + n; }
+      return { texts: out, next: at };
+    }
+
+const CTL_PUSHES = {
+      60011: body => {   // a field
+        const flags = body[1], { texts } = readTexts(body, 6, 5);
+        fsLink.tiles[body[0]] = { flags, color: '#' + [body[4], body[3], body[2]].map(x => x.toString(16).padStart(2, '0')).join(''),
+          row: body[5] > 127 ? body[5] - 256 : body[5], caption: texts[0], name: texts[1], note: texts[2], rows: [texts[3], texts[4]] };
+        renderFsStrip();
+      },
+      60013: body => {   // the settings behind the fields
+        const words = [];
+        for (let i = 0; i < 7; i++) words.push(u32(body, 15 + 4 * i));
+        const { texts: names, next } = readTexts(body, 48, 2);
+        const bank = body.length >= next + 22 ? { bank: body[next], presets: [...body.slice(next + 1, next + 7)], colors: [...body.slice(next + 7, next + 13)],
+          icons: [...body.slice(next + 13, next + 19)], scenes: !!body[next + 19], setlist: !!body[next + 20], looper: !!body[next + 21] } : null;
+        fsLink.settings = { bank, count: body[0], order: [...body.slice(1, 9)], switch1: body[9], fxMode: !!body[10],
+          mixSlot: body[11] > 127 ? body[11] - 256 : body[11], mixKnown: !!body[12], rpUsed: !!body[13], rpSet: body[14],
+          revB: words[0], revBKept: words[1], abB: words.slice(2), abMode: [...body.slice(43, 48)], rpNames: names };
+        renderFsStrip();
+      },
+      60023: body => { fxpFromBoard(u32(body, 0)); }   // an FX preset was saved on the board
+    };
+
+async function fsLinkStart() {
+      if (!state.connected || !state.viaController || fsLink.asked) return;
+      if (state.libraryRx) { setTimeout(fsLinkStart, 250); return; }   // the library coming: after it
+      fsLink.asked = true;
+      // (no answer: the fields come as pushes - sent past the request queue, which would wait for one in vain)
+      writeC304('Controller: footswitches', ctlFrame(60010, []));
+      fxpSyncAll();
+    }
+
+function fsLinkEnd() {
+      fsLink.tiles = {};
+      fsLink.settings = null;
+      fsLink.asked = fsLink.synced = false;
+      renderFsStrip();
+    }
+
+function renderFsStrip() {
+      const box = $('fsStrip');
+      const st = fsLink.settings;
+      const show = state.connected && state.viaController && st && Object.keys(fsLink.tiles).length;
+      box.hidden = !show;
+      if (!show) return;
+      box.classList.toggle('folded', fsLink.folded);
+      box.style.setProperty('--fs-count', st.count);
+      const tiles = [];
+      for (let p = 0; p < st.count; p++) {
+        const sw = st.order[p], t = fsLink.tiles[sw];
+        if (!t) continue;
+        const on = (t.flags & 1) !== 0, empty = (t.flags & 2) !== 0;
+        const rows = t.flags & 4 ? '<div class="rows">' + t.rows.map((r, i) => '<span' + (i === t.row ? ' class="act"' : '') + '>' + escapeHTML(r) + '</span>').join('') + '</div>' : '';
+        tiles.push('<div class="ft' + (on ? ' on' : '') + (empty ? ' empty' : '') + (fsLink.open === sw ? ' sel' : '') + '" data-sw="' + sw + '" role="button" tabindex="0"' +
+          ' style="--c:' + t.color + ';--ink:' + iconInk(t.color) + '" title="Footswitch ' + (p + 1) + ': click presses it, the gear (or a right-click) sets it">' +
+          '<div class="cap">' + (bankMode() && sw >= 3 ? bankSymbol(st.bank.icons[sw - 3]) : '') + escapeHTML(t.caption) + '</div><span class="num">' + (p + 1) + '</span>' +
+          '<span class="gear" data-gear="1"><span class="ico" style="--icon: var(--ico-more)"></span></span>' +
+          (t.note ? '<div class="note">' + escapeHTML(t.note) + '</div>' : '<div></div>') +
+          (rows || '<div class="nm">' + escapeHTML(t.name) + '</div>') + '</div>');
+      }
+      box.innerHTML = '<div class="fs-head"><span class="dot"></span><b>Controller</b> · Footswitches' + (st.fxMode ? ' · FX mode' : '') +
+        (bankMode() ? '<span class="bank-nav"><button data-act="bank-1" aria-label="Previous bank">‹</button>Bank ' + (st.bank.bank + 1) +
+          '<button data-act="bank+1" aria-label="Next bank">›</button></span>' : '') +
+        '<span class="sp"></span><button data-act="count">' + (st.count === 8 ? '6 fields' : '8 fields') + '</button>' +
+        '<button data-act="fold">' + (fsLink.folded ? 'Show' : 'Hide') + '</button></div><div class="fs-tiles">' + tiles.join('') + '</div>' +
+        '<div class="fs-pop" id="fsPop" hidden></div>';
+      if (fsLink.open) renderFsPop();
+    }
+
+function rpChoices(st) {
+      const block = state.blocks[FX_SLOT_KEYS[st.mixSlot]];
+      const presets = fsLink.synced && block && block.model ? fxpFavourites(fxPresetsOf(block.model)).map(p => p.name) : [];
+      return [0, 1].map(n => {
+        const set = (st.rpSet >> n) & 1, name = st.rpNames[n] || 'Setting ' + (n + 1);
+        const from = set ? presets.indexOf(name) : -1;
+        return '<div class="q">Setting ' + (n + 1) + (set ? ' · ' + escapeHTML(name) : ' · not set') + '</div><select data-act="rp" data-n="' + n + '">' +
+          (set && from < 0 ? '<option value="keep" selected>' + escapeHTML(name) + ' (as it is)</option>' : '') +
+          (!set ? '<option value="keep" selected>Choose …</option>' : '') +
+          '<option value="now">The reverb as it is now</option>' +
+          presets.map((p, i) => '<option value="' + i + '"' + (i === from ? ' selected' : '') + '>FX preset: ' + escapeHTML(p) + '</option>').join('') + '</select>';
+      }).join('');
+    }
+
+function bankMode() { const st = fsLink.settings; return Boolean(st && st.bank && !st.fxMode && !st.bank.scenes && !st.bank.setlist && !st.bank.looper); }
+
+function renderFsPop() {
+      const pop = $('fsPop'), st = fsLink.settings, sw = fsLink.open, t = fsLink.tiles[sw];
+      if (!pop || !st || !t) return;
+      const pos = st.order.indexOf(sw);
+      const opt = (act, text, small, on, disabled) => '<button class="opt' + (on ? ' on' : '') + '" data-act="' + act + '"' + (disabled ? ' disabled' : '') + '>' +
+        escapeHTML(text) + (small ? '<small>' + escapeHTML(small) + '</small>' : '') + '</button>';
+      let html = '<h3>Footswitch ' + (pos + 1) + ' · ' + escapeHTML(t.caption || '') + '<button class="dlg-close" data-act="close" aria-label="Close">×</button></h3>' +
+        '<div class="seg"><button data-act="press">Press</button><button data-act="hold">Hold</button></div>';
+      if (sw === 1) {
+        html += '<div class="q">Switches between</div>' + SWITCH1_NAMES.map((n, i) => opt('s1:' + i, n, '', st.switch1 === i)).join('');
+      } else if (sw >= 3 && bankMode()) {
+        const i = sw - 3, b = st.bank;
+        html += '<div class="q">Preset · Bank ' + (b.bank + 1) + '</div><select data-act="bp">' +
+          '<option value="0">Default (' + (b.bank * 6 + i + 1) + ')</option>' +
+          Array.from({ length: 64 }, (_, n) => '<option value="' + (n + 1) + '"' + (n + 1 === b.presets[i] ? ' selected' : '') + '>' + (n + 1) + '  ·  ' +
+            escapeHTML(state.presetNames.get(n + 1) || 'Preset ' + (n + 1)) + '</option>').join('') + '</select>' +
+          '<div class="q">Colour</div><div class="swatches">' + BANK_COLORS.map((c, n) => '<button data-act="bc:' + n + '" class="' + (n === b.colors[i] ? 'on' : '') +
+            '" style="--c:' + c + '" aria-label="Colour ' + (n + 1) + '"></button>').join('') + '</div>' +
+          '<div class="q">Symbol</div><div class="symbols"><button data-act="bi:0" class="' + (!b.icons[i] ? 'on' : '') + '" title="No symbol">–</button>' +
+          BANK_SYMBOLS.map(([name], n) => '<button data-act="bi:' + (n + 1) + '" class="' + (n + 1 === b.icons[i] ? 'on' : '') + '" title="' + escapeHTML(name) + '">' + bankSymbol(n + 1) + '</button>').join('') + '</div>';
+      } else if (sw >= 3 && sw <= 7) {
+        const slot = sw - 3, key = FX_SLOT_KEYS[slot], block = state.blocks[key], b = st.abB[slot];
+        const models = block.models.filter(m => m.id);
+        html += '<div class="q">Second effect (B) in this preset</div><select data-act="b">' +
+          '<option value="0">None</option>' + models.map(m => '<option value="' + modelType(m) + '"' + (modelType(m) === b ? ' selected' : '') + '>' + escapeHTML(m.name) + '</option>').join('') + '</select>';
+        if (b) html += '<div class="q">The footswitch</div>' + AB_MODES.map(([a, z], m) => opt('ab:' + m, a, z, st.abMode[slot] === m)).join('');
+        else html += '<p class="hint">With a second effect the footswitch swaps between the two (A is the preset\'s own).</p>';
+      } else if (sw === 8) {
+        if (st.mixSlot < 0) html += '<p class="hint">This preset has no reverb in an FX slot.</p>';
+        else {
+          const ab = st.revB !== 0, mode = st.rpUsed ? 'rp' : ab ? 'ab' : 'mix';
+          const kept = st.revB || st.revBKept, keptModel = kept ? modelOfType(kept, FX_SLOT_KEYS[st.mixSlot]) : null;
+          html += '<div class="q">Switches</div>' +
+            opt('fs8:mix', 'Reverb mix', st.mixKnown ? 'Pos 1 · Pos 2' : 'set on the board', mode === 'mix') +
+            opt('fs8:ab', 'Reverb A / B', keptModel ? keptModel.name : 'choose B below', mode === 'ab', !kept) +
+            opt('fs8:rp', 'Two reverb settings', (st.rpNames[0] || 'Setting 1') + ' · ' + (st.rpNames[1] || 'Setting 2'), mode === 'rp', (st.rpSet & 3) !== 3);
+          const reverbs = state.blocks[FX_SLOT_KEYS[st.mixSlot]].models.filter(m => m.id && /reverb/i.test(m.category));
+          html += '<div class="q">Reverb B</div><select data-act="revb"><option value="0">None</option>' +
+            reverbs.map(m => '<option value="' + modelType(m) + '"' + (modelType(m) === kept ? ' selected' : '') + '>' + escapeHTML(m.name) + '</option>').join('') + '</select>' +
+            rpChoices(st);
+        }
+      } else {
+        html += '<p class="hint">' + escapeHTML(t.note || 'Nothing to set for this footswitch.') + '</p>';
+      }
+      html += '<div class="q">Position on the board</div><select data-act="pos">' +
+        st.order.slice(0, st.count).map((s2, p) => '<option value="' + p + '"' + (p === pos ? ' selected' : '') + '>' + (p + 1) +
+          (s2 === sw ? '' : ' (swap with ' + escapeHTML((fsLink.tiles[s2] || {}).caption || '') + ')') + '</option>').join('') + '</select>';
+      pop.innerHTML = html;
+      pop.hidden = false;
+      // above the field, inside the strip
+      const tile = $('fsStrip').querySelector('.ft[data-sw="' + sw + '"]'), strip = $('fsStrip').getBoundingClientRect();
+      if (tile) {
+        const r = tile.getBoundingClientRect();
+        pop.style.left = Math.max(8, Math.min(r.left - strip.left, strip.width - pop.offsetWidth - 8)) + 'px';
+      }
+    }
+
+const FXP_BOARD_PARAMS = 24, FXP_BOARD_SIZE = 16 + 2 + 2 * FXP_BOARD_PARAMS;
+
+function fxpDecode(bytes) {
+      bytes = Uint8Array.from(bytes);
+      const list = [];
+      for (let i = 0; i < FXP_FAVOURITES; i++) {
+        const at = i * FXP_BOARD_SIZE, raw = bytes.slice(at, at + 16), end = raw.indexOf(0);
+        const name = new TextDecoder().decode(raw.slice(0, end < 0 ? 16 : end));
+        if (!name) continue;
+        const count = Math.min(bytes[at + 16], FXP_BOARD_PARAMS), values = [];
+        for (let v = 0; v < count; v++) values.push((bytes[at + 18 + 2 * v] | (bytes[at + 19 + 2 * v] << 8)) / 65535);
+        list.push({ name, values });
+      }
+      return list;
+    }
+
+function fxpNameBytes(name) {
+      let bytes = new TextEncoder().encode(name);
+      for (let n = Math.min(15, bytes.length); bytes.length > 15; n--) bytes = new TextEncoder().encode(name.slice(0, n));
+      return bytes;
+    }
+
+function fxpEncode(favs) {
+      const out = new Uint8Array(FXP_BOARD_SIZE * FXP_FAVOURITES);
+      favs.slice(0, FXP_FAVOURITES).forEach((p, i) => {
+        const at = i * FXP_BOARD_SIZE, name = fxpNameBytes(p.name);
+        out.set(name, at);
+        const values = (p.values || []).slice(0, FXP_BOARD_PARAMS);
+        out[at + 16] = values.length;
+        values.forEach((v, n) => { const x = Math.round(Math.min(1, Math.max(0, v)) * 65535); out[at + 18 + 2 * n] = x & 0xFF; out[at + 19 + 2 * n] = x >> 8; });
+      });
+      return out;
+    }
+
+async function fxpBoardRead(type) {
+      const m = await ctlRequest('Controller: FX presets ' + type, 60016, u32bytes(type));
+      return m && m.type === 60017 && u32(m.body, 0) === type ? fxpDecode(m.body.slice(4)) : null;
+    }
+
+async function fxpBoardWrite(type, favs) {
+      const m = await ctlRequest('Controller: store FX presets ' + type, 60020, [...u32bytes(type), ...fxpEncode(favs)]);
+      return Boolean(m && m.type === 60021 && m.body[0]);
+    }
+
+function fxpTakeBoard(modelName, board) {
+      const list = fxPresetsOf(modelName);
+      list.forEach(p => { p.fav = false; });
+      const favs = board.map(b => {
+        let p = list.find(x => x.name === b.name);
+        if (!p) { p = { id: fxpId(), name: b.name, values: b.values }; list.push(p); }
+        p.values = b.values;
+        p.fav = true;
+        return p;
+      });
+      const ordered = favs.concat(list.filter(p => !p.fav));
+      fxpStoreLocal(modelName, ordered);
+    }
+
+async function fxpSyncAll() {
+      if (!state.viaController) return;
+      fsLink.syncing = true;
+      try { await fxpSyncRun(); } finally { fsLink.syncing = false; }
+    }
+
+async function fxpSyncRun() {
+      const m = await ctlRequest('Controller: models with FX presets', 60018);
+      if (!m || m.type !== 60019) { log('FX presets: the controller does not share them (older version?)'); return; }
+      const types = new Set();
+      for (let i = 0; i < (m.body[0] | (m.body[1] << 8)); i++) types.add(u32(m.body, 2 + 4 * i));
+      const lib = fxpLibrary();
+      Object.entries(lib).forEach(([name, list]) => { if (fxpFavourites(list).length) { const model = FX_SLOT_KEYS.map(k => state.blocks[k].models.find(x => x.name === name && x.id)).find(Boolean); if (model) types.add(modelType(model)); } });
+      let changed = 0;
+      for (const type of types) {
+        const model = modelOfType(type);
+        if (!model || !state.viaController) continue;
+        const board = await fxpBoardRead(type);
+        if (!board) continue;
+        const mine = fxpFavourites(fxPresetsOf(model.name));
+        const merged = board.slice();
+        mine.forEach(p => { if (merged.length < FXP_FAVOURITES && !merged.some(b => b.name === p.name)) merged.push({ name: p.name, values: p.values }); });
+        fxpTakeBoard(model.name, merged);
+        if (merged.length !== board.length) { await fxpBoardWrite(type, merged); changed++; }
+      }
+      fsLink.synced = true;
+      log('FX presets shared with the controller: ' + types.size + ' models' + (changed ? ', ' + changed + ' written to it' : ''));
+      render();
+    }
+
+async function fxpFromBoard(type) {
+      const model = modelOfType(type);
+      if (!model) return;
+      const board = await fxpBoardRead(type);
+      if (!board) return;
+      fxpTakeBoard(model.name, board);
+      log('FX presets of ' + model.name + ' changed on the controller');
+      render();
     }
 
 async function findInLibrary(kinds, names) {
@@ -3623,7 +5512,7 @@ function saveLevelStore() {
 
 const nativeMeter = () => window.nanoMeter || null;
 
-const meter = { on: false, starting: false, userOff: false, native: false, rate: 48000, ctx: null, stream: null, raw: [], weighted: [], buf: null,
+const meter = { on: false, starting: false, userOff: false, native: false, di: null, rate: 48000, ctx: null, stream: null, raw: [], weighted: [], buf: null,
       timer: null, lastTime: 0, channels: 2, total: 2, first: 1, label: '', deviceId: '', inputs: [], error: '',
       peakDb: [-Infinity, -Infinity], holdDb: [-Infinity, -Infinity], holdAt: [0, 0], clipAt: 0, energy: 0, frames: 0, blockPeak: 0, blocks: [] };
 
@@ -3730,6 +5619,9 @@ async function meterStartNative(deviceId) {
           renderLevel();
           renderSignalChain();
         } else if (Array.isArray(data.p)) {
+          m.di = data.d || null;   // the dry signal on channels 1/2 as well, when 3/4 are measured (the compressor meters)
+          // the louder channel's mean square, unweighted (the helper of the Mac app sends "s" since 1.16.0)
+          m.plainMs = Array.isArray(data.s) && data.n > 0 ? Math.max(...data.s.map(Number)) / data.n : undefined;
           meterFeed(data.p, Number(data.e) || 0, Number(data.n) || 0, m.rate);
         }
       });
@@ -3814,7 +5706,7 @@ function meterStop() {
       if (m.native && nativeMeter()) nativeMeter().stop();
       if (m.stream) m.stream.getTracks().forEach(track => track.stop());
       if (m.ctx) m.ctx.close().catch(() => {});
-      Object.assign(m, { on: false, native: false, ctx: null, stream: null, raw: [], weighted: [], timer: null, peakDb: [-Infinity, -Infinity],
+      Object.assign(m, { on: false, native: false, di: null, plainMs: undefined, ctx: null, stream: null, raw: [], weighted: [], timer: null, peakDb: [-Infinity, -Infinity],
         holdDb: [-Infinity, -Infinity], clipAt: 0, energy: 0, frames: 0, blockPeak: 0, blocks: [] });
     }
 
@@ -3827,15 +5719,17 @@ function meterTick() {
       if (frames <= 0) return;
       m.lastTime = time;
       const peaks = [];
-      let sum = 0;
+      let sum = 0, plain = 0;
       for (let ch = 0; ch < m.channels; ch++) {
         m.raw[ch].getFloatTimeDomainData(m.buf);
-        let peak = 0;
-        for (let i = size - frames; i < size; i++) { const a = Math.abs(m.buf[i]); if (a > peak) peak = a; }
+        let peak = 0, squares = 0;
+        for (let i = size - frames; i < size; i++) { const a = Math.abs(m.buf[i]); if (a > peak) peak = a; squares += a * a; }
         peaks.push(peak);
+        plain = Math.max(plain, squares / frames);
         m.weighted[ch].getFloatTimeDomainData(m.buf);
         for (let i = size - frames; i < size; i++) sum += m.buf[i] * m.buf[i];
       }
+      m.plainMs = plain;
       meterFeed(peaks, sum * WEB_K_GAIN, frames, m.ctx.sampleRate);
     }
 
@@ -3853,6 +5747,7 @@ function meterFeed(peaks, energy, frames, rate) {
         if (peak >= 0.999) m.clipAt = now;
         if (peak > m.blockPeak) m.blockPeak = peak;
       }
+      m.lastPeak = Math.max(...peaks.slice(0, m.channels).map(Number).filter(Number.isFinite), 0);   // for the compressor meters
       m.energy += energy;
       m.frames += frames;
       if (m.frames >= rate / 10) {   // a block of about 100 ms: the energy of all channels together
@@ -3883,6 +5778,8 @@ function meterDraw() {
       });
       const read = $('outRead');
       if (read) read.textContent = loud > -70 ? dbText(loud) : '–';
+      if (duoLayout()) duoMeterDraw();
+      grDraw();
       if (!dialog) return;
       $('lvBarLoud').style.setProperty('--v', meterPos(loud));
       $('lvNumLoud').textContent = loud > -70 ? dbText(loud) : '–';
@@ -3903,6 +5800,7 @@ function renderMeterNode(node) {
 
 function renderLevel() {
       const m = meter;
+      grDraw();
       $('levelToggle').classList.toggle('on', m.on);
       $('levelToggle').setAttribute('aria-checked', String(m.on));
       const select = $('levelInput');
@@ -4019,6 +5917,12 @@ function levelMark(preset) {
       if (!mark || !AL_KINDS.some(k => k.key === mark.kind) || mark.name !== (state.presetNames.get(preset) || '')) return null;
       if (preset === state.selectedPreset) return mark.raw === captureRawNow() && state.amp.level === LEVEL_FULL ? mark : null;
       return mark.saved ? mark : null;
+    }
+
+function levelMarkText(mark) {
+      const label = AL_KINDS.find(k => k.key === mark.kind).label;
+      const off = mark.lufs - alTarget(mark.kind);
+      return Math.abs(off) <= MARK_TOLERANCE ? '✓ ' + label + ' ' + dbText(mark.lufs) : label + ' ' + dbText(mark.lufs) + ' (' + dbText(off, true) + ')';
     }
 
 function levelMarkSet(preset, kind, lufs, saved) {
@@ -4156,15 +6060,17 @@ function renderSignalChain() {
           name: state.cabIR.on ? state.currentIR.shortName || 'Cab / IR' : 'Bypassed', icon: 'cab', color: '#F2F2F2',
           state: state.cabIR.on ? 'on' : 'off', target: 'cabCard', toggle: () => $('cabIRToggle').click() },
         fx('post1'), fx('post2'), fx('post3'),
+        ...(metroSupported() ? [{ tempo: true }] : []),
         { meter: true },
         { io: 'OUT' }
       ];
       box.innerHTML = '';
       nodes.forEach(n => {
         const node = document.createElement('div');
-        if (n.io || n.meter) {
+        if (n.io || n.meter || n.tempo) {
           node.className = 'sc-node io';
           if (n.meter) renderMeterNode(node);
+          else if (n.tempo) renderTempoNode(node);
           else {
             node.innerHTML = '<div class="sc-tile io">' + n.io + '</div>';
             if (state.connected) renderMuteNode(node, n.io === 'IN' ? 'in' : 'out');
@@ -4173,12 +6079,22 @@ function renderSignalChain() {
           return;
         }
         node.className = 'sc-node' + (n.wide ? ' wide' : '');
+        node.dataset.key = n.key;
+        node.dataset.state = n.state;
+        node.style.setProperty('--c', n.color);
+        node.style.setProperty('--ink', iconInk(n.color));
         const icon = n.icon ? '<span class="ico" style="--icon: var(--ico-' + n.icon + ')"></span>' : '';
         node.innerHTML = '<div class="sc-tile ' + n.state + '" style="--c:' + n.color + ';--ink:' + iconInk(n.color) + '">' + icon +
           (n.wide ? '<span class="nm">' + escapeHTML(n.name) + '</span>' : '') + '</div>' +
-          '<span class="sc-lbl">' + escapeHTML(n.label) + '</span>' + (n.wide ? '' : '<span class="sc-sub">' + escapeHTML(n.sub || '') + '</span>');
+          '<span class="sc-lbl">' + escapeHTML(n.label) + '</span>' + (n.wide ? '<span class="sc-wide-sub">' + escapeHTML(n.name) + '</span>'
+            : '<span class="sc-sub">' + escapeHTML(n.sub || '') + '</span>');
         node.title = n.label + (n.wide ? ': ' + n.name : n.sub ? ': ' + n.sub : '') + ' - double-click: on / off';
         node.addEventListener('click', () => {
+          // the iPhone Duo: closed, a tap switches the block; half open or as a book, it chooses the block
+          const layout = duoLayout();
+          if (layout === 'outer') { if (n.state !== 'empty') n.toggle(); return; }
+          if (layout === 'half' || layout === 'book') { duoSetFocus(n.key); return; }
+          if (viewMode() !== 'full') { setViewFocus(n.key); return; }
           const target = $(n.target);
           if (!target) return;
           target.style.setProperty('--flash', n.color);
@@ -4195,9 +6111,76 @@ function renderSignalChain() {
       });
     }
 
+const VIEW_STORE = 'nanoView';
+
+const viewPrefs = (() => {
+      const base = { look: 'bars', view: 'full', focus: 'post2' };
+      try { return Object.assign(base, JSON.parse(localStorage.getItem(VIEW_STORE) || '{}')); } catch (e) { return base; }
+    })();
+
+function saveViewPrefs() { try { localStorage.setItem(VIEW_STORE, JSON.stringify(viewPrefs)); } catch (e) {} }
+
+function viewMode() { return document.documentElement.dataset.duo ? 'full' : viewPrefs.view; }
+
+function barLook() { const duo = document.documentElement.dataset.duo; return duo ? duo !== 'outer' : viewPrefs.look === 'bars'; }
+
+function setViewFocus(key) {
+      viewPrefs.focus = key;
+      saveViewPrefs();
+      renderViewFocus();
+      renderPedalBoard();
+    }
+
+const VIEW_CARDS = { gate: 'gateCard', capture: 'captureCard', cab: 'cabCard' };
+
+function renderViewFocus() {
+      const id = VIEW_CARDS[viewPrefs.focus] || 'block-' + viewPrefs.focus;
+      document.querySelectorAll('.view-focus').forEach(el => { if (el.id !== id) el.classList.remove('view-focus'); });
+      const el = $(id);
+      if (el) el.classList.add('view-focus');
+      document.querySelectorAll('#signalChain .sc-node').forEach(node => node.classList.toggle('view-pick', node.dataset.key === viewPrefs.focus));
+    }
+
+function renderPedalBoard() {
+      const box = $('pedalBoard');
+      if (!box) return;
+      if (viewMode() !== 'pedals') { if (box.firstChild) box.innerHTML = ''; return; }
+      const pictures = document.documentElement.classList.contains('pedal-pictures');
+      const drawn = (icon, cls) => '<div class="drawn ' + (cls || '') + '"><span class="ico" style="--icon: var(--ico-' + icon + ')"></span><i class="fs"></i></div>';
+      const pedal = (key, on, color, art, label, name, empty) =>
+        '<div class="pd' + (on ? ' on' : '') + (empty ? ' empty' : '') + (key === viewPrefs.focus ? ' view-pick' : '') + '" data-key="' + key +
+        '" style="--c:' + color + ';--ink:' + iconInk(color) + '" title="' + escapeHTML(label + ': ' + name) + (empty ? '' : ' - double-click: on / off') + '">' +
+        '<div class="art"><i class="led"></i>' + art + '</div><div class="lbl">' + escapeHTML(label) + '</div><div class="nm">' + escapeHTML(name) + '</div></div>';
+      const fx = key => {
+        const block = state.blocks[key];
+        const model = block.models.find(m => m.name === block.model);
+        const style = fxStyle(model);
+        if (block.model === 'None') return pedal(key, false, '#5e6369', drawn(style.icon || 'unknown', 'blank'), block.title, 'Empty', true);
+        const src = pictures && MODEL_IMAGES[block.model];
+        return pedal(key, block.on, style.color, src ? '<img src="' + escapeHTML(src) + '" alt="">' : drawn(style.icon), block.title, block.model);
+      };
+      const gateValue = state.gate.params[0] ? Math.round(state.gate.params[0].value) + ' %' : '';
+      const captureName = state.capture.on ? state.currentCapture.name || 'Capture' : 'Bypassed';
+      const ampPhoto = state.capture.on ? captureAmpPicture() : amalgamFor(state.currentCapture.name);
+      const cabName = state.cabIR.on ? state.currentIR.shortName || 'Cab / IR' : 'Bypassed';
+      box.innerHTML = '<div class="io">IN</div>' +
+        pedal('gate', state.gate.on, '#F2F2F2', pictures ? '<img class="small" src="' + GATE_IMAGE + '" alt="">' : drawn('gate', 'small'), 'Gate', gateValue) + fx('pre1') + fx('pre2') +
+        pedal('capture', state.capture.on, '#F2F2F2', ampPhoto ? '<img class="amp-photo" src="' + escapeHTML(ampPhoto.file) + '" alt="">'
+          : '<div class="amp"><div class="grille"><span class="plate">' + escapeHTML(captureName) +
+          '</span></div><div class="panel"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>', 'Capture', captureName) +
+        pedal('cab', state.cabIR.on, '#F2F2F2', '<div class="cab"><i></i></div>', 'Cab', cabName) +
+        fx('post1') + fx('post2') + fx('post3') + '<div class="io">OUT</div>';
+    }
+
     function render() { /* replaced by pro/ui.js */ }
 
+function duoLayout() { return document.documentElement.dataset.duo || ''; }
+
 function disconnect() {
+      chooseNext = true;   // the next Connect opens the list (another device may be wanted)
+      autoLink.boardAlone = false;
+      autoLink.wanted = false;   // (the user's own Disconnect: no automatic connecting until Connect is clicked)
+      clearTimeout(autoLink.timer);
       if (state.device && state.device.gatt.connected) {
         state.device.gatt.disconnect();
       } else {
@@ -4809,7 +6792,8 @@ function renderJam() {
       if (!jamStore.open) return;
       $('jamPlay').firstElementChild.style.setProperty('--icon', 'var(--ico-' + (playing ? 'pause' : 'play') + ')');
       $('jamPlay').classList.toggle('on', playing);
-      $('jamTitle').textContent = track ? track.name : 'Choose the folder with your jam tracks';
+      $('jamTitle').textContent = track ? track.name
+        : document.documentElement.dataset.app === 'ios' ? 'Choose your jam tracks (Files app)' : 'Choose the folder with your jam tracks';
       $('jamInfo').textContent = track ? (jam.index + 1) + ' / ' + jam.tracks.length + ' · ' + jamTrackNote(track, false) : '';
       const trim = jamTrim(track);
       $('jamTrim').textContent = dbText(trim, true);
@@ -4857,4 +6841,378 @@ function renderJam() {
       });
       const current = rows.children[jam.index];
       if (current && current.scrollIntoView) current.scrollIntoView({ block: 'nearest' });
+    }
+
+const DUO_KEYS = ['gate', 'pre1', 'pre2', 'capture', 'cab', 'post1', 'post2', 'post3'];
+
+const duo = { focus: 'pre1', stage: '', comp: null, gr: 0, frame: 0 };
+
+const duoStage = document.createElement('section');
+
+const duoList = document.createElement('section');
+
+const duoFooter = document.createElement('section');
+
+function duoCard(key) {
+      return key === 'capture' ? $('captureCard') : key === 'cab' ? $('cabCard') : key === 'gate' ? $('gateCard') : $('block-' + key);
+    }
+
+function duoToggle(key) {
+      if (key === 'capture') $('captureToggle').click();
+      else if (key === 'cab') $('cabIRToggle').click();
+      else if (key === 'gate') $('gateToggle').click();
+      else {
+        const toggle = document.querySelector('#block-' + key + ' > .block-head .toggle-switch');
+        if (toggle) toggle.click();
+      }
+    }
+
+function duoSetFocus(key) {
+      if (!DUO_KEYS.includes(key) || key === duo.focus) return;
+      duo.focus = key;
+      try { localStorage.setItem('nanoDuoFocus', key); } catch (e) { /* storage unavailable */ }
+      duoApply();
+    }
+
+function duoApply() {
+      const layout = duoLayout();
+      if (!layout) return;
+      document.querySelectorAll('.duo-focus').forEach(el => el.classList.remove('duo-focus'));
+      const card = duoCard(duo.focus);
+      if (card) card.classList.add('duo-focus');
+      const block = state.blocks[duo.focus], grid = card && card.querySelector('.param-grid');
+      const eq = block && grid && eqView && eqView.eqModel(block);
+      if (eq && eq.bands.length > 1 && eq.bands.length < 6) {
+        const perBand = Math.floor(block.params.length / eq.bands.length);   // (Parametric 3: gain, freq, Q, type, on - and Output after them)
+        grid.classList.add('duo-bands');
+        grid.style.setProperty('--duo-cols', String(Math.max(2, Math.min(6, perBand))));
+      }
+      document.querySelectorAll('#signalChain .sc-node').forEach(node => node.classList.toggle('duo-sel', node.dataset.key === duo.focus));
+      if (layout === 'half' || layout === 'book') duoStageRender();
+      if (layout === 'book') duoListRender();
+      if (layout === 'outer' || layout === 'book') duoFooterRender();
+    }
+
+function duoBlockInfo(key) {
+      if (key === 'capture') return { title: 'Capture', name: state.currentCapture.name || 'Capture', icon: 'capture', color: '#F2F2F2', on: state.capture.on };
+      if (key === 'cab') return { title: 'Cab / IR', name: state.currentIR.shortName || 'Cab', icon: 'cab', color: '#F2F2F2', on: state.cabIR.on };
+      if (key === 'gate') return { title: 'Gate', name: 'Gate', icon: 'gate', color: '#F2F2F2', on: state.gate.on };
+      const block = state.blocks[key];
+      const style = fxStyle(block.models.find(m => m.name === block.model));
+      return { title: block.title, name: block.model, icon: style.icon, color: style.color, on: block.on && block.model !== 'None' };
+    }
+
+const duoIcon = (info, size) => '<span class="fx-icon" style="--icon: var(--ico-' + info.icon + ');--block-color:' + info.color + ';--icon-ink:' +
+      iconInk(info.color) + ';width:' + size + 'px;height:' + size + 'px"></span>';
+
+function duoStageRender() {
+      const key = duo.focus, block = state.blocks[key];
+      if (block && eqView && eqView.eqModel(block)) {
+        if ($('eqOverlay').hidden || eqView.dialog.key !== key) eqView.openDialog(key);
+        duo.stage = 'eq:' + key;
+        return;
+      }
+      if ($('eqOverlay').parentElement === duoStage && !$('eqOverlay').hidden) eqView.closeDialog();
+      const comp = block ? duoCompModel(block) : null;
+      const info = duoBlockInfo(key);
+      const kind = (comp ? 'comp:' : 'meter:') + key + ':' + info.name;
+      duo.comp = comp;
+      if (duo.stage !== kind) {
+        duo.stage = kind;
+        duoStage.querySelectorAll(':scope > :not(#eqOverlay)').forEach(el => el.remove());
+        const head = document.createElement('div');
+        head.className = 'duo-head';
+        head.innerHTML = duoIcon(info, 24) +
+          '<b>' + escapeHTML(info.title + ' · ' + info.name) + '</b><span class="duo-live" id="duoLive"><i></i><span></span></span>';
+        duoStage.appendChild(head);
+        const body = document.createElement('div');
+        body.className = 'duo-body' + (comp ? ' comp' : '');
+        duoStage.appendChild(body);
+        if (comp) {
+          body.innerHTML = '<svg id="duoCurve"></svg><svg id="duoBars"></svg>';
+          const note = document.createElement('div');
+          note.className = 'duo-note';
+          note.textContent = 'Gain reduction worked out from the ' + (key.startsWith('pre') ? 'DI' : 'output') + ' and the knobs – the Nano does not report it.';
+          duoStage.appendChild(note);
+          body.style.height = 'calc(100% - 64px)';
+          requestAnimationFrame(() => duoCompDraw(true));
+        } else {
+          body.innerHTML = '<div class="duo-big"><span class="cap" style="font-size:10px;letter-spacing:.14em;color:#8e9297">OUTPUT · LUFS</span>' +
+            '<span class="duo-read" id="duoRead">–<small>LUFS</small></span><div class="duo-bars"><i id="duoBarL"></i><i id="duoBarR"></i></div>' +
+            '<span class="duo-mark" id="duoMark"></span><div class="duo-actions" id="duoActions"></div></div>';
+          const actions = body.querySelector('#duoActions');
+          const add = (text, action, primary) => {
+            const button = document.createElement('button');
+            button.className = primary ? 'primary' : '';
+            button.textContent = text;
+            button.addEventListener('click', action);
+            actions.appendChild(button);
+          };
+          if (!meter.on) add('Measure the Nano (USB-C)', () => meterStart(''), true);
+          add(key === 'capture' ? 'Auto level…' : 'Level & Auto level…', openLevel, false);
+          if (key === 'cab' && isFactoryCabIR()) add('Mic: ' + (state.cabIR.mic || '') + ', position ' + (state.cabIR.position || 1) + '…', openMic, false);
+        }
+      }
+      duoMeterDraw();
+    }
+
+function duoCompModel(block) {
+      if (!block.on || !/comp|legendary 87/i.test(block.model || '')) return null;
+      const param = name => block.params.find(p => String(p.name).toLowerCase() === name);
+      const text = p => (p ? String(paramDisplayValue(p)).replace(/−/g, '-').replace(',', '.') : '');
+      const number = p => parseFloat(text(p));
+      const seconds = p => { const t = text(p), v = parseFloat(t); return /ms/.test(t) ? v / 1000 : v; };
+      const threshold = param('threshold'), input = param('input');
+      const ratioText = text(param('ratio'));
+      const ratio = /inf|∞|all/i.test(ratioText) ? 20 : parseFloat(ratioText) || 4;
+      const thr = threshold ? number(threshold) : -10 - ((number(input) || -24) + 24);
+      const mix = param('mix') ? number(param('mix')) / 100 : 1;
+      return {
+        thr: clamp(Number.isFinite(thr) ? thr : -20, -60, 0), ratio: clamp(ratio, 1, 40), knee: 6,
+        attack: clamp(seconds(param('attack')) || 0.01, 0.0002, 1), release: clamp(seconds(param('release')) || 0.25, 0.02, 5),
+        makeup: number(param('makeup')) || 0, mix: clamp(Number.isFinite(mix) ? mix : 1, 0, 1)
+      };
+    }
+
+const duoCompOut = (c, level) => {
+      const over = level - c.thr;
+      if (over <= -c.knee / 2) return level;
+      if (over >= c.knee / 2) return c.thr + over / c.ratio;
+      return level + (1 / c.ratio - 1) * Math.pow(over + c.knee / 2, 2) / (2 * c.knee);
+    };
+
+function grInput(key, c) {
+      const m = meter;
+      const db = a => (a > 0 ? 20 * Math.log10(a) : -Infinity);
+      const fast = c.attack <= 0.01;
+      const level = (ms, peak) => (fast && peak !== undefined ? db(peak) : ms > 0 ? 10 * Math.log10(ms) : -Infinity);
+      if (m.di && m.di.n > 0) {   // the Mac app's helper: 1/2 sent along with the measured pair
+        const ms = Array.isArray(m.di.s) ? Math.max(...m.di.s.map(Number)) / m.di.n : (Number(m.di.e) || 0) / (2 * m.di.n);
+        const peak = Array.isArray(m.di.p) ? Math.max(...m.di.p.map(Number)) : undefined;
+        if (key.startsWith('pre')) return { db: level(ms, peak), from: 'DI 1/2' };
+      } else if (meterIsDry() && m.plainMs !== undefined) {   // measuring 1/2 itself (a browser gets only those)
+        return { db: level(m.plainMs, m.lastPeak), from: (key.startsWith('pre') ? '' : '≈') + 'DI ' + pairText(m.first, m.total) };
+      }
+      if (m.plainMs === undefined) return { db: -Infinity, from: 'USB' };
+      // the output without the make-up gain taken as the compressor's input (turning it back through the curve would
+      // be more exact, but the Level and the effects after it are in that signal, and with a high ratio that blows up)
+      return { db: level(m.plainMs, m.lastPeak) - c.makeup, from: '≈out ' + pairText(m.first, m.total) };   // ≈: rough
+    }
+
+function grDraw() {
+      const meters = document.querySelectorAll('.gr-meter');
+      if (!meters.length) return;
+      const now = performance.now();
+      meters.forEach(el => {
+        const key = el.dataset.key, block = state.blocks[key];
+        const c = block && duoCompModel(block);
+        if (!c) return;
+        el.classList.toggle('off', !meter.on);
+        const note = el.querySelector('.src');
+        if (!meter.on) {
+          note.textContent = meter.starting ? 'starting…' : 'measured over USB-C';
+          el.grLive = null;
+          return;
+        }
+        const live = el.grLive || (el.grLive = { gr: 0, peak: 0, peakAt: 0, frame: 0, shown: -Infinity });   // the moving parts, kept with the element
+        if (!NANO_AUDIO.test(meter.label)) {   // the level meter listens to another interface
+          el.querySelector('.val').firstChild.textContent = '–';
+          el.querySelector('.bar').style.setProperty('--gr', '0%');
+          const text = 'measuring ' + meter.label + ', not the Nano';
+          if (note.textContent !== text) note.textContent = text;
+          return;
+        }
+        const input = grInput(key, c);
+        const target = Number.isFinite(input.db) ? Math.max(0, input.db - duoCompOut(c, input.db)) : 0;
+        const dt = live.frame ? Math.min(0.2, (now - live.frame) / 1000) : 0.025;
+        live.frame = now;
+        live.gr += (target - live.gr) * (1 - Math.exp(-dt / (target > live.gr ? c.attack : c.release)));
+        if (live.gr >= live.peak) { live.peak = live.gr; live.peakAt = now; }
+        else if (now - live.peakAt > 1500) live.peak = Math.max(live.gr, live.peak - 10 * dt);   // held 1.5 s, then falls
+        const share = db => (clamp(db / 20, 0, 1) * 100).toFixed(1) + '%';   // the bar: 0 to -20 dB, from the right
+        const bar = el.querySelector('.bar');
+        bar.style.setProperty('--gr', share(live.gr));
+        bar.style.setProperty('--grp', share(live.peak));
+        bar.querySelector('b').classList.toggle('show', live.peak >= 0.3);
+        el.querySelector('.val').firstChild.textContent = live.gr >= 0.05 ? '−' + live.gr.toFixed(1) : '0.0';
+        // what it sees against its threshold, so a reading of 0 can be understood (the level held a moment for reading)
+        if (input.db >= live.shown || now - (live.shownAt || 0) > 400) { live.shown = input.db; live.shownAt = now; }
+        const whole = db => String(Math.round(db)).replace('-', '−');
+        const text = input.from + ' · in ' + (live.shown > -90 ? whole(live.shown) : '–') + ' / thr ' + whole(c.thr);
+        if (note.textContent !== text) note.textContent = text;
+      });
+    }
+
+function duoCompInput() {
+      const di = meter.di;
+      if (duo.focus.startsWith('pre') && di && di.n > 0 && di.e > 0) return { db: -0.691 + 10 * Math.log10(di.e / di.n), dry: true };
+      const recent = meter.blocks.slice(-4);
+      const e = blockEnergy(recent);
+      return { db: e > 0 ? lufsOf(e) : -Infinity, dry: false };
+    }
+
+function duoCompDraw(full) {
+      const c = duo.comp, curve = $('duoCurve'), bars = $('duoBars');
+      if (!c || !curve || !bars) return;
+      const W = Math.max(120, Math.round(curve.getBoundingClientRect().width)), H = Math.max(100, Math.round(curve.getBoundingClientRect().height));
+      const lo = -60, x = db => 26 + (clamp(db, lo, 0) - lo) / -lo * (W - 32), y = db => H - 20 - (clamp(db, lo, 0) - lo) / -lo * (H - 30);
+      const input = duoCompInput();
+      // the gain reduction follows the level with the compressor's attack and release
+      const target = Number.isFinite(input.db) ? Math.max(0, input.db - duoCompOut(c, input.db)) : 0;
+      const now = performance.now(), dt = duo.frame ? Math.min(0.2, (now - duo.frame) / 1000) : 0.025;
+      duo.frame = now;
+      duo.gr += (target - duo.gr) * (1 - Math.exp(-dt / (target > duo.gr ? c.attack : c.release)));
+      if (full) {
+        curve.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        let s = '';
+        [-48, -36, -24, -12, 0].forEach(db => {
+          s += '<line x1="' + x(db) + '" x2="' + x(db) + '" y1="8" y2="' + (H - 20) + '" stroke="#1d2024"/><line x1="26" x2="' + (W - 6) + '" y1="' + y(db) + '" y2="' + y(db) + '" stroke="#1d2024"/>' +
+            '<text x="' + x(db) + '" y="' + (H - 6) + '" text-anchor="middle" fill="#5e6369" font-size="9.5">' + db + '</text><text x="22" y="' + (y(db) + 3) + '" text-anchor="end" fill="#5e6369" font-size="9.5">' + db + '</text>';
+        });
+        s += '<line x1="' + x(lo) + '" y1="' + y(lo) + '" x2="' + x(0) + '" y2="' + y(0) + '" stroke="#2c3036" stroke-dasharray="3 4"/>';
+        s += '<line x1="' + x(c.thr) + '" x2="' + x(c.thr) + '" y1="8" y2="' + (H - 20) + '" stroke="#45F862" stroke-opacity=".35" stroke-dasharray="2 3"/>' +
+          '<text x="' + (x(c.thr) + 4) + '" y="18" fill="#7ff593" font-size="9.5">threshold</text>';
+        let d = '';
+        for (let i = 0; i <= 120; i++) { const level = lo + i / 120 * -lo; d += (i ? ' L' : 'M') + x(level).toFixed(1) + ',' + y(duoCompOut(c, level)).toFixed(1); }
+        s += '<path d="' + d + '" fill="none" stroke="#45F862" stroke-width="2.4"/>';
+        s += '<line id="duoGrLine" stroke="#ffb02e" stroke-width="3" stroke-opacity=".8"/><circle id="duoHalo" r="14" fill="#45F862" fill-opacity=".18"/>' +
+          '<circle id="duoDot" r="6.5" fill="#f2f2f2" stroke="#0b0c0d" stroke-width="2"/>';
+        curve.innerHTML = s;
+        const BW = Math.max(200, Math.round(bars.getBoundingClientRect().width)), BH = Math.max(100, Math.round(bars.getBoundingClientRect().height));
+        bars.setAttribute('viewBox', '0 0 ' + BW + ' ' + BH);
+        const col = BW / 4, h = BH - 46;
+        let b = '<defs><linearGradient id="duoLv" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#45F862"/><stop offset=".7" stop-color="#45F862"/>' +
+          '<stop offset=".7" stop-color="#f2d14b"/><stop offset=".9" stop-color="#f2d14b"/><stop offset=".9" stop-color="#ff5a4d"/></linearGradient></defs>';
+        [['IN', 'duoIn'], ['GR', 'duoGr'], ['OUT', 'duoOut']].forEach(([label, id], i) => {
+          const bx = i * col + 6, bw = col - 18;
+          b += '<text x="' + (bx + bw / 2) + '" y="12" text-anchor="middle" fill="#8e9297" font-size="10" letter-spacing="1.4">' + label + '</text>' +
+            '<rect x="' + bx + '" y="18" width="' + bw + '" height="' + h + '" rx="7" fill="#15181b" stroke="#23272b"/>' +
+            '<rect id="' + id + 'Bar" x="' + (bx + 3) + '" y="21" width="' + (bw - 6) + '" height="0" rx="5" fill="' + (id === 'duoGr' ? '#ffb02e' : 'url(#duoLv)') + '"/>' +
+            '<text id="' + id + 'Text" x="' + (bx + bw / 2) + '" y="' + (h + 38) + '" text-anchor="middle" fill="#f2f2f2" font-size="14" font-weight="700">–</text>';
+        });
+        b += '<g transform="translate(' + (3 * col + 2) + ',30)"><text fill="#8e9297" font-size="10" letter-spacing="1.4">LUFS</text>' +
+          '<text id="duoCompLufs" y="30" fill="#f2f2f2" font-size="22" font-weight="700">–</text>' +
+          '<text y="72" fill="#8e9297" font-size="10" letter-spacing="1.4">RATIO</text><text y="94" fill="#f2f2f2" font-size="17" font-weight="700">' +
+          (c.ratio >= 20 ? '∞' : (Math.round(c.ratio * 10) / 10)) + ' : 1</text></g>';
+        bars.innerHTML = b;
+        duo.compSize = { h, top: 21 };
+      }
+      // the moving parts
+      const level = Number.isFinite(input.db) ? clamp(input.db, lo, 0) : lo;
+      const out = level - duo.gr;
+      const dot = $('duoDot'), halo = $('duoHalo'), line = $('duoGrLine');
+      if (dot) {
+        dot.setAttribute('cx', x(level)); dot.setAttribute('cy', y(out));
+        halo.setAttribute('cx', x(level)); halo.setAttribute('cy', y(out));
+        line.setAttribute('x1', x(level)); line.setAttribute('x2', x(level)); line.setAttribute('y1', y(level)); line.setAttribute('y2', y(out));
+        dot.setAttribute('opacity', Number.isFinite(input.db) && input.db > -70 ? 1 : 0.25);
+      }
+      const size = duo.compSize;
+      const setBar = (id, frac, text, down) => {
+        const bar = $(id + 'Bar'), label = $(id + 'Text');
+        if (!bar) return;
+        const hh = Math.max(0, Math.min(1, frac)) * (size.h - 6);
+        bar.setAttribute('height', hh.toFixed(1));
+        bar.setAttribute('y', (down ? size.top : size.top + size.h - 6 - hh).toFixed(1));
+        label.textContent = text;
+      };
+      const outPeak = Math.max(meter.peakDb[0], meter.peakDb[1] !== undefined ? meter.peakDb[1] : -Infinity);
+      setBar('duoIn', Number.isFinite(input.db) ? (input.db + 60) / 60 : 0, Number.isFinite(input.db) && input.db > -70 ? dbText(input.db) : '–');
+      setBar('duoGr', duo.gr / 20, duo.gr >= 0.05 ? '−' + duo.gr.toFixed(1) : '0.0', true);
+      setBar('duoOut', Number.isFinite(outPeak) ? (outPeak + 60) / 60 : 0, Number.isFinite(outPeak) && outPeak > -90 ? dbText(outPeak) : '–');
+      const loud = meter.on ? lufsOf(blockEnergy(meter.blocks)) : -Infinity;
+      const lufs = $('duoCompLufs');
+      if (lufs) lufs.textContent = loud > -70 ? dbText(loud) : '–';
+      const live = $('duoLive');
+      if (live) {
+        live.classList.toggle('off', !meter.on);
+        live.lastChild.textContent = !meter.on ? 'METER OFF' : input.dry ? 'LIVE · DI 1/2 + USB 3/4' : 'LIVE · USB ' + meter.first + (meter.channels > 1 ? '/' + (meter.first + 1) : '');
+      }
+    }
+
+function duoMeterDraw() {
+      const layout = duoLayout();
+      if (!layout) return;
+      if (duo.comp && (layout === 'half' || layout === 'book')) { duoCompDraw(false); }
+      const loud = meter.on ? lufsOf(blockEnergy(meter.blocks)) : -Infinity;
+      const text = loud > -70 ? dbText(loud) : '–';
+      document.querySelectorAll('#duoRead, #duoFootRead').forEach(el => { el.firstChild.textContent = text; });
+      [['duoBarL', 0], ['duoBarR', 1], ['duoFootL', 0], ['duoFootR', 1]].forEach(([id, ch]) => {
+        const bar = $(id);
+        if (!bar) return;
+        const pos = meterPos(meter.peakDb[Math.min(ch, meter.channels - 1)]);
+        bar.style.setProperty('--v', pos);
+        bar.style.setProperty('--f', (parseFloat(pos) || 0) / 100);
+      });
+      const live = $('duoLive');
+      if (live && !duo.comp) {
+        live.classList.toggle('off', !meter.on);
+        live.lastChild.textContent = meter.on ? 'LIVE · USB ' + meter.first + (meter.channels > 1 ? '/' + (meter.first + 1) : '') : 'METER OFF';
+      }
+      const mark = state.connected ? levelMark(state.selectedPreset) : null;
+      document.querySelectorAll('#duoMark, #duoFootMark').forEach(el => {
+        el.textContent = mark ? levelMarkText(mark) : meter.on ? 'not levelled yet' : '';
+        el.classList.toggle('ok', Boolean(mark && Math.abs(mark.lufs - alTarget(mark.kind)) <= MARK_TOLERANCE));
+      });
+    }
+
+function duoValues(key) {
+      const pairs = [];
+      if (key === 'capture') {
+        AMP_KNOBS.forEach(k => pairs.push([k.label, ampText(state.amp[k.key])]));
+        pairs.push(['Volume', dbText(Number(state.captureVolumeDb) || 0, true) + ' dB']);
+      } else if (key === 'cab') {
+        pairs.push(['Level', formatCabValue('level', state.cabIR.levelDb)], ['High pass', formatCabValue('highPass', state.cabIR.highPassHz)],
+          ['Low pass', formatCabValue('lowPass', state.cabIR.lowPassHz)]);
+        if (state.cabIR.on && isFactoryCabIR()) pairs.unshift(['Mic', (state.cabIR.mic || '') + ' ' + (state.cabIR.position || 1)]);
+      } else if (key === 'gate') {
+        if (state.gate.params[0]) pairs.push(['Reduction', Math.round(state.gate.params[0].value) + ' %']);
+      } else {
+        const block = state.blocks[key];
+        if (block.model !== 'None') block.params.slice(0, 5).forEach(p => pairs.push([p.name, paramDisplayValue(p)]));
+      }
+      return pairs;
+    }
+
+function duoListRender() {
+      duoList.innerHTML = '';
+      DUO_KEYS.forEach(key => {
+        const info = duoBlockInfo(key);
+        const empty = key !== 'capture' && key !== 'cab' && key !== 'gate' && state.blocks[key].model === 'None';
+        const row = document.createElement('div');
+        row.className = 'duo-row' + (key === duo.focus ? ' sel' : '') + (info.on ? '' : ' off');
+        row.style.setProperty('--c', info.color);
+        row.innerHTML = duoIcon(info, 26) +
+          '<div class="txt"><div class="top"><span class="lbl">' + escapeHTML(info.title.replace(' FX ', ' ')) + '</span><span class="nm">' + escapeHTML(empty ? 'empty' : info.name) + '</span></div>' +
+          '<div class="vals">' + duoValues(key).map(([k, v]) => escapeHTML(k) + ' <b>' + escapeHTML(v) + '</b>').join(' · ') + '</div></div>' +
+          '<div class="toggle-switch' + (info.on ? ' on' : '') + '"><div class="toggle-dot"></div></div>';
+        row.addEventListener('click', e => {
+          if (e.target.closest('.toggle-switch')) { if (!empty) duoToggle(key); return; }
+          duoSetFocus(key);
+        });
+        duoList.appendChild(row);
+      });
+    }
+
+function duoFooterRender() {
+      if (!duoFooter.dataset.built) {
+        duoFooter.dataset.built = '1';
+        duoFooter.innerHTML = '<div style="display:grid;gap:1px"><span class="duo-read" id="duoFootRead">–<small>LUFS</small></span><span class="duo-mark" id="duoFootMark"></span></div>' +
+          '<div class="duo-bars"><i id="duoFootL"></i><i id="duoFootR"></i></div>' +
+          '<button class="icon-btn duo-tuner" title="Tuner" aria-label="Tuner"><span class="ico" style="--icon: var(--ico-tuner)"></span></button>' +
+          '<button class="icon-btn duo-in" title="Mute the guitar input" aria-label="Mute the guitar input">IN</button>' +
+          '<button class="icon-btn duo-jam" title="Jam tracks" aria-label="Jam tracks"><span class="ico" style="--icon: var(--ico-jam)"></span></button>';
+        duoFooter.querySelector('.duo-tuner').addEventListener('click', () => $('tunerBtn').click());
+        duoFooter.querySelector('.duo-in').addEventListener('click', () => setMute('in', state.inputMuted !== true));
+        duoFooter.querySelector('.duo-jam').addEventListener('click', () => $('jamBtn').click());
+        duoFooter.querySelector('.duo-bars').addEventListener('click', openLevel);
+        duoFooter.querySelector('.duo-read').addEventListener('click', openLevel);
+      }
+      const ab = $('abBox');
+      if (duoLayout() === 'book' && ab.parentElement !== duoFooter) {
+        if (!duo.abHome) duo.abHome = { parent: ab.parentElement, next: ab.nextSibling };
+        duoFooter.insertBefore(ab, duoFooter.querySelector('.duo-tuner'));
+      }
+      duoFooter.querySelector('.duo-in').classList.toggle('on', state.inputMuted === true);
+      duoMeterDraw();
     }

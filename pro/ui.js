@@ -54,7 +54,7 @@
 
   // The firmware the effect tables (upstream's, in core.js) were verified against on hardware. A pedal reporting a
   // newer one gets a one-time notice; see "After a firmware update" in CLAUDE.md before raising it.
-  const COMPAT = Object.freeze({ testedFirmware: '2.2.1' });
+  const COMPAT = Object.freeze({ testedFirmware: '2.3.0' });
 
   // ------------------------------------------------------------------ capture kinds
   // A library capture's `type` (protobuf field 6; Cloud metadata `deviceType`) and `instrument` (field 10;
@@ -5957,7 +5957,7 @@
     // Test hooks for a newer pedal: ?demoFirmware=2.3.0 reports that firmware; ?demoUnknown=post2:7E makes that
     // slot report an effect id the tables don't have (on every preset), through the same model parse as a pedal's dump.
     const qs = new URLSearchParams(location.search);
-    const DEMO_FW = /^[\w.+-]{1,32}$/.test(qs.get('demoFirmware') || '') ? qs.get('demoFirmware') : '2.2.1';
+    const DEMO_FW = /^[\w.+-]{1,32}$/.test(qs.get('demoFirmware') || '') ? qs.get('demoFirmware') : '2.3.0';
     const DEMO_UNKNOWN = (() => {
       const m = /^(pre[12]|post[123]):([0-9a-f]{2}(?:[0-9a-f]{2}){0,3})$/i.exec(qs.get('demoUnknown') || '');
       return m ? { key: m[1], id: m[2].match(/../g).map(h => parseInt(h, 16)) } : null;

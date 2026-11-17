@@ -2430,7 +2430,7 @@ async function run() {
   let sent = await txWait(n0, tx => tx.some(t => /^TX Read device settings/.test(t)) && tx.some(t => /^TX Read device info/.test(t)));
   check('opening the Device tab reads the settings (65) and the device info (46 with the clock)', sent.some(t => /^TX Read device settings: 06 C0 08 03 41 00 00 00$/.test(t)) && sent.some(t => /^TX Read device info: 0C C0 08 03 18( [0-9A-F]{2}){5} 2E 00 00 00$/.test(t)), JSON.stringify(sent));
   check('the General sections are hidden on the Device tab', await js('document.querySelector(".settings").hidden && !document.querySelector(".dev-page").hidden'));
-  await checkSoon('Device: About shows the name, firmware (from the keep-alive 92) and serial', async () => (await val('dev-name')) === 'Neural DSP Nano Cortex' && (await val('dev-firmware')) === '2.2.1+demo' && (await val('dev-serial')) === 'NP00XXXXXX', async () => [await val('dev-name'), await val('dev-firmware'), await val('dev-serial')].join(' / '));
+  await checkSoon('Device: About shows the name, firmware (from the keep-alive 92) and serial', async () => (await val('dev-name')) === 'Neural DSP Nano Cortex' && (await val('dev-firmware')) === '2.3.0+demo' && (await val('dev-serial')) === 'NP00XXXXXX', async () => [await val('dev-name'), await val('dev-firmware'), await val('dev-serial')].join(' / '));
   check('Device: the hash is shortened, the full one in the tooltip', /^[0-9a-f]{8}…[0-9a-f]{6}$/.test(await val('dev-hash')) && (await js('document.querySelector(\'[data-fk="dev-hash"]\').title.length')) === 40);
   await checkSoon('Device: LED brightness reads 153 = 60 %, USB playback −6.0 dB', () => js('document.querySelector(\'[data-fk="dev-brightness"]\').value === "153" && document.querySelector(\'[data-fk="dev-brightness"]\').nextElementSibling.textContent === "60%" && document.querySelector(\'[data-fk="dev-usb-num"]\').value === "-6.0"'));
   check('Device: Raw settings is collapsed and lists the 66 fields', await js('(() => { const d = document.querySelector(\'[data-fk="dev-raw"]\'); return !d.open && /6=153/.test(d.textContent) && /17=-6(?![\\d.])/.test(d.textContent) && /13=129/.test(d.textContent); })()'), await js('document.querySelector(\'[data-fk="dev-raw"]\').textContent'));
@@ -3080,25 +3080,25 @@ async function run() {
 
   // ---------------------------------------------------------------- newer firmware, unknown effects
   // Version comparison: numeric per component, suffixes ignored, anything else is "not newer".
-  const fwCases = { '2.2.1': false, '2.2.2': true, '2.3.0': true, '3.0': true, '2.2.1+abc': false, '2.10.0': true, '2.2': false, '2.1.9': false, garbage: false, '': false };
-  for (const [v, want] of Object.entries(fwCases)) check('firmware ' + JSON.stringify(v) + (want ? ' is' : ' is not') + ' newer than 2.2.1', (await js(`__firmware.isNewer(${JSON.stringify(v)})`)) === want);
-  check('firmware compare: 2.10.0 > 2.9.9, 3.0 = 3.0.0, garbage → null', (await js('[__firmware.compare("2.10.0", "2.9.9"), __firmware.compare("3.0", "3.0.0"), __firmware.compare("x", "2.2.1")].join()')) === '1,0,');
-  check('the tested firmware is 2.2.1', (await js('__firmware.tested')) === '2.2.1');
-  check('firmware 2.2.1 (plain demo): no newer-firmware notice', await js('document.getElementById("fwNotice").hidden'));
+  const fwCases = { '2.2.1': false, '2.3.0': false, '2.3.1': true, '2.4.0': true, '3.0': true, '2.3.0+05c36621': false, '2.10.0': true, '2.3': false, '2.2.9': false, garbage: false, '': false };
+  for (const [v, want] of Object.entries(fwCases)) check('firmware ' + JSON.stringify(v) + (want ? ' is' : ' is not') + ' newer than 2.3.0', (await js(`__firmware.isNewer(${JSON.stringify(v)})`)) === want);
+  check('firmware compare: 2.10.0 > 2.9.9, 3.0 = 3.0.0, garbage → null', (await js('[__firmware.compare("2.10.0", "2.9.9"), __firmware.compare("3.0", "3.0.0"), __firmware.compare("x", "2.3.0")].join()')) === '1,0,');
+  check('the tested firmware is 2.3.0', (await js('__firmware.tested')) === '2.3.0');
+  check('firmware 2.3.0 (plain demo): no newer-firmware notice', await js('document.getElementById("fwNotice").hidden'));
   await js('localStorage.removeItem("settings.firmwareWarned")');
   const loadDemo = async (query) => {
     const loaded = new Promise(r => wc.once('did-finish-load', r));
     await win.loadURL('file://' + PAGE + '?demo' + query);
     await loaded; await waitFor(BOOTED); await settle(); await frame();
   };
-  await loadDemo('&demoFirmware=2.2.1');
-  check('firmware 2.2.1 reported: no notice, nothing remembered', await js('document.getElementById("fwNotice").hidden && localStorage.getItem("settings.firmwareWarned") === null'));
-  await loadDemo('&demoFirmware=2.3.0&demoUnknown=post2:7E');
+  await loadDemo('&demoFirmware=2.3.0');
+  check('firmware 2.3.0 reported: no notice, nothing remembered', await js('document.getElementById("fwNotice").hidden && localStorage.getItem("settings.firmwareWarned") === null'));
+  await loadDemo('&demoFirmware=2.4.0&demoUnknown=post2:7E');
   const NOTICE = 'This firmware is newer than the editor has been tested with. Some new effects may not be editable until this app is updated.';
-  await checkSoon('firmware 2.3.0: the notice shows under the header', 'document.getElementById("fwNotice").hidden === false');
+  await checkSoon('firmware 2.4.0: the notice shows under the header', 'document.getElementById("fwNotice").hidden === false');
   check('the notice has the agreed text and no modal', (await js('document.querySelector("#fwNotice .txt").textContent')) === NOTICE && !(await js('!!document.querySelector(".modal")')));
-  check('the notice remembers firmware 2.3.0', (await js('localStorage.getItem("settings.firmwareWarned")')) === '"2.3.0"');
-  const unknownLog = () => js('__ui.logs.filter(l => l.text === "Unknown effect id 0x7E in Post FX 2 (firmware 2.3.0)").length');
+  check('the notice remembers firmware 2.4.0', (await js('localStorage.getItem("settings.firmwareWarned")')) === '"2.4.0"');
+  const unknownLog = () => js('__ui.logs.filter(l => l.text === "Unknown effect id 0x7E in Post FX 2 (firmware 2.4.0)").length');
   check('one log line for the unknown id', (await unknownLog()) === 1, String(await unknownLog()));
   check('unknown effect: node title and subtitle', (await js('document.querySelector("[data-stage=post2] .model").textContent + " | " + document.querySelector("[data-stage=post2] .sub").textContent')) === 'Unknown effect | Newer firmware?');
   check('unknown effect: the subtitle is not clipped', await js('(() => { const e = document.querySelector("[data-stage=post2] .sub"); return e.scrollWidth <= e.clientWidth + 1; })()'), await js('(() => { const e = document.querySelector("[data-stage=post2] .sub"); return e.scrollWidth + " > " + e.clientWidth; })()'));
@@ -3142,9 +3142,34 @@ async function run() {
   await txWait(m0, (tx) => tx.some(t => /model select/.test(t)));
   check('picking a known effect replaces the unknown one', (await js('document.querySelector("[data-stage=post2] .model").textContent')) === 'Tape Delay' && (await txSince(m0)).some(t => t.startsWith('TX Post FX 2 model select Tape Delay')), (await txSince(m0)).join(' | '));
   check('a known effect shows its knobs again', await js('!!document.querySelector(".inspector .knob") && !document.querySelector("[data-fk=unknown-note-post2]")'));
-  await loadDemo('&demoFirmware=2.3.0&demoUnknown=post2:7E');
-  check('reconnecting on 2.3.0: the notice does not come back', await js('document.getElementById("fwNotice").hidden'));
+  await loadDemo('&demoFirmware=2.4.0&demoUnknown=post2:7E');
+  check('reconnecting on 2.4.0: the notice does not come back', await js('document.getElementById("fwNotice").hidden'));
   check('reconnecting: the unknown effect is reported again', (await js('document.querySelector("[data-stage=post2] .model").textContent')) === 'Unknown effect');
+  // ---------------------------------------------------------------- NanOS 2.3.0 (upstream V1.14+)
+  const has = (key, names, cat) => js(`${JSON.stringify(names)}.every(n => state.blocks.${key}.models.some(m => m.name === n && m.category === ${JSON.stringify(cat)}))`);
+  check('NanOS 2.3.0: Poly Octaver, Wham and Chief OC2 are Pitch effects in Pre FX 1 and 2', (await has('pre1', ['Poly Octaver', 'Wham', 'Chief OC2'], 'Pitch')) && (await has('pre2', ['Poly Octaver', 'Wham', 'Chief OC2'], 'Pitch')));
+  check('NanOS 2.3.0: Blossom (ST) and Shimmer are Reverbs in Post FX 3, not in Post FX 1', (await has('post3', ['Blossom (ST)', 'Shimmer'], 'Reverb')) && !(await has('post1', ['Shimmer'], 'Reverb')));
+  check('a 2.3.0 reverb takes the reverb colour', (await js('(() => { const b = state.blocks.post3, was = b.model; b.model = "Shimmer"; const c = __stageColor("post3"); b.model = was; return c; })()')) === '#f570d6');
+  // Scaling: #31's fitted curves (editor/patches) win where they exist; upstream's skew covers the rest.
+  const share = (model, param, travel) => js(`(() => { const m = state.blocks.post1.models.concat(state.blocks.pre1.models, state.blocks.post3.models).find(m => m.name === ${JSON.stringify(model)}); const p = m && m.params.find(p => p.name === ${JSON.stringify(param)}); return p ? travelToShare(p.meta, ${travel}) : null; })()`);
+  const nearly = (a, b) => typeof a === "number" && Math.abs(a - b) < 1e-6;
+  const tremolo = await share('Tremolo', 'Rate', 0.5);
+  check('upstream skew where #31 has no curve: Tremolo Rate at half travel is 0.5^(1/0.6) of its range', nearly(tremolo, Math.pow(0.5, 1 / 0.6)), String(tremolo));
+  const lhc = await share('Low-High Cut', 'HPF Freq', 0.5);
+  check('#31 curve wins where both exist: Low-High Cut HPF at half travel follows 1-(1-n)^3.98, not skew 0.3', nearly(lhc, 1 - Math.pow(0.5, 3.98)), String(lhc));
+  check('travelToShare and shareToTravel are inverse (Tremolo Rate, Low-High Cut HPF)', await js(`(() => { const ms = state.blocks.post1.models.concat(state.blocks.pre1.models); const ps = [['Tremolo','Rate'],['Low-High Cut','HPF Freq']].map(([m,n]) => ms.find(x => x.name === m).params.find(p => p.name === n)); return ps.every(p => [0.1, 0.37, 0.8].every(t => Math.abs(shareToTravel(p.meta, travelToShare(p.meta, t)) - t) < 1e-9)); })()`));
+  check('upstream\'s direct reconnect is disabled: every connect goes through the picker', (await js('knownNano().then(v => v === null)')) === true);
+  // Picking a 2.3.0 effect writes it, and the demo pedal takes it (no "did not take" from upstream's model check).
+  await click('[data-stage=pre1]');
+  m0 = await mark();
+  await click('[data-fk="picker-pre1"]');
+  await waitFor('!!document.querySelector(".pop")');
+  await type('Poly Octaver'); await key('Return');
+  await txWait(m0, (tx) => tx.some(t => /model select/.test(t)));
+  await settle({ quiet: 1200 });
+  check('picking Poly Octaver writes it to Pre FX 1', (await txSince(m0)).some(t => t.startsWith('TX Pre FX 1 model select Poly Octaver')), (await txSince(m0)).join(' | '));
+  check('Poly Octaver stays in Pre FX 1 and shows its knobs', (await js('document.querySelector("[data-stage=pre1] .model").textContent')) === 'Poly Octaver' && await js('document.querySelectorAll(".inspector .knob").length === 3'));
+  check('the demo pedal took it: no "did not take" message', (await js('__ui.logs.filter(l => /did not take/.test(l.text)).length')) === 0);
   await js('localStorage.removeItem("settings.firmwareWarned")');
   await loadDemo('');
 
