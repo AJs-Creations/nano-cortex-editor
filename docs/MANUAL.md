@@ -345,6 +345,10 @@ Every inspector's title row shows the preset's **Tempo** in BPM.
 
 The range is 30–300 BPM. The metronome can follow this tempo ([section 10](#10-metronome)).
 
+**On NanOS 2.3.0** the range is the pedal's, 40–240 BPM, and a typed decimal (120.5) is kept. Next to **Tap** is the
+pedal's tempo mode: **Preset** (each preset keeps its own tempo) or **Global** (one tempo for all presets). While the
+pedal follows an external MIDI clock the tempo is read-only and the row says "Following MIDI clock".
+
 ## 9. Tuner
 
 Press **T** or click **Tuner** in the header.
@@ -360,6 +364,14 @@ silence the pedal's output while you tune. **Esc** or **Close** ends the tuner. 
 
 Press **N** or click **Metronome**. The click plays from your computer, not from the pedal. **Space** starts and stops
 it, **Esc** closes the panel; the switch at the top right chooses **Simple** or **Advanced**.
+
+**The pedal's metronome (NanOS 2.3.0).** Connected to a Nano on NanOS 2.3.0, the panel has two tabs and opens on
+**Pedal**: the Nano's own click, heard through the pedal's outputs. Set the tempo (− / +, typing, **Tap tempo** or
+**T**) and the **Global | Preset** tempo mode, switch the **Metronome** on and off (**Space**), and choose its
+**Volume** (−60 to +9 dB), **Sound** (Blip or Digital), **Subdivision** (1/4, 1/8, 1/8T, 1/16) and **Time
+signature**. The pedal keeps clicking when you close the panel or change preset. It doesn't report these settings
+back, so the tab shows what the editor last sent; nothing is sent until you change something. **Computer** is the
+metronome described below. Only one of the two clicks at a time: starting one stops the other.
 
 **Simple.**
 
