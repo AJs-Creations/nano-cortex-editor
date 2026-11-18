@@ -88,6 +88,8 @@ const ENTRY = [
   'applyFXModelsFromCurrentState', 'handleFXParamRefreshResponse', 'requestNextFXParamRefresh', 'cancelFXParamRefresh',
   'handleCabinetSlotContentResponse', 'normalizedToParamValue', 'normaliseName', 'captureRawToDb', 'blockSlotConfig',
   'gattWriteQueue', 'gattWritePumpRunning', 'waitUntil', 'encodeInt32',
+  // the pedal metronome's lists and ranges (NanOS 2.3+), used by pro/ui.js's tempo code and Pedal tab
+  'METRO_TIME_SIGS', 'METRO_NOTES', 'METRO_SOUNDS', 'METRO_BPM', 'METRO_VOL',
 ];
 
 // Upstream functions the pro UI replaces on `window`. Must be function declarations.
@@ -156,7 +158,28 @@ for (const t of top) for (const n of t.names) byName.set(n, t);
 const missingEntry = ENTRY.filter(n => !byName.has(n));
 if (missingEntry.length) throw new Error('Upstream layout changed: core needs these names but upstream no longer declares them: ' + missingEntry.join(', '));
 
+// Upstream behaviour the app does differently. knownNano (V1.17+) connects the last device straight from
+// navigator.bluetooth.getDevices(), past the shell's picker and its remembered pedal (src/bt-picker.js), and waits
+// 2.5 s when the pedal doesn't answer: stubbed to "no known device" so every connect goes through requestDevice().
+// Upstream's tempo / metronome UI (V1.18): the pro UI replaces it (pro/ui.js, "preset tempo" and the N window). Its
+// dialog looks up the id "metroOverlay", which is the pro page's own metronome window, and then touches upstream-only
+// children (#mtArc, …), so metroRefresh (called from the state-dump parse) threw while the window was open and
+// aborted the rest of every state read. The state-dump fields 24 / 55 / 56 / 61 stay parsed (into upstream's
+// `metro`); the pro UI reads them itself. handleTempoScreen (rx 145) is handled by the pro UI's onC305 wrapper.
+const DISABLED = {
+  knownNano: 'async function knownNano() { return null; /* disabled by build-core.js: the shell picks the pedal */ }',
+  metroRefresh: 'function metroRefresh() { /* disabled by build-core.js: upstream metronome UI, replaced by pro/ui.js */ }',
+  metroDialog: 'function metroDialog() { return null; /* disabled by build-core.js: upstream metronome UI */ }',
+  openMetro: 'function openMetro() { /* disabled by build-core.js: upstream metronome UI */ }',
+  closeMetro: 'function closeMetro() { metro.open = false; /* disabled by build-core.js: upstream metronome UI (it also wrote 145 {3:0}) */ }',
+  metroAnimate: 'function metroAnimate() { /* disabled by build-core.js: upstream metronome UI */ }',
+  renderTempoNode: 'function renderTempoNode() { /* disabled by build-core.js: upstream metronome UI */ }',
+  metroSend: 'function metroSend() { /* disabled by build-core.js: the pro UI writes the tempo screen (pro/ui.js) */ }',
+  handleTempoScreen: 'function handleTempoScreen() { /* disabled by build-core.js: rx 145 is read by pro/ui.js (onC305) */ }',
+};
+
 const hookSet = new Set(HOOKS);
+const disabledSet = new Set(Object.keys(DISABLED));
 const keep = new Set();
 const queue = [...ENTRY];
 for (const t of top) if (t.stateInit) { keep.add(t); queue.push(...t.refs); }
@@ -166,7 +189,8 @@ while (queue.length) {
   if (!t || keep.has(t)) continue;
   keep.add(t);
   // Hooks are replaced by the pro UI, so what their upstream bodies reference is not needed.
-  if (!t.names.some(n => hookSet.has(n))) queue.push(...t.refs);
+  // So are disabled ones (their stub bodies reference nothing of upstream's but `metro`, kept through the state parse).
+  if (!t.names.some(n => hookSet.has(n) || disabledSet.has(n))) queue.push(...t.refs);
 }
 
 for (const h of HOOKS) {
@@ -189,6 +213,13 @@ for (const h of HOOKS) {
   const t = byName.get(h);
   if (t.names.length !== 1) throw new Error('Hook ' + h + ' shares a declaration with ' + t.names.join(', '));
   patches.set(t, `    function ${h}() { /* replaced by pro/ui.js */ }`);
+}
+
+for (const [name, body] of Object.entries(DISABLED)) {
+  const t = byName.get(name);
+  if (!t) throw new Error('DISABLED ' + name + ' is no longer in upstream: drop it from build-core.js');
+  if (t.names.length !== 1) throw new Error('DISABLED ' + name + ' shares a declaration with ' + t.names.join(', '));
+  patches.set(t, '    ' + body);
 }
 
 // ---------------------------------------------------------------- 4. emit

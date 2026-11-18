@@ -76,7 +76,7 @@ Get the latest build from [GitHub Releases](https://github.com/AJs-Creations/nan
 
 ## Requirements
 
-- A Nano Cortex. Tested with firmware **2.2.1**.
+- A Nano Cortex. Tested with firmware **2.3.0**.
 - Bluetooth Low Energy (Bluetooth 4.0 or later) on your computer.
 - macOS 12 Monterey or later, Windows 10/11 (64-bit), or a 64-bit Linux desktop (x86-64 or ARM64) with BlueZ, the
   standard Linux Bluetooth stack, and the `bluetooth` service running. The Windows and Linux builds have not been
