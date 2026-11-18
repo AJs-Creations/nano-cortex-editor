@@ -1,0 +1,179 @@
+NanOS 2.3.0 model corrections, measured against Cortex Cloud (the official app) on NanOS 2.3.0, 2026-11-17, on the
+owner's pedal: sweep presets with a different knob travel on every wire index, each control read in the app (the
+numbers are in docs/HANDOFF-NANOS-2.3.md, "Model corrections to make"). Applies on top of 0001.
+- Hall, Room, Cave, Modulated, Ambience: Mix is the last wire index; the UI keeps Mix first (wireIndex).
+- Upstream's skew wins over #31's fitted curve wherever both exist; #31's curve stays where there is no skew.
+- Low-High Cut HPF / LPF 20-20000 Hz (skew 0.3); Graphic 9 LPF 1000-20000 Hz (skew 0.6), HPF 20-20000 Hz (skew 0.3).
+- Room Pre Delay 0-100 ms with skew 0.6; Blossom E.R. Length linear.
+- Envelope Filter Attack / Decay 10-1000 ms, Level -20..+20 dB, Freq Depth -10000..+10000 Hz, all linear (Freq left).
+- Dyn Depth 0-60 dB (skew 0.6); Dual Reverse Delay Trig Threshold -40..0 dB; Circular Delay Feedback 0-95 %,
+  High Pass 20-13000 Hz (skew 0.6) and Low Pass 20-20000 Hz (skew 0.61), both fitted on two points (approximate).
+
+--- a/editor/index.html
++++ b/editor/index.html
+@@ -2843,18 +2843,20 @@
+       "Chorus 229T": { "Rate": 0.5 },
+       "Tremolo": { "Rate": 0.6, "Fade In": 0.6, "Fade Out": 0.6 },
+       "Analog Delay": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6, "Mod Rate": 0.6 },
+-      "Digital Delay (ST)": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6 },
+-      "Dual Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "High Pass": 0.6, "Low Pass": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6 },
+-      "Dual Reverse Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "Attack": 0.6, "Release": 0.6, "High Pass": 0.6 },
++      "Digital Delay (ST)": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6, "Dyn Depth": 0.6 },
++      "Dual Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "High Pass": 0.6, "Low Pass": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6, "Dyn Depth": 0.6 },
++      "Dual Reverse Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "Attack": 0.6, "Release": 0.6, "High Pass": 0.6, "Dyn Depth": 0.6 },
++      "Circular Delay": { "High Pass": 0.6, "Low Pass": 0.61 },
+       "Tape Delay": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6 },
+       "Ambience": { "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+       "Cave": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+       "Hall": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+       "Mind Hall": { "High Pass": 0.5, "Low Pass": 0.5 },
+       "Modulated": { "Decay": 0.6, "Pre Delay": 0.6, "Mod Speed": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+-      "Room": { "Decay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
+-      "Blossom (ST)": { "Decay": 0.4, "Pre Delay": 0.4, "High Pass": 0.5, "Low Pass": 0.5, "E.R. Length": 0.4, "Bass": 2.375, "Treble": 2.375 },
++      "Room": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
++      "Blossom (ST)": { "Decay": 0.4, "Pre Delay": 0.4, "High Pass": 0.5, "Low Pass": 0.5, "Bass": 2.375, "Treble": 2.375 },
+       "Shimmer": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Mod Speed": 0.6 },
++      "Graphic 9": { "HPF": 0.3, "LPF": 0.6 },
+     };
+ 
+     function makeParams(labels, modelName = '') {
+@@ -3012,31 +3014,15 @@
+       // Envelope Filter values calibrated from the paired Cortex Cloud/readback sample.
+       if (m.includes('envelope filter')) {
+         if (p === 'sens') return rangeMeta(0, 54, 0.1, 'dB', 1);
+-        if (p === 'attack') {
+-          const meta = rangeMeta(1, 1000, 0.1, 'ms', 1);
+-          meta.normalizedPower = 0.978695;
+-          return meta;
+-        }
+-        if (p === 'decay') {
+-          const meta = rangeMeta(0, 1000, 0.1, 'ms', 1);
+-          meta.normalizedPower = 0.984153;
+-          return meta;
+-        }
+-        if (p === 'level') {
+-          const meta = rangeMeta(0, 10, 0.1, 'dB', 1);
+-          meta.normalizedPower = 1.4495;
+-          return meta;
+-        }
++        // Measured on NanOS 2.3.0: Attack and Decay 10-1000 ms and Level -20..+20 dB, all linear.
++        if (p === 'attack' || p === 'decay') return rangeMeta(10, 1000, 0.1, 'ms', 1);
++        if (p === 'level') return rangeMeta(-20, 20, 0.1, 'dB', 1);
+         if (p === 'freq') {
+           const meta = rangeMeta(20, 20000, 1, 'Hz', 0);
+           meta.normalizedPower = 4.085;
+           return meta;
+         }
+-        if (p === 'freq depth') {
+-          const meta = rangeMeta(0, 1000, 1, 'Hz', 0);
+-          meta.normalizedPower = 1.039;
+-          return meta;
+-        }
++        if (p === 'freq depth') return rangeMeta(-10000, 10000, 1, 'Hz', 0);   // linear (NanOS 2.3.0)
+         if (p === 'reso') {
+           const meta = rangeMeta(1, 10, 0.01, '', 2);
+           meta.normalizedPower = 10 / 3;
+@@ -3044,6 +3030,12 @@
+         }
+       }
+ 
++      // Measured on NanOS 2.3.0 (they used to fall into the generic depth and threshold ranges below):
++      // Dyn Depth 0-60 dB (skew 0.6 in PARAM_SKEW), Trig Threshold -40..0 dB linear, Circular Delay Feedback 0-95 %.
++      if (p === 'dyn depth') return rangeMeta(0, 60, 0.1, 'dB', 1);
++      if (p === 'trig threshold') return rangeMeta(-40, 0, 0.1, 'dB', 1);
++      if (p === 'feedback' && m.includes('circular delay')) return rangeMeta(0, 95, 0.01, '%', 2);
++
+       if (p === 'wah') return rangeMeta(0, 1, 0.01, '', 2);
+       if (p === 'lp/bp/hp') return rangeMeta(-1, 1, 0.01, '', 2);
+       if (p === 'noise reduction') return rangeMeta(0, 100, 0.1, '%', 1);
+@@ -3108,30 +3100,17 @@
+       // Match cutoff controls before the generic frequency fallback. Models such
+       // as Low-High Cut label these "HPF Freq" and "LPF Freq".
+       if (p === 'hpf' || p === 'high pass' || p.includes('hpf freq') || p.includes('high pass freq')) {
+-        if (m.includes('graphic 9')) return rangeMeta(20, 200, 1, 'Hz', 0);
+-        if (m.includes('low-high cut')) {
+-          const meta = rangeMeta(20, 800, 1, 'Hz', 0);
+-          // Cortex Cloud 665 Hz corresponds to wire 0.357; use the fitted ease-out curve.
+-          meta.normalizedReversePower = 3.98;
+-          return meta;
+-        }
++        // NanOS 2.3.0: Graphic 9 and Low-High Cut run 20-20000 Hz (skew 0.3), Circular Delay 20-13000 Hz (skew 0.6).
++        if (m.includes('graphic 9') || m.includes('low-high cut')) return rangeMeta(20, 20000, 1, 'Hz', 0);
++        if (m.includes('circular delay')) return rangeMeta(20, 13000, 1, 'Hz', 0);
+         if (m.includes('tape delay')) return fxFrequencyRangeMeta(80, 800);
+         if (m.includes('transpose')) return fxFrequencyRangeMeta(20, 2000);
+         return fxFrequencyRangeMeta(20, 800);
+       }
+       if (p === 'lpf' || p === 'low pass' || p.includes('lpf freq') || p.includes('low pass freq')) {
+-        if (m.includes('graphic 9')) {
+-          const meta = rangeMeta(1000, 16000, 1, 'Hz', 0);
+-          // Calibrated against NanOS 2.2.1 / Cortex Cloud: wire 0.615 displays as 9451 Hz.
+-          meta.normalizedPower = 1.1803;
+-          return meta;
+-        }
+-        if (m.includes('low-high cut')) {
+-          const meta = rangeMeta(1000, 16000, 1, 'Hz', 0);
+-          // Cortex Cloud 12.2 kHz corresponds to wire 0.863.
+-          meta.normalizedPower = 1.98;
+-          return meta;
+-        }
++        // NanOS 2.3.0: Graphic 9 1000-20000 Hz (skew 0.6), Low-High Cut and Circular Delay 20-20000 Hz (0.3, 0.61).
++        if (m.includes('graphic 9')) return rangeMeta(1000, 20000, 1, 'Hz', 0);
++        if (m.includes('low-high cut') || m.includes('circular delay')) return rangeMeta(20, 20000, 1, 'Hz', 0);
+         if (m.includes('tape delay')) return fxFrequencyRangeMeta(800, 6000);
+         if (m.includes('transpose')) return fxFrequencyRangeMeta(200, 19900);
+         if (m.includes('ambience') || m.includes('hall') || m.includes('mind hall') || m.includes('modulated') || m.includes('room')) return fxFrequencyRangeMeta(800, 12000);
+@@ -3152,7 +3131,7 @@
+       }
+ 
+       if (p === 'pre delay') {
+-        if (m.includes('ambience')) return rangeMeta(0, 100, 0.1, 'ms', 1);
++        if (m.includes('ambience') || m === 'room') return rangeMeta(0, 100, 0.1, 'ms', 1);
+         if (m.includes('hall') || m.includes('room')) return rangeMeta(1, 100, 0.1, 'ms', 1);
+         return rangeMeta(1, 200, 0.1, 'ms', 1);
+       }
+@@ -3249,14 +3228,15 @@
+         device('Tape Delay', 'Delay', ['Mix', 'Feedback', 'High Pass', 'Low Pass', 'Drive', 'Delay Time', 'Wow', 'Flutter', 'Ping Pong (On/Off)', 'Sync (On/Off)', 'Sync Note'], [0xF4, 0x2E], [0, 1, 2, 3, 4, 9, 10, 5, 6, 7, 8])
+       ],
+       reverb: [
+-        device('Ambience', 'Reverb', ['Mix', 'Size', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC8, 0x3E]),
++        // Hall, Room, Cave, Modulated, Ambience: Mix is the last wire index (NanOS 2.3.0 sweep); the UI keeps Mix first.
++        device('Ambience', 'Reverb', ['Mix', 'Size', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC8, 0x3E], null, [4, 0, 1, 2, 3]),
+         device('Blossom (ST)', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass', 'Extra E.R. (Off/On)', 'E.R. Length', 'Diffusion',
+           'Bass', 'Treble', 'Ducking', 'Modulation'], [0xDE, 0x3E]),   // NanOS 2.3.0
+-        device('Cave', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'Damping', 'High Pass', 'Low Pass'], [0xC9, 0x3E]),
+-        device('Hall', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC3, 0x3E]),
++        device('Cave', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'Damping', 'High Pass', 'Low Pass'], [0xC9, 0x3E], null, [5, 0, 1, 2, 3, 4]),
++        device('Hall', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC3, 0x3E], null, [4, 0, 1, 2, 3]),
+         device('Mind Hall', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass', 'Damping'], [0xCB, 0x3E]),
+-        device('Modulated', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'Mod Speed', 'Mod Depth', 'High Pass', 'Low Pass'], [0xC7, 0x3E]),
+-        device('Room', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC0, 0x3E]),
++        device('Modulated', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'Mod Speed', 'Mod Depth', 'High Pass', 'Low Pass'], [0xC7, 0x3E], null, [6, 0, 1, 2, 3, 4, 5]),
++        device('Room', 'Reverb', ['Mix', 'Decay', 'Pre Delay', 'High Pass', 'Low Pass'], [0xC0, 0x3E], null, [4, 0, 1, 2, 3]),
+         device('Shimmer', 'Reverb', ['Mix', 'Decay', 'Brightness', 'Feedback', 'Pitch', 'Pre Delay', 'Damping', 'High Pass', 'Rand Pitch',
+           'Mod Speed', 'Mod Depth'], [0xCA, 0x3E])   // NanOS 2.3.0
+ ]
+@@ -4954,17 +4934,20 @@
+ 
+     // The Nano's value 0-1 (the control's travel) <-> the share of the parameter's range (see PARAM_SKEW)
+     function travelToShare(meta, n) {
+-      // A fitted curve (editor/patches, from #31) wins over the skew until both are checked on a Nano.
++      // Upstream's skew wins (the official app agrees with it on NanOS 2.3.0 wherever both exist); a fitted curve
++      // (editor/patches, from #31) applies only where there is no skew.
+       const v = clamp(n, 0, 1);
++      if (meta.skew) return Math.pow(v, 1 / meta.skew);
+       if (meta.normalizedReversePower) return 1 - Math.pow(1 - v, meta.normalizedReversePower);
+       if (meta.normalizedPower) return Math.pow(v, meta.normalizedPower);
+-      return meta.skew ? Math.pow(v, 1 / meta.skew) : v;
++      return v;
+     }
+     function shareToTravel(meta, share) {
+       const s = clamp(share, 0, 1);
++      if (meta.skew) return Math.pow(s, meta.skew);
+       if (meta.normalizedReversePower) return 1 - Math.pow(1 - s, 1 / meta.normalizedReversePower);
+       if (meta.normalizedPower) return Math.pow(s, 1 / meta.normalizedPower);
+-      return meta.skew ? Math.pow(s, meta.skew) : s;
++      return s;
+     }
+ 
+ function parseSelectedCaptureState(payload) {
