@@ -182,6 +182,13 @@ async function run() {
 
   // metronome
   await key('n'); await sleep(150);
+  // The demo pedal runs NanOS 2.3.0, so the window opens on the Pedal tab: the pedal's own metronome.
+  await click('[data-fk="pmetro-on"]'); await sleep(80);
+  await js(`(() => { const v = document.querySelector('[data-fk="pmetro-vol"]'); v.value = '-12'; v.dispatchEvent(new Event('input', { bubbles: true }));
+    [...document.querySelectorAll('#metroPedal button')].find(b => b.textContent.trim() === '1/8').click(); return 0; })()`); await sleep(120);
+  await shot('metronome-pedal', '#metroOverlay .tuner-card', 16);
+  await click('[data-fk="pmetro-on"]'); await sleep(80);
+  await click('[data-fk="metro-tab-computer"]'); await sleep(150);
   await shot('metronome-simple', '#metroOverlay .tuner-card', 16);
   await click('[data-fk="metro-mode-advanced"]'); await sleep(100);
   await click('[data-fk="metro-sub-2"]'); await sleep(80);

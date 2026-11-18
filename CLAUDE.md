@@ -14,6 +14,18 @@ User docs: `README.md`, `docs/MANUAL.md` (screenshots from `npm run docs:screens
 - Hardware-verified on a Nano Cortex (firmware 2.2.1) on 2026-10-08, including Cortex Cloud → pedal capture transfer. `npm run test:ux` passes 866/866 on macOS with demo data (CI, `.github/workflows/ci.yml`, on PRs to `staging`/`main`: a required smoke job and the UX test, also required; the test waits on conditions, not fixed sleeps, so it holds on GitHub's slow macOS runners). Windows and Linux are untested with a pedal; `ux-test-linux` (not required) runs the same test on ubuntu-latest under Xvfb.
 - Inside VS Code's terminal `ELECTRON_RUN_AS_NODE=1` is set, which makes `electron` behave like `node`. The npm scripts clear it; if you run `electron` by hand, prefix `env -u ELECTRON_RUN_AS_NODE`.
 
+## Owed before the next release
+
+**Remind Anup of this at the start of any release work after 1.2.4 (1.3.0 / MCP or whatever ships first), and plan the time for it.** Finish the effect values against the official app. Anup, 2026-11-18: "Write this down as a task that must be done when I do the mcp release or whatever the next release is … so that the agent reminds me about it, and we spend time on it."
+
+Measure in Cortex Cloud (phone mirrored with iPhone Mirroring; tools and how-to in `~/.claude/skills/app-testing/tools/iphone-mirroring/`) with sweep presets, at least five knob positions per control, then correct both editors (Electron `editor/patches/0002-nanos-2.3-model-corrections.patch`, native `scripts/gen-models.js` → `Models.swift`) with checks that name the measured values:
+- still wrong or approximate: Envelope Filter **Freq** and **Level**; Circular Delay **Mod Rate**, **Low Pass** and **High Pass**; Room **Pre Delay** (5.7 ms shown, app 5.8); Graphic 9 **HPF** (one point so far; the app says "OFF" at 0);
+- never read: Dual Reverse Delay **Low Pass**;
+- wire order never swept: **Mind Hall**, **Blossom (ST)**, **Shimmer** (the five classic reverbs were one position off until 1.2.4). Better: sweep every effect once.
+Needs Anup for about half an hour: pedal on, phone locked next to the Mac, and his OK to save about ten temporary presets in empty slots (deleted afterwards). Method and what is already measured: `docs/HANDOFF-NANOS-2.3.md` in the Electron repo ("Model corrections to make", "App measurements").
+
+The native repo tracks it as PLAN row 43. Remove this section when it is done in both editors.
+
 ## Commands
 
 ```bash

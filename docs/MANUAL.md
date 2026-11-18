@@ -334,7 +334,7 @@ Each change is live on the pedal and marks the preset as edited: **Save** keeps 
 
 Every inspector's title row shows the preset's **Tempo** in BPM.
 
-![The tempo control: the TEMPO label, − 93 +, BPM and Tap](images/tempo.png)
+![The tempo control: the TEMPO label, − 93 +, BPM, Tap and the Global | Preset switch](images/tempo.png)
 
 - **−** / **+** change it by 1 (Shift: 10). You can also type a value and press Enter, use the arrow keys, or drag
   the **TEMPO** label sideways.
@@ -373,6 +373,8 @@ signature**. The pedal keeps clicking when you close the panel or change preset.
 every tempo change sends them along (the pedal would otherwise fall back to its defaults). Nothing is sent until you
 change something. **Computer** is the
 metronome described below. Only one of the two clicks at a time: starting one stops the other.
+
+![The metronome's Pedal tab: the Pedal | Computer tabs, 93 BPM with − and +, Global | Preset, Metronome on, Volume −12 dB, Sound Blip, Subdivision 1/8, Time signature 4/4, Tap tempo and the note that the pedal doesn't report these settings](images/metronome-pedal.png)
 
 **Simple.**
 
