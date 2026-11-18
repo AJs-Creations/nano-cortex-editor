@@ -3298,8 +3298,11 @@ async function run() {
   // only opens the screen, so every change is open (the pedal's current tempo and mode) → answer → write → {3:0}.
   await loadDemo('');
   const f32b = (v) => { const b = Buffer.alloc(4); b.writeFloatLE(v); return [...b]; };
-  const shortHex = (bpm, g = 0) => frameHex([0x18, 0x01, 0x20, g, 0x2D, ...f32b(bpm), 0x30, 0x00], 145);
   const wholeHex = (bpm, g, vol, muted, sig, note, sound) => frameHex([0x18, 0x01, 0x20, g, 0x2D, ...f32b(bpm), 0x30, 0x00, 0x3D, ...f32b(vol), 0x40, muted, 0x48, sig, 0x50, note, 0x58, sound], 145);
+  // Every 3:1 frame is whole (2026-11-18: a frame without fields 7–11 resets the pedal's metronome), carrying the
+  // editor's copy of the pedal metronome. pmc follows that copy as the steps below change it (defaults: muted, 0 dB, 4/4, 1/4, Blip).
+  const pmc = { vol: 0, muted: 1, sig: 2, note: 0, sound: 0 };
+  const tempoHex23 = (bpm, g = 0) => wholeHex(bpm, g, pmc.vol, pmc.muted, pmc.sig, pmc.note, pmc.sound);
   const closeHex = frameHex([0x18, 0x00], 145);
   const t23 = (list) => list.filter(t => /^TX Tempo /.test(t)).map(t => t.split(': ').pop());
   const closed = (tx) => t23(tx).includes(closeHex);
@@ -3310,12 +3313,12 @@ async function run() {
     await type(text); await key('Return');
     return { m, tx: await txWait(m, closed) };
   };
-  check('NanOS 2.3.0 frames: open/short 120 (preset), close, whole "on, −6 dB, Digital, 3/4, 1/8"',
-    shortHex(120) === '0F C0 18 01 20 00 2D 00 00 F0 42 30 00 91 00 00 00' && closeHex === '06 C0 18 00 91 00 00 00'
+  check('NanOS 2.3.0 frames: open 120 and tempo 123 (preset) are whole frames with the default copy, close is {3:0} alone, whole "on, −6 dB, Digital, 3/4, 1/8"',
+    tempoHex23(120) === '1C C0 18 01 20 00 2D 00 00 F0 42 30 00 3D 00 00 00 00 40 01 48 02 50 00 58 00 91 00 00 00' && closeHex === '06 C0 18 00 91 00 00 00'
     && wholeHex(120, 0, -6, 0, 1, 1, 1) === '1C C0 18 01 20 00 2D 00 00 F0 42 30 00 3D 00 00 C0 C0 40 00 48 01 50 01 58 01 91 00 00 00'
     && (await js('hex(__tempo.wholeFrame(120, false, { volume: -6, muted: false, timeSig: 1, note: 1, sound: 1 }))')) === wholeHex(120, 0, -6, 0, 1, 1, 1)
-    && (await js('hex(__tempo.shortFrame(123, false))')) === shortHex(123) && (await js('hex(__tempo.closeFrame())')) === closeHex,
-    [shortHex(123), closeHex, wholeHex(120, 0, -6, 0, 1, 1, 1), await js('hex(__tempo.wholeFrame(120, false, { volume: -6, muted: false, timeSig: 1, note: 1, sound: 1 }))')].join(' | '));
+    && (await js('hex(__tempo.wholeFrame(123, false, __tempo.pedalMetro))')) === tempoHex23(123) && tempoHex23(123) === '1C C0 18 01 20 00 2D 00 00 F6 42 30 00 3D 00 00 00 00 40 01 48 02 50 00 58 00 91 00 00 00' && (await js('hex(__tempo.closeFrame())')) === closeHex,
+    [tempoHex23(123), closeHex, wholeHex(120, 0, -6, 0, 1, 1, 1), await js('hex(__tempo.wholeFrame(120, false, { volume: -6, muted: false, timeSig: 1, note: 1, sound: 1 }))')].join(' | '));
   await cleanSlate(); await frame();
   await click('.preset-row[data-n="1"]');
   await checkSoon('NanOS 2.3.0: the inspector tempo has the Global | Preset switch beside it (Preset on), no MIDI clock note',
@@ -3323,10 +3326,11 @@ async function run() {
   await settle(); await cleanSlate(); await frame();
   let r23 = await typeTempo('123');
   let tt23 = t23(r23.tx);
-  check('2.3.0: a typed 123 sends open (the pedal\'s 120) → the tempo frame → {3:0}', JSON.stringify(tt23) === JSON.stringify([shortHex(120), shortHex(123), closeHex]), JSON.stringify(tt23));
+  check('2.3.0: a typed 123 sends open (the pedal\'s 120) → the tempo frame → {3:0}', JSON.stringify(tt23) === JSON.stringify([tempoHex23(120), tempoHex23(123), closeHex]), JSON.stringify(tt23));
+  check('2.3.0: the open frame carries the metronome settings', tt23[0] === wholeHex(120, 0, 0, 1, 2, 0, 0) && / 3D 00 00 00 00 40 01 48 02 50 00 58 00 91 /.test(tt23[0]), tt23[0]);
   {
     const lines = await js(`__ui.logs.filter(l => l.seq > ${r23.m}).map(l => [l.cls, l.text])`);
-    const iOpen = lines.findIndex(([c, t]) => c === 'tx' && t.endsWith(shortHex(120))), iAns = lines.findIndex(([, t]) => /^RX C305: 0D C0 08 01 18 01 2D 00 00 F0 42 91/.test(t)), iWrite = lines.findIndex(([c, t]) => c === 'tx' && t.endsWith(shortHex(123)));
+    const iOpen = lines.findIndex(([c, t]) => c === 'tx' && t.endsWith(tempoHex23(120))), iAns = lines.findIndex(([, t]) => /^RX C305: 0D C0 08 01 18 01 2D 00 00 F0 42 91/.test(t)), iWrite = lines.findIndex(([c, t]) => c === 'tx' && t.endsWith(tempoHex23(123)));
     check('2.3.0: … the write waits for the pedal\'s answer to the open', iOpen >= 0 && iOpen < iAns && iAns < iWrite, JSON.stringify(lines.map(l => l[1].slice(0, 60))));
     const iClose = r23.tx.findIndex(t => t.endsWith(closeHex));
     await waitFor(async () => (await txSince(r23.m)).some(t => /^TX Current preset state request/.test(t)));
@@ -3335,19 +3339,19 @@ async function run() {
   await checkSoon('2.3.0: the demo pedal ends on 123, the field shows 123 and the preset is edited', async () => (await js('__demo.pedalTempo.now === 123 && state.presetDirty && !__demo.pedalTempo.open')) && (await tempoVal()) === '123');
   await settle();
   r23 = await typeTempo('120.5');
-  check('2.3.0: a typed 120.5 is kept (frame, field, pedal)', t23(r23.tx)[1] === shortHex(120.5) && (await tempoVal()) === '120.5' && await js('__demo.pedalTempo.now === 120.5'), JSON.stringify(t23(r23.tx)));
+  check('2.3.0: a typed 120.5 is kept (frame, field, pedal)', t23(r23.tx)[1] === tempoHex23(120.5) && (await tempoVal()) === '120.5' && await js('__demo.pedalTempo.now === 120.5'), JSON.stringify(t23(r23.tx)));
   await settle();
   r23 = await typeTempo('300');
-  check('2.3.0: 300 is clamped to 240', JSON.stringify(t23(r23.tx)) === JSON.stringify([shortHex(120.5), shortHex(240), closeHex]) && (await tempoVal()) === '240', JSON.stringify(t23(r23.tx)));
+  check('2.3.0: 300 is clamped to 240', JSON.stringify(t23(r23.tx)) === JSON.stringify([tempoHex23(120.5), tempoHex23(240), closeHex]) && (await tempoVal()) === '240', JSON.stringify(t23(r23.tx)));
   await settle();
   r23 = await typeTempo('30');
-  check('2.3.0: 30 is clamped to 40', t23(r23.tx)[1] === shortHex(40) && (await tempoVal()) === '40', JSON.stringify(t23(r23.tx)));
+  check('2.3.0: 30 is clamped to 40', t23(r23.tx)[1] === tempoHex23(40) && (await tempoVal()) === '40', JSON.stringify(t23(r23.tx)));
   await checkSoon('2.3.0: … and the demo pedal is at 40', '__demo.pedalTempo.now === 40');
   await settle();
   n0 = await mark();
   await click('[data-fk="tempo-up"]');
   tt23 = t23(await txWait(n0, closed));
-  check('2.3.0: the first + step is not lost (open 40 → 41 → close after it settles)', JSON.stringify(tt23) === JSON.stringify([shortHex(40), shortHex(41), closeHex]) && await js('__demo.pedalTempo.now === 41'), JSON.stringify(tt23));
+  check('2.3.0: the first + step is not lost (open 40 → 41 → close after it settles)', JSON.stringify(tt23) === JSON.stringify([tempoHex23(40), tempoHex23(41), closeHex]) && await js('__demo.pedalTempo.now === 41'), JSON.stringify(tt23));
   await settle();
   n0 = await mark();
   {
@@ -3360,7 +3364,7 @@ async function run() {
     await frame();
   }
   tt23 = t23(await txWait(n0, closed));
-  check('2.3.0: the first step of a drag is not lost (open 41, writes end on 43, close; the pedal at 43)', tt23[0] === shortHex(41) && tt23[tt23.length - 2] === shortHex(43) && tt23[tt23.length - 1] === closeHex && tt23.length >= 3 && (await tempoVal()) === '43' && await js('__demo.pedalTempo.now === 43'), JSON.stringify(tt23));
+  check('2.3.0: the first step of a drag is not lost (open 41, writes end on 43, close; the pedal at 43)', tt23[0] === tempoHex23(41) && tt23[tt23.length - 2] === tempoHex23(43) && tt23[tt23.length - 1] === closeHex && tt23.length >= 3 && (await tempoVal()) === '43' && await js('__demo.pedalTempo.now === 43'), JSON.stringify(tt23));
   await settle();
   // Global mode (test hook): field 4 is 1 in every frame.
   await js('__demo.hooks.globalTempo = true; __demo.reportTempo()'); await frame();
@@ -3369,13 +3373,14 @@ async function run() {
   n0 = await mark();
   await click('[data-fk="tempo-up"]');
   tt23 = t23(await txWait(n0, closed));
-  check('2.3.0: in Global mode field 4 is 1 in every frame', JSON.stringify(tt23) === JSON.stringify([shortHex(g0, 1), shortHex(g0 + 1, 1), closeHex]) && await js(`__demo.pedalTempo.globalTempo === ${g0 + 1}`), JSON.stringify(tt23));
+  check('2.3.0: in Global mode field 4 is 1 in every frame', JSON.stringify(tt23) === JSON.stringify([tempoHex23(g0, 1), tempoHex23(g0 + 1, 1), closeHex]) && await js(`__demo.pedalTempo.globalTempo === ${g0 + 1}`), JSON.stringify(tt23));
   await settle();
   n0 = await mark();
   await click('[data-fk="tempo-scope-preset"]');
   let tx23 = await txWait(n0, closed);
   tt23 = t23(tx23);
   check('2.3.0: the Global | Preset switch writes the mode (open in Global, write with 4:0, close)', tt23.length === 3 && tt23[0].includes(' 20 01 2D ') && tt23[1].includes(' 20 00 2D ') && tt23[2] === closeHex, JSON.stringify(tt23));
+  { const g = await fieldTempo(); check('2.3.0: the mode switch carries the metronome settings', tt23[0] === tempoHex23(g, 1) && tt23[1] === tempoHex23(g, 0), JSON.stringify(tt23) + ' @' + g); }
   await waitFor(async () => (await txSince(n0)).some(t => /^TX Current preset state request/.test(t)));
   await checkSoon('2.3.0: … re-reads the state, and the pedal and the switch are in Preset mode', () => js('!__demo.pedalTempo.global && document.querySelector(\'[data-fk="tempo-scope-preset"]\').classList.contains("on")'));
   await settle();
@@ -3396,7 +3401,7 @@ async function run() {
   await key('n'); await waitFor('__metro.state.open');
   check('2.3.0: the metronome window has the tabs Pedal | Computer and opens on Pedal', await js('!document.getElementById("metroTabs").hidden && [...document.querySelectorAll("#metroTabs button")].map(b => b.textContent + (b.classList.contains("on") ? "*" : "")).join() === "Pedal*,Computer" && !document.getElementById("metroPedal").hidden && document.getElementById("metroStart").offsetParent === null'));
   check('2.3.0: the Pedal tab: tempo with tap, Global | Preset, Metronome, Volume, Sound, Time signature (21), Subdivision, and the one-line note',
-    await js('(() => { const p = document.getElementById("metroPedal"); const h = [...p.querySelectorAll(".pmetro-grid h4")].map(x => x.firstChild.textContent).join("|"); return h === "Metronome|Volume|Sound|Subdivision|Time signature" && !!p.querySelector(\'[data-fk="pmetro-tap"]\') && !!p.querySelector(\'[data-fk="pmetro-scope-global"]\') && p.querySelectorAll(\'[data-fk="pmetro-sig"] option\').length === 21 && [...p.querySelectorAll(\'[data-fk^="pmetro-note-"]\')].map(b => b.textContent).join() === "1/4,1/8,1/8T,1/16" && [...p.querySelectorAll(\'[data-fk^="pmetro-sound-"]\')].map(b => b.textContent).join() === "Blip,Digital" && p.querySelector(".metro-note").textContent === "The pedal doesn’t report these settings, so they show what this editor last sent."; })()'));
+    await js('(() => { const p = document.getElementById("metroPedal"); const h = [...p.querySelectorAll(".pmetro-grid h4")].map(x => x.firstChild.textContent).join("|"); return h === "Metronome|Volume|Sound|Subdivision|Time signature" && !!p.querySelector(\'[data-fk="pmetro-tap"]\') && !!p.querySelector(\'[data-fk="pmetro-scope-global"]\') && p.querySelectorAll(\'[data-fk="pmetro-sig"] option\').length === 21 && [...p.querySelectorAll(\'[data-fk^="pmetro-note-"]\')].map(b => b.textContent).join() === "1/4,1/8,1/8T,1/16" && [...p.querySelectorAll(\'[data-fk^="pmetro-sound-"]\')].map(b => b.textContent).join() === "Blip,Digital" && p.querySelector(".metro-note").textContent === "The pedal doesn’t report these settings, so they show what this editor last sent; a tempo change sends them along."; })()'));
   check('2.3.0: the Pedal tab shows the editor\'s copy (defaults: off, 0 dB, Blip, 4/4, 1/4)', await js('(() => { const q = (fk) => document.querySelector(\'[data-fk="\' + fk + \'"]\'); return !q("pmetro-on").classList.contains("on") && q("pmetro-vol").value === "0" && q("pmetro-sound-0").classList.contains("on") && q("pmetro-sig").value === "2" && q("pmetro-note-0").classList.contains("on"); })()'));
   check('2.3.0: the Pedal tab fits its card (no horizontal scrolling)', await js('(() => { const c = document.querySelector("#metroOverlay .tuner-card"); return c.scrollWidth <= c.clientWidth + 1 && c.getBoundingClientRect().bottom <= innerHeight; })()'));
   await shot('xx-metro-pedal');
@@ -3408,10 +3413,15 @@ async function run() {
     const t = want.length ? t23(await txWait(m, (tx) => t23(tx).length >= want.length)) : (await settle(), t23(await txSince(m)));
     check(name, JSON.stringify(t) === JSON.stringify(want), JSON.stringify(t));
   };
-  await ctl(() => click('[data-fk="pmetro-on"]'), [shortHex(cur), wholeHex(cur, 0, 0, 0, 2, 0, 0)], '2.3.0 Pedal tab: Metronome on opens the screen and sends the whole frame (muted 0); the screen stays open');
+  pmc.muted = 0;
+  await ctl(() => click('[data-fk="pmetro-on"]'), [wholeHex(cur, 0, 0, 0, 2, 0, 0), wholeHex(cur, 0, 0, 0, 2, 0, 0)], '2.3.0 Pedal tab: Metronome on opens the screen (a whole frame) and sends the whole frame (muted 0); the screen stays open');
+  pmc.vol = -6;
   await ctl(() => js('{ const r = document.querySelector(\'[data-fk="pmetro-vol"]\'); r.value = "-6"; r.dispatchEvent(new Event("input")); }'), [wholeHex(cur, 0, -6, 0, 2, 0, 0)], '2.3.0 Pedal tab: Volume −6 dB sends the whole frame');
+  pmc.sound = 1;
   await ctl(() => click('[data-fk="pmetro-sound-1"]'), [wholeHex(cur, 0, -6, 0, 2, 0, 1)], '2.3.0 Pedal tab: Sound Digital sends the whole frame');
+  pmc.sig = 1;
   await ctl(() => js('{ const s = document.querySelector(\'[data-fk="pmetro-sig"]\'); s.value = "1"; s.dispatchEvent(new Event("change")); }'), [wholeHex(cur, 0, -6, 0, 1, 0, 1)], '2.3.0 Pedal tab: Time signature 3/4 sends the whole frame');
+  pmc.note = 1;
   await ctl(() => click('[data-fk="pmetro-note-1"]'), [wholeHex(cur, 0, -6, 0, 1, 1, 1)], '2.3.0 Pedal tab: Subdivision 1/8 sends the whole frame');
   check('2.3.0: the demo pedal stored on, −6 dB, 3/4, 1/8, Digital; the copy is remembered', await js('(() => { const m = __demo.pedalTempo.metro, s = JSON.parse(localStorage.getItem("pedalMetronome")); return m.muted === false && m.volume === -6 && m.timeSig === 1 && m.note === 1 && m.sound === 1 && s.muted === false && s.volume === -6 && s.timeSig === 1 && s.note === 1 && s.sound === 1; })()') && (await js('document.querySelector("#metroPedal .metro-val").textContent')) === '−6 dB');
   await js('document.activeElement.blur()');
@@ -3420,9 +3430,21 @@ async function run() {
     const m = await mark();
     await key('t'); await sleep(400); await key('t');
     const t = t23(await txWait(m, (tx) => t23(tx).length >= 1));
-    check('2.3.0 Pedal tab: T taps the pedal tempo (short frame, screen already open), the tuner stays closed', t.length >= 1 && t.every(h => /^0F C0 18 01 20 00 2D/.test(h)) && await js('!state.tuner.open'), JSON.stringify(t));
+    check('2.3.0 Pedal tab: T taps the pedal tempo (whole frames with the copy, screen already open), the tuner stays closed', t.length >= 1 && t.every(h => /^1C C0 18 01 20 00 2D .* 3D 00 00 C0 C0 40 00 48 01 50 01 58 01 91 00 00 00$/.test(h)) && await js('!state.tuner.open'), JSON.stringify(t));
   }
   await ctl(() => click('[data-fk="metro-tab-computer"]'), [closeHex], '2.3.0: leaving the Pedal tab closes the screen ({3:0} alone)');
+  // The finding of 2026-11-18: a tempo change must not reset the pedal's metronome.
+  await key('Escape'); await waitFor('!__metro.state.open'); await settle({ quiet: 700 });
+  {
+    const b = await fieldTempo();
+    const m = await mark();
+    await click('[data-fk="tempo-up"]');
+    const t = t23(await txWait(m, closed));
+    check('2.3.0: a tempo change carries the metronome settings, so the pedal keeps subdivision 1/8', JSON.stringify(t) === JSON.stringify([tempoHex23(b), tempoHex23(b + 1), closeHex]) && await js('(() => { const p = __demo.pedalTempo; return p.metro.note === 1 && !p.metro.muted && p.metro.timeSig === 1 && p.metro.sound === 1 && p.metro.volume === -6 && Math.abs(p.now - ' + (b + 1) + ') < 0.01; })()'), JSON.stringify(t) + ' ' + await js('JSON.stringify(__demo.pedalTempo)'));
+  }
+  await settle({ quiet: 700 });
+  await js('document.activeElement.blur()');
+  await key('n'); await waitFor('__metro.state.open'); await toComputerTab(); await settle();
   const cur2 = await fieldTempo();
   // One click at a time.
   await js('document.activeElement.blur()');
@@ -3430,7 +3452,8 @@ async function run() {
     const m = await mark();
     await key(' ');
     const t = t23(await txWait(m, closed));
-    check('2.3.0: starting the computer metronome mutes the pedal\'s (whole frame, muted 1) and closes', JSON.stringify(t) === JSON.stringify([shortHex(cur2), wholeHex(cur2, 0, -6, 1, 1, 1, 1), closeHex]) && await js('__metro.state.running && __demo.pedalTempo.metro.muted === true'), JSON.stringify(t));
+    pmc.muted = 1;
+    check('2.3.0: starting the computer metronome mutes the pedal\'s (whole frame, muted 1) and closes', JSON.stringify(t) === JSON.stringify([tempoHex23(cur2), wholeHex(cur2, 0, -6, 1, 1, 1, 1), closeHex]) && await js('__metro.state.running && __demo.pedalTempo.metro.muted === true'), JSON.stringify(t));
   }
   await key(' '); await waitFor('!__metro.state.running'); await settle();
   n0 = await mark();
@@ -3438,12 +3461,12 @@ async function run() {
   check('2.3.0: … and sends nothing when the pedal metronome is off', t23(await txSince(n0)).length === 0, JSON.stringify(await txSince(n0)));
   await click('[data-fk="metro-tab-pedal"]'); await settle();
   check('2.3.0: switching to the Pedal tab sends nothing and leaves the computer metronome running', t23(await txSince(n0)).length === 0 && await js('__metro.state.running'));
-  await click('[data-fk="pmetro-on"]');
+  await click('[data-fk="pmetro-on"]'); pmc.muted = 0;
   await checkSoon('2.3.0: switching the pedal metronome on stops the running computer metronome', '!__metro.state.running && !__demo.pedalTempo.metro.muted');
   await settle();
   await js('document.activeElement.blur()');
   n0 = await mark();
-  await key(' ');
+  await key(' '); pmc.muted = 1;
   check('2.3.0 Pedal tab: Space switches the pedal metronome (off again)', t23(await txWait(n0)).slice(-1)[0] === wholeHex(cur2, 0, -6, 1, 1, 1, 1) && await js('__demo.pedalTempo.metro.muted'));
   n0 = await mark();
   await key('Escape'); await waitFor('!__metro.state.open');
@@ -3455,8 +3478,8 @@ async function run() {
   await click('[data-fk="tempo-up"]'); await key('s', [MOD]);
   tx23 = await txWait(n0, (tx) => tx.some(t => /^TX save preset 1/.test(t)));
   {
-    const iw = tx23.findIndex(t => t.endsWith(shortHex(s0 + 1))), ic = tx23.findIndex(t => t.endsWith(closeHex)), is = tx23.findIndex(t => /^TX save preset 1/.test(t));
-    check('2.3.0: Save right after a step: open, the tempo, close, then the save frame', t23(tx23)[0] === shortHex(s0) && iw > 0 && iw < ic && ic < is, JSON.stringify(tx23));
+    const iw = tx23.findIndex(t => t.endsWith(tempoHex23(s0 + 1))), ic = tx23.findIndex(t => t.endsWith(closeHex)), is = tx23.findIndex(t => /^TX save preset 1/.test(t));
+    check('2.3.0: Save right after a step: open, the tempo, close, then the save frame', t23(tx23)[0] === tempoHex23(s0) && iw > 0 && iw < ic && ic < is, JSON.stringify(tx23));
   }
   await checkSoon('2.3.0: after Save the demo pedal stored the new tempo', `!state.presetDirty && Math.abs(__demo.tempo.buf - ${s0 + 1}) < 0.01`, () => js('JSON.stringify([state.presetDirty, __demo.tempo])'));
   await settle();
@@ -3468,10 +3491,66 @@ async function run() {
   n0 = await mark();
   await js('__metro.setBpm(300)');
   tt23 = t23(await txWait(n0, closed));
-  check('2.3.0: "Follow the preset tempo": the metronome\'s 300 reaches the pedal as 240 (open, write, close)', tt23[1] === shortHex(240) && tt23[tt23.length - 1] === closeHex && (await tempoVal()) === '240' && await js('__metro.effectiveBpm() === 240 && __demo.pedalTempo.now === 240'), JSON.stringify(tt23));
+  check('2.3.0: "Follow the preset tempo": the metronome\'s 300 reaches the pedal as 240 (open, write, close)', tt23[1] === tempoHex23(240) && tt23[tt23.length - 1] === closeHex && (await tempoVal()) === '240' && await js('__metro.effectiveBpm() === 240 && __demo.pedalTempo.now === 240'), JSON.stringify(tt23));
   await js('__tempo.setFollow(false)');
   await key('Escape'); await waitFor('!__metro.state.open');
   await settle();
+  // State field 60 (tempoScreenActive): with nothing in flight, the pedal's word on the screen wins.
+  await typeTempo('100'); await settle({ quiet: 700 });   // off the 240 limit, so +1 changes the tempo
+  await js('document.activeElement.blur()');
+  await key('n'); await waitFor('__metro.state.open');
+  {
+    let b = await fieldTempo(), m = await mark();
+    await click('[data-fk="pmetro-up"]');
+    await txWait(m, (tx) => t23(tx).length >= 2); await sleep(600); await settle();
+    await js('__demo.setScreen(false); __demo.reportTempo()'); await frame();
+    check('2.3.0: state field 60 closes the editor\'s screen state (the pedal says closed)', await js('__tempo.screen.state === "closed"'), await js('__tempo.screen.state'));
+    b = await fieldTempo(); m = await mark();
+    await click('[data-fk="pmetro-up"]');
+    const t = t23(await txWait(m, (tx) => t23(tx).length >= 2));
+    check('2.3.0: … so the next write opens the screen again first', JSON.stringify(t) === JSON.stringify([tempoHex23(b), tempoHex23(b + 1)]) && await js('__demo.pedalTempo.open && Math.abs(__demo.pedalTempo.now - ' + (b + 1) + ') < 0.01'), JSON.stringify(t));
+  }
+  n0 = await mark();
+  await key('Escape'); await waitFor('!__metro.state.open');
+  await txWait(n0, closed); await sleep(700); await settle();
+  await js('__demo.setScreen(true); __demo.reportTempo()'); await frame();
+  check('2.3.0: state field 60 opens the editor\'s screen state (the pedal says open)', await js('__tempo.screen.state === "open"'), await js('__tempo.screen.state'));
+  {
+    const b = await fieldTempo(), m = await mark();
+    await click('[data-fk="tempo-up"]');
+    const t = t23(await txWait(m, closed));
+    check('2.3.0: … so the next write needs no open (write, close)', JSON.stringify(t) === JSON.stringify([tempoHex23(b + 1), closeHex]) && await js('!__demo.pedalTempo.open && Math.abs(__demo.pedalTempo.now - ' + (b + 1) + ') < 0.01'), JSON.stringify(t));
+  }
+  await settle({ quiet: 700 });
+  // Upstream's own metronome UI (V1.18) looked up the id "metroOverlay" (ours) from the state-dump parse and threw
+  // while the window was open, so the rest of every state read was lost. build-core.js stubs that UI now.
+  {
+    const readWithWindowOpen = async (dirty, tab) => {
+      const m = await txCount();
+      await js(`state.stateBytes = [0x68, state.selectedPreset - 1, 0xC2, 0x01, 0x05, 0x32, 0x2E, 0x33, 0x2E, 0x30, 0xC8, 0x02, ${dirty}]; parseBufferedCurrentState()`); await frame();
+      const lines = await js(`__ui.logs.filter(l => l.seq > ${m}).map(l => l.text)`);
+      const sel = await js('state.selectedPreset');
+      check('a state read with the metronome window open parses completely (no upstream metronome UI runs): ' + tab + ' tab',
+        !lines.some(l => /state parse failed/.test(l)) && lines.includes('Current preset: ' + sel + (dirty ? ' (edited)' : '')) && (await js('state.presetDirty')) === Boolean(dirty) && await js('__metro.state.open && __metro.state.tab === "' + tab.toLowerCase() + '"'),
+        JSON.stringify(lines.filter(l => !/^CURRENT STATE/.test(l)).slice(0, 6)));
+    };
+    await settle();
+    await js('document.activeElement.blur()');
+    await key('n'); await waitFor('__metro.state.open');
+    await readWithWindowOpen(1, 'Pedal');
+    await click('[data-fk="metro-tab-computer"]'); await settle();
+    await readWithWindowOpen(0, 'Computer');
+    await key('Escape'); await waitFor('!__metro.state.open');
+    await js('__demo.load(state.selectedPreset)'); await settle();
+  }
+  // The real pedal's behaviour, kept by the demo: a 3:1 frame without fields 7–11 resets them to the protocol defaults.
+  {
+    const b = await fieldTempo();
+    await js(`writeC304('Test: short open', buildFrame([0x18, 0x01, 0x20, 0x00, 0x2D, ...float32LE(${b}), 0x30, 0x00], 145)); writeC304('Test: short tempo', buildFrame([0x18, 0x01, 0x20, 0x00, 0x2D, ...float32LE(${b}), 0x30, 0x00], 145))`);
+    await settle();
+    check('2.3.0 demo: a frame without the metronome fields resets them', await js('(() => { const m = __demo.pedalTempo.metro; return m.volume === 0 && m.muted === false && m.timeSig === 0 && m.note === 0 && m.sound === 0; })()'), await js('JSON.stringify(__demo.pedalTempo.metro)'));
+    await js(`writeC304('Test: close', buildFrame([0x18, 0x00], 145))`); await settle();
+  }
   // Firmware 2.2.1: no Pedal tab (its frames: the block above).
   await loadDemo('&demoFirmware=2.2.1');
   await js('document.activeElement.blur()');

@@ -350,6 +350,27 @@ reverb wire order, Low-High Cut ranges and the 2.3.0 tempo sequence, if Anup wan
 - **Still open**: the listening checks ("Still to hear on the real pedal"), the native app on the real pedal,
   screenshots in both manuals (the tempo row and the Pedal tab are described but not pictured), merging and tagging.
 
+## 2026-11-18, the listening check: short frames reset the metronome (fix in progress)
+
+Anup, listening: "changing the tempo changes the subdivision value … it gets reset back to the quarter". So a `3:1`
+frame without fields 7–11 makes the pedal fall back to defaults for what is missing (heard: note → 1/4; the click kept
+playing). **The "short frame" idea in the design above is wrong on 2.3.0: every `3:1` frame (the open frame and every
+write) must be whole, carrying the editor's copy of the metronome settings.** Close stays `{3:0}`.
+Probed on the pedal (whole frames, values chosen to be silent): the state dump does not hold the metronome's on / off,
+volume, time signature, note or sound; **state field 60 is tempoScreenActive** (1 while the screen is open, absent
+after `{3:0}`). So the settings stay write-only and the editor's copy is the only source; field 60 lets the editor
+notice when its idea of "screen open" is wrong.
+
+**Fixed the same morning** (both editions, on top of the first commits of the PRs): every `3:1` frame on >= 2.3 is
+whole and carries the editor's copy (open frame included); state field 60 corrects the editor's open / closed idea;
+the demo / fake pedal resets missing fields like the real one. Electron also stubs upstream's metronome UI in
+`scripts/build-core.js` (`metroRefresh` and friends): it found OUR `#metroOverlay`, threw on its own missing
+children and cut every state read short while the N window was open (since the V1.18.0 sync). Electron
+`test:ux` 963/963; native NanoCore 158, app unit 109. Checked on the pedal with the Electron build: a + / − step
+sends open (whole), tempo (whole), close, and the tempo lands. Anup's other two reports ("the volume is also not
+respected", "goes back up when I switch presets, but on the UI it is still low") had the same cause: the log shows
+the slider sent the right dB and the next short tempo / reopen frame reset it.
+
 ## Rules that bite (also in CLAUDE.md / memory)
 
 - `editor/index.html` stays **verbatim upstream**; local fixes go in `editor/patches/*.patch` only.

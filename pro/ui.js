@@ -1394,7 +1394,6 @@
   const tempoFrame = (scope, bpm) => buildFrame([0x18, scope, 0x20, 0x00, ...(bpm == null ? [] : [0x2D, ...float32LE(bpm)]), 0x30, 0x00], TEMPO_MSG);
   // ≥ 2.3: TempoScreenMessage. Short = fields 3–6 (screen active, tempoIsGlobal, tempo, external clock sent as 0);
   // whole = 3–11, also the metronome (volume dB f32, muted, time signature, note, sound); close = {3:0} alone.
-  const tempoShortFrame = (bpm, global) => buildFrame([0x18, 0x01, 0x20, global ? 1 : 0, 0x2D, ...float32LE(bpm), 0x30, 0x00], TEMPO_MSG);
   const tempoWholeFrame = (bpm, global, s) => buildFrame([0x18, 0x01, 0x20, global ? 1 : 0, 0x2D, ...float32LE(bpm), 0x30, 0x00,
     0x3D, ...float32LE(s.volume), 0x40, s.muted ? 1 : 0, 0x48, s.timeSig, 0x50, s.note, 0x58, s.sound], TEMPO_MSG);
   const tempoCloseFrame = () => buildFrame([0x18, 0x00], TEMPO_MSG);
@@ -1431,20 +1430,21 @@
     scr.state = 'closed'; scr.want = null; scr.closeWhenOpen = false;
     const r = scr.openResolve; scr.openResolve = null; scr.opened = null; if (r) r();
   }
-  function tempoSend(whole = false) {
+  function tempoSend() {
     if (!tempo23()) return;
     tempoLink();
-    scr.want = { whole: Boolean(whole || (scr.want && scr.want.whole)) };
+    scr.want = true;
     clearTimeout(scr.closeTimer); scr.closeTimer = null;
     clearTimeout(scr.readTimer); scr.readTimer = null;
     if (scr.state === 'closed') openScreen();
     else if (scr.state === 'open') pumpTempo();
   }
+  const metroLabel = () => 'metronome ' + (pm.muted ? 'off' : 'on ' + pm.volume.toFixed(1) + ' dB') + ', ' + METRO_TIME_SIGS[pm.timeSig] + ', ' + METRO_NOTES[pm.note] + ', ' + METRO_SOUNDS[pm.sound];
   function openScreen() {
     const bpm = Number(scr.pedalBpm) > 0 ? scr.pedalBpm : (Number(state.presetTempo) > 0 ? state.presetTempo : 120);
     scr.state = 'opening'; scr.closeWhenOpen = false;
     scr.opened = new Promise((r) => { scr.openResolve = r; });
-    writeC304('Tempo screen open (' + fmtTempo(bpm) + ' BPM, ' + modeName(scr.pedalGlobal) + ')', tempoShortFrame(bpm, scr.pedalGlobal), 'tempo23-open');
+    writeC304('Tempo screen open (' + fmtTempo(bpm) + ' BPM, ' + modeName(scr.pedalGlobal) + ', ' + metroLabel() + ')', tempoWholeFrame(bpm, scr.pedalGlobal, pm), 'tempo23-open');
     scr.openTimer = setTimeout(() => screenOpened('no answer in ' + TEMPO_OPEN_WAIT + ' ms'), TEMPO_OPEN_WAIT);
   }
   function screenOpened(why) {
@@ -1465,11 +1465,7 @@
     if (!(Number(bpm) > 0)) return;
     scr.lastSentAt = Date.now();
     scr.pedalBpm = bpm; scr.pedalGlobal = scr.global;
-    const head = 'Tempo ' + fmtTempo(bpm) + ' BPM (' + modeName(scr.global) + ')';
-    if (w.whole) {
-      writeC304(head + ', metronome ' + (pm.muted ? 'off' : 'on ' + pm.volume.toFixed(1) + ' dB') + ', ' + METRO_TIME_SIGS[pm.timeSig] + ', ' + METRO_NOTES[pm.note] + ', ' + METRO_SOUNDS[pm.sound],
-        tempoWholeFrame(bpm, scr.global, pm), 'tempo23-whole');
-    } else writeC304(head, tempoShortFrame(bpm, scr.global), 'tempo23');
+    writeC304('Tempo ' + fmtTempo(bpm) + ' BPM (' + modeName(scr.global) + '), ' + metroLabel(), tempoWholeFrame(bpm, scr.global, pm), 'tempo23');
   }
   function pumpTempo() {
     if (scr.state !== 'open' || !scr.want || scr.sendTimer) return;
@@ -1510,7 +1506,7 @@
   function setTempoMode(global) {
     if (!tempo23() || scr.extClock || Boolean(global) === scr.global) return;
     scr.global = Boolean(global);
-    tempoSend(false);
+    tempoSend();
     if (!scr.held) closeScreen();
     tempoChanged();
   }
@@ -1529,7 +1525,7 @@
       const bpm = clampTempo(v);
       if (scr.extClock || !Number.isFinite(bpm)) { tempoChanged(); return; }
       state.presetTempo = bpm;
-      tempoSend(false);
+      tempoSend();
       tempoChanged();
       return;
     }
@@ -1550,7 +1546,7 @@
       const pending = scr.state !== 'closed' || scr.want;
       if (bpm === state.presetTempo && !pending) { tempoChanged(); return; }   // nothing changed
       state.presetTempo = bpm;
-      if (bpm !== scr.pedalBpm || scr.want || scr.state === 'closed') tempoSend(false);
+      if (bpm !== scr.pedalBpm || scr.want || scr.state === 'closed') tempoSend();
       if (!scr.held) closeScreen();
       tempoChanged();
       return;
@@ -1603,6 +1599,13 @@
       const busy = tempoBusy();
       scr.extClock = Boolean(num(61));
       if (!busy) scr.global = scr.pedalGlobal = Boolean(num(55));
+      // 60 tempoScreenActive: with no write in flight, the pedal's word on the screen wins (closed: the next write
+      // opens it again first; open: the next write needs no open).
+      if (!busy && !scr.readTimer) {
+        const open = Boolean(num(60));
+        if (!open && scr.state === 'open') { clearTimeout(scr.closeTimer); scr.closeTimer = null; scr.state = 'closed'; log('Tempo screen: the pedal reports it closed'); }
+        else if (open && scr.state === 'closed') { scr.state = 'open'; log('Tempo screen: the pedal reports it open'); }
+      }
       if (e && e.wire === 5 && !busy) {
         const v = f32(e.raw);
         if (v >= 20 && v <= 400) { state.presetTempo = clampTempo(v); scr.pedalBpm = state.presetTempo; }
@@ -1862,7 +1865,7 @@
     tempoLive(bpm); tempoCommitSoon(COMMIT_METRO);
   };
   window.__tempo = { state: tempo, frame: tempoFrame, live: tempoLive, commit: tempoCommit, tap: tempoTap, setFollow: setFollowPreset,
-    screen: scr, pedalMetro: pm, shortFrame: tempoShortFrame, wholeFrame: tempoWholeFrame, closeFrame: tempoCloseFrame, setMode: setTempoMode, flush: flushTempo };
+    screen: scr, pedalMetro: pm, wholeFrame: tempoWholeFrame, closeFrame: tempoCloseFrame, setMode: setTempoMode, flush: flushTempo };
 
   // ------------------------------------------------------------------ metronome window: Pedal | Computer (≥ 2.3)
   // Pedal = the pedal's own metronome (the controls of the app's Tempo screen); Computer = the metronome above.
@@ -1909,7 +1912,7 @@
         field('Subdivision', u.note),
         field('Time signature', u.sig)),
       el('div', { class: 'tuner-row metro-foot' }, u.tap, u.close),
-      el('p', { class: 'note metro-note', text: 'The pedal doesn’t report these settings, so they show what this editor last sent.' }));
+      el('p', { class: 'note metro-note', text: 'The pedal doesn’t report these settings, so they show what this editor last sent; a tempo change sends them along.' }));
     u.tabs = el('div', { class: 'seg metro-tabs', id: 'metroTabs', role: 'group', 'aria-label': 'Which metronome', hidden: true },
       el('button', { type: 'button', dataset: { fk: 'metro-tab-pedal', v: 'pedal' }, title: 'The pedal’s metronome, on its outputs', onclick: () => setMetroTab('pedal') }, 'Pedal'),
       el('button', { type: 'button', dataset: { fk: 'metro-tab-computer', v: 'computer' }, title: 'This computer’s metronome', onclick: () => setMetroTab('computer') }, 'Computer'));
@@ -1960,7 +1963,7 @@
   function setPedalMetro(patch) {
     Object.assign(pm, patch); savePm();
     if (patch.muted === false && metro.running) stopMetro();
-    if (tempo23()) { tempoSend(true); if (!scr.held) closeScreenSoon(COMMIT_STEP); }
+    if (tempo23()) { tempoSend(); if (!scr.held) closeScreenSoon(COMMIT_STEP); }
     if (metro.open) renderMetro();
   }
   function togglePedalMetro() { setPedalMetro({ muted: !pm.muted }); }
@@ -6275,15 +6278,17 @@
     // frames store the metronome; 3:0 only closes. The dump carries 55 / 56 / 61. Test hooks: hooks.globalTempo
     // (the pedal is in Global mode) and hooks.midiClock (an external MIDI clock runs: tempo writes are ignored);
     // reportTempo() sends the state-dump fields after changing them.
-    let screenOpen = false, globalTempo = 120, pedalMetro = null;
+    let screenOpen = false, globalTempo = 120, pedalMetro = { volume: 0, muted: true, timeSig: 2, note: 0, sound: 0 };
     const tempoNow = () => (hooks.globalTempo ? globalTempo : tempoRun);
-    const tempoDump = () => [0xB8, 0x03, hooks.globalTempo ? 1 : 0, 0xC5, 0x03, ...float32LE(tempoNow()), 0xE8, 0x03, hooks.midiClock ? 1 : 0];
+    const tempoDump = () => [0xB8, 0x03, hooks.globalTempo ? 1 : 0, 0xC5, 0x03, ...float32LE(tempoNow()), ...(screenOpen ? [0xE0, 0x03, 0x01] : []), 0xE8, 0x03, hooks.midiClock ? 1 : 0];
     function reportTempo() { tempoFromDump(parseProtoFields(tempoDump())); }
     function tempoScreen23(f) {
       const num = (n) => (f[n] && f[n][0] && f[n][0].wire === 0 ? f[n][0].value : null);
       if (num(3) !== 1) { screenOpen = false; return; }
+      // Every 3:1 frame replaces the metronome with fields 7–11; a missing field falls back to its protocol default
+      // (the real pedal, 2026-11-18: a tempo frame without them reset the subdivision to 1/4).
+      pedalMetro = { volume: f[7] && f[7][0] && f[7][0].wire === 5 ? f32(f[7][0].raw) : 0, muted: num(8) === 1, timeSig: num(9) || 0, note: num(10) || 0, sound: num(11) || 0 };
       if (!screenOpen) { screenOpen = true; notify(buildFrame([0x08, 0x01, 0x18, 0x01, 0x2D, ...float32LE(tempoNow())], TEMPO_MSG)); return; }
-      if (f[7] && f[7][0] && f[7][0].wire === 5) pedalMetro = { volume: f32(f[7][0].raw), muted: num(8) === 1, timeSig: num(9) || 0, note: num(10) || 0, sound: num(11) || 0 };
       hooks.globalTempo = num(4) === 1;
       if (!f[5] || !f[5][0] || f[5][0].wire !== 5 || hooks.midiClock) return;
       const v = clamp(f32(f[5][0].raw), 40, 240);
@@ -6723,7 +6728,7 @@
     const store = (n) => { saved.set(n, snapshot()); expSaved.set(n, expOf(state.selectedPreset)); expLive.delete(n); };
     const erase = (n) => { saved.delete(n); expSaved.delete(n); expLive.delete(n); state.presetNames.set(n, 'Empty'); };
     return { start, stop, load, store, erase, pickCapture, pickIR, stateDump, hooks, get running() { return running; }, get tempo() { return { buf: tempoBuf, run: tempoRun }; },
-      reportTempo, get pedalTempo() { return { open: screenOpen, global: Boolean(hooks.globalTempo), globalTempo, clock: Boolean(hooks.midiClock), now: tempoNow(), metro: pedalMetro }; } };
+      reportTempo, setScreen: (open) => { screenOpen = Boolean(open); }, get pedalTempo() { return { open: screenOpen, global: Boolean(hooks.globalTempo), globalTempo, clock: Boolean(hooks.midiClock), now: tempoNow(), metro: pedalMetro }; } };
   })();
   window.__demo = demo;
 

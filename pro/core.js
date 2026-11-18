@@ -3914,8 +3914,6 @@ function closeWheel() {
       rot.on = false;
     }
 
-const METRO_STORE = 'nanoMetronome';
-
 const METRO_TIME_SIGS = ['2/4', '3/4', '4/4', '5/4', '6/4', '7/4', '8/4', '9/4', '10/4', '11/4', '12/4', '13/4', '3/8', '6/8', '9/8', '12/8',
       '5/8 (3+2)', '5/8 (2+3)', '7/8 (3+2+2)', '7/8 (2+3+2)', '7/8 (2+2+3)'];
 
@@ -3928,233 +3926,18 @@ const METRO_BPM = [40, 240], METRO_VOL = [-60, 9];
 const metro = { firmware: '', tempo: 120, global: true, extClock: false, open: false, editing: false, sendTimer: null, taps: [], beat: 0, beatTimer: null,
       settings: { muted: true, volume: 0, timeSig: 2, note: 0, sound: 0 } };
 
-const saveMetro = () => { try { localStorage.setItem(METRO_STORE, JSON.stringify(metro.settings)); } catch (e) { /* storage unavailable */ } };
-
 function metroSupported() {
       const m = /^(\d+)\.(\d+)/.exec(metro.firmware || '');
       return Boolean(state.connected && m && (Number(m[1]) > 2 || (Number(m[1]) === 2 && Number(m[2]) >= 3)));
     }
 
-function tempoFrame(active) {
-      if (!active) return buildFrame([0x18, 0x00], MSG.TempoScreen);
-      const s = metro.settings;
-      return buildFrame([0x18, 0x01, 0x20, metro.global ? 1 : 0, 0x2D, ...float32LE(metro.tempo), 0x30, metro.extClock ? 1 : 0,
-        0x3D, ...float32LE(s.volume), 0x40, s.muted ? 1 : 0, 0x48, s.timeSig, 0x50, s.note, 0x58, s.sound], MSG.TempoScreen);
-    }
+    function handleTempoScreen() { /* disabled by build-core.js: rx 145 is read by pro/ui.js (onC305) */ }
 
-function metroSend(now = false) {
-      if (!metro.open || !state.connected) return;
-      clearTimeout(metro.sendTimer);
-      const send = () => {
-        const s = metro.settings;
-        writeC304('Tempo ' + metro.tempo.toFixed(1) + ' BPM' + (metro.global ? ' (global)' : ' (preset)') + ', metronome ' + (s.muted ? 'off' : 'on ' + s.volume.toFixed(1) + ' dB') +
-          ', ' + METRO_TIME_SIGS[s.timeSig] + ', ' + METRO_NOTES[s.note] + ', ' + METRO_SOUNDS[s.sound], tempoFrame(true), 'tempo');
-      };
-      if (now) send(); else metro.sendTimer = setTimeout(send, 120);
-    }
+    function renderTempoNode() { /* disabled by build-core.js: upstream metronome UI */ }
 
-function handleTempoScreen(data) {
-      const fields = framePayloadFields(data);
-      const num = n => (fields[n] && fields[n][0] && fields[n][0].wire === 0 ? fields[n][0].value : 0);
-      const f32 = n => (fields[n] && fields[n][0] && fields[n][0].wire === 5 ? new DataView(Uint8Array.from(fields[n][0].raw).buffer).getFloat32(0, true) : null);
-      log('RX tempo screen: ' + hex(data));
-      const tempo = f32(5), volume = f32(7);
-      if (tempo !== null && tempo >= 20 && tempo <= 400) metro.tempo = Math.round(tempo * 10) / 10;
-      if (fields[4]) metro.global = Boolean(num(4));
-      if (fields[6]) metro.extClock = Boolean(num(6));
-      if (volume !== null) {   // a whole message from the Nano: its metronome settings
-        const s = metro.settings;
-        Object.assign(s, { volume: clamp(Math.round(volume * 10) / 10, METRO_VOL[0], METRO_VOL[1]), muted: Boolean(num(8)),
-          timeSig: METRO_TIME_SIGS[num(9)] ? num(9) : s.timeSig, note: METRO_NOTES[num(10)] ? num(10) : s.note, sound: METRO_SOUNDS[num(11)] ? num(11) : s.sound });
-        saveMetro();
-      }
-      const active = Boolean(num(3));
-      if (active && !metro.open) openMetro(true);
-      else if (!active && metro.open && fields[3]) closeMetro(false);
-      else metroRefresh();
-    }
+    function metroRefresh() { /* disabled by build-core.js: upstream metronome UI, replaced by pro/ui.js */ }
 
-function metroBar() {
-      const ts = METRO_TIME_SIGS[metro.settings.timeSig];
-      const m = /^(\d+)\/(\d+)/.exec(ts);
-      return { beats: Math.min(13, Number(m[1])), perMinute: metro.tempo * (Number(m[2]) / 4) };
-    }
-
-const metroBeats = (count, now) => '<span class="mt-beats">' +
-      Array.from({ length: count }, (_, i) => '<i class="' + (i === 0 ? 'acc' : '') + (i === now ? ' now' : '') + '"></i>').join('') + '</span>';
-
-function metroAnimate() {
-      clearInterval(metro.beatTimer);
-      metro.beatTimer = null;
-      const running = !metro.settings.muted && metroSupported() && !metro.extClock;
-      document.querySelectorAll('.mt-beats').forEach(el => el.querySelectorAll('i').forEach(i => i.classList.remove('now')));
-      if (!running) return;
-      const bar = metroBar();
-      metro.beat = 0;
-      const step = () => {
-        document.querySelectorAll('.mt-beats').forEach(el => el.querySelectorAll('i').forEach((dot, i) => dot.classList.toggle('now', i === metro.beat % bar.beats)));
-        metro.beat++;
-      };
-      step();
-      metro.beatTimer = setInterval(step, 60000 / bar.perMinute);
-    }
-
-function renderTempoNode(node) {
-      node.id = 'tempoNode';
-      const s = metro.settings, bar = metroBar();
-      node.title = 'Tempo ' + metro.tempo.toFixed(1) + ' BPM (' + (metro.global ? 'global' : 'this preset') + '), metronome ' + (s.muted ? 'off' : 'on') +
-        (metro.extClock ? ' – MIDI clock from outside' : '') + ' – click for tempo and metronome';
-      node.innerHTML = '<div class="sc-tile io tempo' + (s.muted ? '' : ' on') + '"><b>' + Math.round(metro.tempo) + '</b>' + metroBeats(Math.min(8, bar.beats), -1) + '</div>' +
-        '<span class="sc-lbl">Tempo</span><span class="sc-sub">' + escapeHTML(METRO_TIME_SIGS[s.timeSig].split(' ')[0]) + '</span>';   // filled = metronome on
-      node.addEventListener('click', () => openMetro(false));
-      if (metro.beatTimer || !s.muted) setTimeout(metroAnimate, 0);   // once the tile is in the page
-    }
-
-function metroDialog() {
-      let overlay = $('metroOverlay');
-      if (overlay) return overlay;
-      overlay = document.createElement('div');
-      overlay.id = 'metroOverlay';
-      overlay.className = 'ask-overlay';
-      overlay.hidden = true;
-      overlay.innerHTML = '<div class="mt-panel" role="dialog" aria-label="Tempo and metronome">' +
-        '<div class="mt-head"><h2><span class="ico" style="--icon: var(--ico-metronome);width:18px;height:18px"></span>Tempo &amp; metronome</h2>' +
-        '<div class="mt-tools"><span class="mt-seg" id="mtScope" role="group" aria-label="Tempo for"><button data-v="1" title="One tempo for all presets">Global</button>' +
-        '<button data-v="0" title="Each preset keeps its own tempo (saved with the preset)">Preset</button></span>' +
-        '<button id="mtClose" class="dlg-close" title="Close (Esc)" aria-label="Close"><span class="ico" style="--icon: var(--ico-close)"></span></button></div></div>' +
-        '<div class="mt-body"><div><div class="mt-dial" id="mtDial" tabindex="0" title="Drag up / down or scroll; arrow keys: 1 BPM, with Shift 0.1">' +
-        '<svg viewBox="0 0 300 300"><path id="mtTrack" stroke="#1d2024" stroke-width="10" fill="none" stroke-linecap="round"/>' +
-        '<path id="mtArc" stroke="#45F862" stroke-width="10" fill="none" stroke-linecap="round"/></svg>' +
-        '<div class="c"><input id="mtBpm" type="text" inputmode="decimal" aria-label="Tempo (BPM)"><small>BPM · DRAG OR SCROLL</small><span id="mtBeats"></span></div></div>' +
-        '<button class="mt-tap" id="mtTap" title="Tap the tempo (T)">TAP</button></div>' +
-        '<div class="mt-side"><div class="row"><div class="row line"><span class="mt-q">Metronome</span>' +
-        '<div id="mtOn" class="toggle-switch" role="switch" aria-label="Metronome" style="--block-color:#45F862"><div class="toggle-dot"></div></div></div>' +
-        '<div class="mt-bar" id="mtVol" tabindex="0" role="slider" aria-label="Metronome volume" aria-valuemin="-60" aria-valuemax="9"><i></i><span>Volume</span><b></b></div></div>' +
-        '<div class="row"><span class="mt-q">Time signature</span><select id="mtSig" aria-label="Time signature">' +
-        METRO_TIME_SIGS.map((t, i) => '<option value="' + i + '">' + t + '</option>').join('') + '</select></div>' +
-        '<div class="row"><span class="mt-q">Note</span><span class="mt-seg" id="mtNote">' + METRO_NOTES.map((t, i) => '<button data-v="' + i + '">' + t + '</button>').join('') + '</span></div>' +
-        '<div class="row"><span class="mt-q">Sound</span><span class="mt-seg" id="mtSound">' + METRO_SOUNDS.map((t, i) => '<button data-v="' + i + '">' + t + '</button>').join('') + '</span></div>' +
-        '<div class="mt-note" id="mtNoteText"></div></div></div></div>';
-      document.body.appendChild(overlay);
-      overlay.addEventListener('click', e => { if (e.target === overlay) closeMetro(); });
-      overlay.querySelector('#mtClose').addEventListener('click', () => closeMetro());
-      const set = (fn, now) => { fn(); saveMetro(); metroRefresh(); metroSend(now); };
-      const setTempo = bpm => { metro.tempo = Math.round(clamp(bpm, METRO_BPM[0], METRO_BPM[1]) * 10) / 10; metro.editing = true; metroRefresh(); metroSend(); };
-      overlay.querySelector('#mtScope').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { metro.global = b.dataset.v === '1'; metro.editing = true; metroRefresh(); metroSend(true); } });
-      overlay.querySelector('#mtOn').addEventListener('click', () => set(() => { metro.settings.muted = !metro.settings.muted; }, true));
-      overlay.querySelector('#mtSig').addEventListener('change', e => set(() => { metro.settings.timeSig = Number(e.target.value); }, true));
-      overlay.querySelector('#mtNote').addEventListener('click', e => { const b = e.target.closest('button'); if (b) set(() => { metro.settings.note = Number(b.dataset.v); }, true); });
-      overlay.querySelector('#mtSound').addEventListener('click', e => { const b = e.target.closest('button'); if (b) set(() => { metro.settings.sound = Number(b.dataset.v); }, true); });
-      const bpmInput = overlay.querySelector('#mtBpm');
-      bpmInput.addEventListener('change', () => { const v = parseFloat(bpmInput.value.replace(',', '.')); if (Number.isFinite(v)) setTempo(v); else metroRefresh(); });
-      bpmInput.addEventListener('keydown', e => { if (e.key === 'Enter') bpmInput.blur(); e.stopPropagation(); });
-      // the dial: drag up / down (1 BPM per 4 px), the wheel, the arrow keys
-      const dial = overlay.querySelector('#mtDial');
-      dial.addEventListener('pointerdown', e => {
-        if (e.target === bpmInput) return;
-        const y0 = e.clientY, t0 = metro.tempo;
-        dial.setPointerCapture(e.pointerId);
-        const move = ev => setTempo(t0 + Math.round((y0 - ev.clientY) / 4) * (ev.shiftKey ? 0.1 : 1));
-        const up = () => { dial.removeEventListener('pointermove', move); dial.removeEventListener('pointerup', up); dial.removeEventListener('pointercancel', up); };
-        dial.addEventListener('pointermove', move);
-        dial.addEventListener('pointerup', up);
-        dial.addEventListener('pointercancel', up);
-      });
-      dial.addEventListener('wheel', e => { e.preventDefault(); setTempo(metro.tempo + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey ? 0.1 : 1)); }, { passive: false });
-      dial.addEventListener('keydown', e => {
-        const d = { ArrowUp: 1, ArrowRight: 1, ArrowDown: -1, ArrowLeft: -1 }[e.key];
-        if (d) { e.preventDefault(); setTempo(metro.tempo + d * (e.shiftKey ? 0.1 : 1)); }
-      });
-      // tap: the mean of the last intervals (as the app: 40-240 BPM, a pause of 2 s starts again)
-      const tap = () => {
-        const now = performance.now();
-        if (metro.taps.length && now - metro.taps[metro.taps.length - 1] > 2000) metro.taps = [];
-        metro.taps.push(now);
-        if (metro.taps.length > 6) metro.taps.shift();
-        const btn = overlay.querySelector('#mtTap');
-        btn.classList.add('hit');
-        setTimeout(() => btn.classList.remove('hit'), 90);
-        if (metro.taps.length < 2) return;
-        const ms = (metro.taps[metro.taps.length - 1] - metro.taps[0]) / (metro.taps.length - 1);
-        setTempo(Math.round(60000 / ms * 10) / 10);
-      };
-      overlay.querySelector('#mtTap').addEventListener('pointerdown', e => { e.preventDefault(); tap(); });
-      overlay.addEventListener('keydown', e => {
-        if (e.key === 'Escape') { e.stopPropagation(); closeMetro(); }
-        else if ((e.key === 't' || e.key === 'T') && e.target.tagName !== 'INPUT' && e.target.tagName !== 'SELECT') { e.preventDefault(); tap(); }
-      });
-      // volume: a fill bar, drag or arrow keys (0.5 dB)
-      const vol = overlay.querySelector('#mtVol');
-      const volFrom = x => { const r = vol.getBoundingClientRect(); return METRO_VOL[0] + clamp((x - r.left) / r.width, 0, 1) * (METRO_VOL[1] - METRO_VOL[0]); };
-      vol.addEventListener('pointerdown', e => {
-        vol.setPointerCapture(e.pointerId);
-        const apply = ev => set(() => { metro.settings.volume = Math.round(volFrom(ev.clientX) * 2) / 2; }, false);
-        apply(e);
-        const up = () => { vol.removeEventListener('pointermove', apply); vol.removeEventListener('pointerup', up); vol.removeEventListener('pointercancel', up); };
-        vol.addEventListener('pointermove', apply);
-        vol.addEventListener('pointerup', up);
-        vol.addEventListener('pointercancel', up);
-      });
-      vol.addEventListener('keydown', e => {
-        const d = { ArrowUp: 0.5, ArrowRight: 0.5, ArrowDown: -0.5, ArrowLeft: -0.5 }[e.key];
-        if (d) { e.preventDefault(); set(() => { metro.settings.volume = clamp(metro.settings.volume + d, METRO_VOL[0], METRO_VOL[1]); }, false); }
-      });
-      return overlay;
-    }
-
-function metroRefresh() {
-      const node = $('tempoNode');
-      if (Boolean(node) !== metroSupported()) renderSignalChain();
-      else if (node) { const fresh = node.cloneNode(false); node.replaceWith(fresh); renderTempoNode(fresh); }
-      const overlay = $('metroOverlay');
-      if (!overlay || overlay.hidden) return;
-      const s = metro.settings, bar = metroBar();
-      if (document.activeElement !== $('mtBpm')) $('mtBpm').value = metro.tempo.toFixed(1);
-      const R = 130, cx = 150, cy = 150, a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;
-      const arc = (from, to) => { const p = a => [cx + R * Math.cos(a), cy + R * Math.sin(a)]; const [x0, y0] = p(from), [x1, y1] = p(to);
-        return 'M' + x0.toFixed(1) + ',' + y0.toFixed(1) + ' A' + R + ',' + R + ' 0 ' + (to - from > Math.PI ? 1 : 0) + ' 1 ' + x1.toFixed(1) + ',' + y1.toFixed(1); };
-      $('mtTrack').setAttribute('d', arc(a0, a1));
-      $('mtArc').setAttribute('d', arc(a0, a0 + Math.max(0.001, (a1 - a0) * (clamp(metro.tempo, METRO_BPM[0], METRO_BPM[1]) - METRO_BPM[0]) / (METRO_BPM[1] - METRO_BPM[0]))));
-      $('mtBeats').innerHTML = metroBeats(bar.beats, -1);
-      $('mtScope').querySelectorAll('button').forEach(b => b.classList.toggle('on', (b.dataset.v === '1') === metro.global));
-      $('mtOn').classList.toggle('on', !s.muted);
-      $('mtOn').setAttribute('aria-checked', String(!s.muted));
-      const vol = $('mtVol');
-      vol.classList.toggle('off', s.muted);
-      vol.style.setProperty('--v', ((s.volume - METRO_VOL[0]) / (METRO_VOL[1] - METRO_VOL[0]) * 100).toFixed(1) + '%');
-      vol.querySelector('b').innerHTML = dbText(s.volume, true) + '<small>dB</small>';
-      vol.setAttribute('aria-valuenow', String(s.volume));
-      $('mtSig').value = String(s.timeSig);
-      $('mtNote').querySelectorAll('button').forEach(b => b.classList.toggle('on', Number(b.dataset.v) === s.note));
-      $('mtSound').querySelectorAll('button').forEach(b => b.classList.toggle('on', Number(b.dataset.v) === s.sound));
-      $('mtNoteText').textContent = (metro.extClock ? 'The tempo comes from an external MIDI clock. ' : '') +
-        'The metronome plays on the Nano\'s outputs. Global: one tempo for all presets · Preset: each preset keeps its own (saved with the preset).';
-      metroAnimate();
-    }
-
-function openMetro(fromDevice) {
-      if (!metroSupported()) return;
-      const overlay = metroDialog();
-      metro.open = true;
-      overlay.hidden = false;
-      metroRefresh();
-      $('mtClose').focus();
-      if (!fromDevice) metroSend(true);
-    }
-
-function closeMetro(send = true) {
-      if (!metro.open) return;
-      metro.open = false;
-      clearTimeout(metro.sendTimer);
-      const overlay = $('metroOverlay');
-      if (overlay) overlay.hidden = true;
-      if (send && state.connected) {
-        writeC304('Tempo screen off', tempoFrame(false));
-        if (metro.editing) setTimeout(() => { if (state.connected) requestCurrentPresetState(); }, 300);   // the preset may be marked edited now
-      }
-      metro.editing = false;
-      metroRefresh();
-    }
+    function closeMetro() { metro.open = false; /* disabled by build-core.js: upstream metronome UI (it also wrote 145 {3:0}) */ }
 
 function handleTunerMetering(data) {
       if (!state.tuner.open) return;
