@@ -371,6 +371,17 @@ sends open (whole), tempo (whole), close, and the tempo lands. Anup's other two 
 respected", "goes back up when I switch presets, but on the UI it is still low") had the same cause: the log shows
 the slider sent the right dB and the next short tempo / reopen frame reset it.
 
+**Confirmed by Anup, listening, on the fixed Electron build** (2026-11-18 midday): "the metronome works now. I've
+tested all the behaviours, seems ok to me." **Native debug build on the real pedal** (from the worktree, dev remote
+4849): connects to the remembered pedal, syncs on 2.3.0 without a banner, tempo 139 → 140 → 139 goes out as open
+(whole), tempo (whole), close, and the pedal's state follows. Its default copy (muted, 0 dB, 4/4, 1/4, Blip) went
+out with it: each edition keeps its own copy, so the pedal's metronome settings are now those. Native UI smoke 8/8 on
+the fix. Clean-up: the native app's preferences and Activity log are as before the test runs; the Electron dev run's
+folder `~/Library/Application Support/Nano Cortex Editor` is removed. Preset 26 on the pedal still carries an
+unsaved tempo (139) from the listening test.
+**Left for the release**: merge PR #40 (Electron) and PR #31 (native) into `staging`, the staging → main PRs, tags
+`v1.2.4` on both, verify the downloads; manual screenshots for the tempo row and the Pedal tab.
+
 ## Rules that bite (also in CLAUDE.md / memory)
 
 - `editor/index.html` stays **verbatim upstream**; local fixes go in `editor/patches/*.patch` only.
