@@ -2,7 +2,8 @@ FX parameter mappings, Graphic 9 wire order, Cab/IR curves and per-preset FX val
 From AJs-Creations/nano-cortex-editor#31 by itsbreaded (calibrated against the official iOS app on NanOS 2.2.1),
 ported onto upstream V1.12.1, then onto V1.18.0. Upstream V1.14.0 added its own scaling (PARAM_SKEW, from the
 Quad Cortex's definitions); travelToShare / shareToTravel here use #31's fitted curve where it has one and
-upstream's skew otherwise, until the controls where they disagree are measured on a Nano.
+upstream's skew otherwise, until the controls where they disagree are measured on a Nano (they were, on NanOS 2.3.0:
+0002 makes the skew win and corrects the ranges and the classic reverbs' wire order).
 Kept for display only: saved values never become an effect's Original or count as known.
 One merge choice: the three EQ models' Output is -20..+20 dB as in #31 (upstream says -12..+12).
 
