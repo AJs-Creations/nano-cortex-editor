@@ -21,7 +21,7 @@ const { randomUUID } = require('crypto');
 const { decodeIRPayload, checkWav } = require('./cloud-ir');
 const { refuseBrowserRequest, devShotPath } = require('./dev-remote');
 const { createAgentShell } = require('./mcp-shell');
-const { setupInfo } = require('./mcp-setup');
+const { setupInfo, stablePaths } = require('./mcp-setup');
 
 // Capture pages live under /cloud/discover/… and under pack pages like /cloud/<pack>/…
 const CAPTURE_PAGE = /\/neural-capture\/view\/([0-9a-f-]{36})/i;
@@ -899,6 +899,11 @@ let cloudSignedIn = null;   // learnt from the last Cortex Cloud request: true, 
 const helperPath = () => (app.isPackaged
   ? path.join(process.resourcesPath, 'app.asar.unpacked', 'mcp', 'helper.js')
   : path.join(__dirname, '..', 'mcp', 'helper.js'));
+// The paths the setup lines name (src/mcp-setup.js stablePaths: an AppImage or a portable exe gets lasting ones).
+const setupPaths = () => stablePaths({
+  packaged: app.isPackaged, execPath: process.execPath, helper: helperPath(), env: process.env,
+  userData: app.getPath('userData'), version: app.getVersion(), log: (m) => console.log('[assistants] ' + m),
+});
 const CLOUD_SEARCH = 'https://cloud-api.neuraldsp.com/search/v1/for/neuralCapture';
 const NOT_SIGNED_IN = 'Cortex Cloud says you are not signed in. Sign in on the Cortex Cloud tab of the editor, then try again.';
 async function agentCloudSearch(query, page) {
@@ -921,6 +926,7 @@ async function agentCloudSearch(query, page) {
       description: storedDescription(d.description).slice(0, 300), hash: d.hash ? String(d.hash) : null,
     };
   });
+  cloudSignedIn = true;   // the search API answered with the session: signed in
   return { ok: true, result: { query, page, pages: Number(json.numberOfPages) || (results.length ? page : 0), total: Number(json.numberOfResults) || results.length, results } };
 }
 async function agentCloudBundle(id) {
@@ -948,7 +954,7 @@ function startAgent() {
     getPage: () => editorPage(),
     store: { get: () => !!shellSettings.ai, set: (on) => { shellSettings.ai = !!on; saveShellSettings(); } },
     version: app.getVersion(),
-    setup: setupInfo({ exe: process.execPath, helper: helperPath() }),
+    setup: setupInfo(setupPaths()),
     cloud: {
       search: agentCloudSearch,
       bundle: agentCloudBundle,

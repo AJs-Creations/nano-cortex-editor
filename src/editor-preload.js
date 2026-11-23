@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('nanoAgent', {
   onConnected: (fn) => ipcRenderer.on('agent-connected', (_e, label) => fn(String(label || ''))),
   onCall: (fn) => ipcRenderer.on('agent-call', (_e, call) => fn(call)),
   reply: (id, answer) => ipcRenderer.send('agent-reply', Number(id), answer),
+  onCancel: (fn) => ipcRenderer.on('agent-cancel', (_e, id) => fn(Number(id))),
   front: () => ipcRenderer.send('agent-front'),
   cloud: (op, args) => ipcRenderer.invoke('agent-cloud', String(op), args && typeof args === 'object' ? args : {}),
   addToClaudeDesktop: () => ipcRenderer.invoke('agent-desktop'),

@@ -14,19 +14,20 @@
 //   agent-install(kind)    kind: cursor | vscode (the shell builds the link; the page never names a URL)
 // No call is ever evaluated as code: the page receives data and answers with data.
 
-const { createMcpServer, CONTRACT, ANOTHER_EDITOR } = require('./mcp-server');
+const { createMcpServer, CONTRACT, MESSAGES } = require('./mcp-server');
 const { addToClaudeDesktop } = require('./mcp-setup');
 
 const KIND = new Map(CONTRACT.tools.map((t) => [t.name, t.kind]));
 const pageTimeout = (tool, args) => (KIND.get(tool) === 'confirm' ? 11 * 60 * 1000
   : tool === 'get_slot_usage' && args && args.scan ? 6 * 60 * 1000 : tool === 'cloud_preview' ? 4 * 60 * 1000 : 3 * 60 * 1000);
 
+// The status line, in the contract's words (tools.json → messages).
 function statusText(on, st) {
-  if (!on || st.phase === 'off') return 'Off';
-  if (st.phase === 'blocked') return ANOTHER_EDITOR;
+  if (!on || st.phase === 'off') return MESSAGES.statusOff;
+  if (st.phase === 'blocked') return MESSAGES.anotherEditor;
   if (st.phase === 'error') return 'Cannot listen: ' + st.error + '.';
-  if (st.clients.length) return 'Connected: ' + st.clients.join(', ');
-  return 'On, waiting for an assistant';
+  if (st.clients.length) return MESSAGES.statusConnected.replace('{clients}', st.clients.join(', '));
+  return MESSAGES.statusWaiting;
 }
 
 function createAgentShell({ ipcMain, getPage, store, env = process.env, version = '0.0.0', setup, cloud = {}, focusWindow = () => {}, openExternal = () => false, log = () => {} }) {
@@ -58,7 +59,7 @@ function createAgentShell({ ipcMain, getPage, store, env = process.env, version 
     };
   }
 
-  function forward(tool, args, client) {
+  function forward(tool, args, client, call) {
     const p = page();
     if (!p) return Promise.resolve({ ok: false, error: 'The editor window is not ready (or shows the Classic Editor). Open the editor, then try again.' });
     const id = nextId++;
@@ -66,6 +67,15 @@ function createAgentShell({ ipcMain, getPage, store, env = process.env, version 
       const timer = setTimeout(() => { pending.delete(id); resolve({ ok: false, error: 'The editor page did not answer.' }); }, pageTimeout(tool, args));
       pending.set(id, { resolve: (r) => { clearTimeout(timer); resolve(r); }, timer });
       p.send('agent-call', { id, tool, args, client: client || null });
+      // The helper went away or AI assistants were turned off: the page cancels that call's open dialog (as the
+      // user's Cancel would), and the queue does not wait for its answer.
+      if (call) call.onAbort(() => {
+        const w = pending.get(id);
+        if (!w) return;
+        pending.delete(id);
+        push('agent-cancel', id);
+        w.resolve({ ok: false, error: CONTRACT.errors.cancelled });
+      });
     });
   }
   // The page reloaded, navigated or crashed: its open calls are lost.

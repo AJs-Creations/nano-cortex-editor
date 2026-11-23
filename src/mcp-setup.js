@@ -65,4 +65,24 @@ function addToClaudeDesktop(file, entry) {
   return { file, backup, replaced };
 }
 
-module.exports = { setupInfo, cursorLink, vscodeLink, claudeDesktopConfigPath, addToClaudeDesktop, SERVER };
+// The executable and helper the setup lines should name. A Linux AppImage mounts itself under a new /tmp/.mount_…
+// folder at every launch and a Windows portable exe unpacks to a new temporary folder, so neither execPath nor the
+// helper inside them lasts. Then: the AppImage / portable exe itself (APPIMAGE, PORTABLE_EXECUTABLE_FILE; both run
+// the app's Node with ELECTRON_RUN_AS_NODE=1) and a copy of the helper in <userData>/mcp-helper, refreshed at every
+// launch (its package.json carries the version the helper reports).
+function stablePaths({ packaged, execPath, helper, env = process.env, userData, version, log = () => {} }) {
+  const outer = env.APPIMAGE || env.PORTABLE_EXECUTABLE_FILE || '';
+  if (!packaged || !outer) return { exe: execPath, helper };
+  try {
+    const dir = path.join(userData, 'mcp-helper');
+    fs.mkdirSync(path.join(dir, 'mcp'), { recursive: true });
+    for (const f of ['helper.js', 'endpoint.js', 'tools.json']) fs.copyFileSync(path.join(path.dirname(helper), f), path.join(dir, 'mcp', f));
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'nano-cortex-mcp-helper', private: true, version }) + '\n');
+    return { exe: outer, helper: path.join(dir, 'mcp', 'helper.js') };
+  } catch (err) {
+    log('could not copy the helper: ' + err.message);
+    return { exe: execPath, helper };
+  }
+}
+
+module.exports = { setupInfo, stablePaths, cursorLink, vscodeLink, claudeDesktopConfigPath, addToClaudeDesktop, SERVER };

@@ -18,29 +18,17 @@ const { endpoint, checkPrivateDir, writeToken, sameToken, lineReader } = require
 
 const CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'mcp', 'tools.json'), 'utf8'));
 const RETRY_MS = 5000;
-const ANOTHER_EDITOR = 'Another Nano Cortex Editor is already serving AI assistants.';
-const CONTRACT_MISMATCH = "This assistant's setup is from another version of Nano Cortex Editor. Copy the setup line again from Settings → AI assistants.";
-
-// The assistant apps' MCP client names (clientInfo.name) as people know them. Anything else is shown as sent.
-const CLIENT_LABELS = {
-  'claude-code': 'Claude Code',
-  'claude-ai': 'Claude Desktop',
-  'claude desktop': 'Claude Desktop',
-  'codex': 'Codex',
-  'codex-mcp-client': 'Codex',
-  'codex_mcp_client': 'Codex',
-  'chatgpt': 'ChatGPT',
-  'cursor': 'Cursor',
-  'cursor-vscode': 'Cursor',
-  'visual studio code': 'VS Code',
-  'visual-studio-code': 'VS Code',
-  'vscode': 'VS Code',
-};
-// A display name for a hello's client.name, or null when there is none worth showing.
+// The words come from the contract (tools.json → messages, clients), shared word for word with the native edition.
+const MESSAGES = CONTRACT.messages;
+const ANOTHER_EDITOR = MESSAGES.anotherEditor;
+const CONTRACT_MISMATCH = MESSAGES.contractMismatch;
+const CLIENT_NAMES = Object.fromEntries(Object.entries(CONTRACT.clients.names).map(([k, v]) => [k.toLowerCase(), v]));
+// A display name for a hello's client.name (tools.json → clients), or null when there is none worth showing (the
+// caller then uses clients.fallback).
 function clientLabel(name) {
   const n = String(name || '').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 60);
   if (!n || /^unknown$/i.test(n)) return null;
-  return CLIENT_LABELS[n.toLowerCase()] || n;
+  return CLIENT_NAMES[n.toLowerCase()] || n;
 }
 
 function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = () => {}, onConnect = () => {}, retryMs = RETRY_MS, log = () => {} } = {}) {
@@ -55,7 +43,7 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
   const conns = new Set();
   let chain = Promise.resolve();
 
-  const clients = () => [...conns].filter((c) => c.greeted).map((c) => c.label || 'AI assistant');
+  const clients = () => [...conns].filter((c) => c.greeted).map((c) => c.label || CONTRACT.clients.fallback);
   function status() {
     return { phase, on: phase !== 'off', error: reason, clients: [...new Set(clients())], socket: ep ? ep.socket : null, dir: ep ? ep.dir : null };
   }
@@ -97,8 +85,6 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
   }
 
   function listen(gen) {
-    let tok;
-    try { tok = writeToken(ep.token); } catch (err) { set('error', 'cannot write ' + ep.token + ': ' + err.message); return; }
     const srv = net.createServer(onConnection);
     srv.on('error', (err) => {
       if (gen !== generation) return;
@@ -108,6 +94,10 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
     });
     srv.listen(ep.socket, () => {
       if (gen !== generation) { srv.close(); return; }
+      // The token is written only once this editor owns the socket: a second editor that lost the race never
+      // replaces the serving editor's token.
+      let tok;
+      try { tok = writeToken(ep.token); } catch (err) { srv.close(); set('error', 'cannot write ' + ep.token + ': ' + err.message); return; }
       if (process.platform !== 'win32') { try { fs.chmodSync(ep.socket, 0o600); } catch { /* the folder is private anyway */ } }
       server = srv;
       token = tok;
@@ -122,8 +112,9 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
     const c = { socket, greeted: false, label: null, client: null };
     conns.add(c);
     socket.on('error', () => {});
-    socket.on('close', () => { conns.delete(c); if (c.greeted) changed(); });
-    socket.on('data', lineReader((msg) => onMessage(c, msg), () => socket.destroy()));
+    socket.on('close', () => { conns.delete(c); if (c.call) c.call.abort(); if (c.greeted) changed(); });
+    // A malformed or over-long line closes the connection; nothing after it is read (lineReader stops on false).
+    socket.on('data', lineReader((msg) => onMessage(c, msg), () => { c.closing = true; socket.destroy(); return false; }));
   }
 
   function refuse(c, error) { send(c, { type: 'hello', ok: false, error }); c.socket.end(); c.closing = true; }
@@ -140,7 +131,7 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
       c.greeted = true;
       send(c, { type: 'hello', ok: true, editor: hello });
       changed();
-      try { onConnect(c.label || 'An AI assistant', c.client); } catch (err) { log('connect listener: ' + err.message); }
+      try { onConnect(c.label || CONTRACT.clients.fallback, c.client); } catch (err) { log('connect listener: ' + err.message); }
       return;
     }
     if (!msg || msg.type !== 'call' || !Number.isInteger(msg.id) || typeof msg.tool !== 'string') return;
@@ -148,8 +139,14 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
     // One call at a time, across every connection, in arrival order (a confirmation dialog holds the queue).
     chain = chain.then(async () => {
       if (c.socket.destroyed || phase !== 'listening') return;
+      // The call can be given up (the helper went away, or AI assistants were turned off): onCall hears it through
+      // call.onAbort and stops waiting, so the queue does not stay blocked behind an open dialog.
+      const call = { aborted: false, listeners: [], onAbort(fn) { if (this.aborted) fn(); else this.listeners.push(fn); },
+        abort() { if (this.aborted) return; this.aborted = true; for (const fn of this.listeners) { try { fn(); } catch { /* next */ } } } };
+      c.call = call;
       let r;
-      try { r = await onCall(msg.tool, args, c.label); } catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+      try { r = await onCall(msg.tool, args, c.label, call); } catch (err) { r = { ok: false, error: String((err && err.message) || err) }; }
+      if (c.call === call) c.call = null;
       if (!r || typeof r !== 'object') r = { ok: false, error: 'The editor gave no answer.' };
       send(c, r.ok ? { type: 'result', id: msg.id, ok: true, result: r.result === undefined ? {} : r.result } : { type: 'result', id: msg.id, ok: false, error: String(r.error || 'The editor reported an error.') });
     });
@@ -159,7 +156,7 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
     generation++;
     clearTimeout(retryTimer); retryTimer = null;
     const had = phase !== 'off';
-    for (const c of conns) c.socket.destroy();
+    for (const c of conns) { if (c.call) c.call.abort(); c.socket.destroy(); }
     conns.clear();
     if (server) {
       server.close();
@@ -178,4 +175,4 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
   return { start, stop, status };
 }
 
-module.exports = { createMcpServer, clientLabel, CONTRACT, ANOTHER_EDITOR, CONTRACT_MISMATCH, RETRY_MS };
+module.exports = { createMcpServer, clientLabel, CONTRACT, MESSAGES, ANOTHER_EDITOR, CONTRACT_MISMATCH, RETRY_MS };
