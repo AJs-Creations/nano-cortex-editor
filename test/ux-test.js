@@ -4022,12 +4022,13 @@ async function run() {
 
     // Settings → AI assistants: the switch with real clicks starts and stops the server.
     await openAiSettings();
-    check('Settings → AI assistants: the switch is off by default, the status line says "Off", no socket file', (await js('document.querySelector(\'[data-fk="set-ai"]\').getAttribute("aria-checked")')) === 'false' && (await statusText()) === 'Off' && !fs.existsSync(sock), await statusText());
-    check('Settings → AI assistants: the switch text and the explanation are the contract\'s',
-      (await js('document.querySelector(\'[data-fk="set-ai"]\').textContent')) === 'Allow AI assistants to control the editor'
-      && (await js('document.querySelector(\'[data-fk="ai-explain"]\').textContent')) === 'Assistants on this computer, such as Claude, ChatGPT or Codex, can read the pedal and make live edits. Saving and anything stored on the pedal still needs your click in the editor.');
+    const MSG = CONTRACT.messages;
+    check('Settings → AI assistants: the switch is off by default, the status line says messages.statusOff, no socket file', (await js('document.querySelector(\'[data-fk="set-ai"]\').getAttribute("aria-checked")')) === 'false' && (await statusText()) === MSG.statusOff && !fs.existsSync(sock), await statusText());
+    check('contract texts: the switch and the explanation are tools.json → messages.settingsSwitch / settingsExplain, word for word',
+      (await js('document.querySelector(\'[data-fk="set-ai"]\').textContent')) === MSG.settingsSwitch
+      && (await js('document.querySelector(\'[data-fk="ai-explain"]\').textContent')) === MSG.settingsExplain, await js('document.querySelector(\'[data-fk="ai-explain"]\').textContent'));
     await click('[data-fk="set-ai"]');
-    await checkSoon('turning the switch on starts listening: editor.sock appears, the status says "On, waiting for an assistant", the setting is stored', async () => fs.existsSync(sock) && (await statusText()) === 'On, waiting for an assistant' && A.on === true, async () => (await statusText()) + ' on=' + A.on);
+    await checkSoon('turning the switch on starts listening: editor.sock appears, the status says messages.statusWaiting, the setting is stored', async () => fs.existsSync(sock) && (await statusText()) === MSG.statusWaiting && A.on === true, async () => (await statusText()) + ' on=' + A.on);
     if (process.platform !== 'win32') check('the token file is private (0600) and the folder 0700', (fs.statSync(tokenFile).mode & 0o777) === 0o600 && (fs.statSync(A.dir).mode & 0o777) === 0o700);
     await shot('ai-01-settings-on');
 
@@ -4087,9 +4088,10 @@ async function run() {
     let n0 = await mark();
     r = await mc.call('get_status');
     check('MCP get_status through the helper: edition, connected, preset, assistants', !r.isError && r.data.editor.edition === 'electron' && r.data.editor.version === LINKS.version && r.data.connected === true && r.data.preset.number === (await js('state.selectedPreset')) && r.data.preset.unsaved === false && r.data.audition === null && JSON.stringify(r.data.assistants.clients) === '["Claude Code"]', r.text.slice(0, 300));
-    await checkSoon('Settings shows "Connected: Claude Code"', async () => (await statusText()) === 'Connected: Claude Code', statusText);
-    await checkSoon('a toast says "Claude Code connected"', async () => /^Claude Code connected$/.test(await toastText()), toastText);
-    check('the status bar pill "Assistant" shows, its tooltip names the client', await js('!document.getElementById("agentPill").hidden && document.getElementById("agentPill").textContent === "Assistant" && /Claude Code/.test(document.getElementById("agentPill").title)'));
+    const label = CONTRACT.clients.names['claude-code'];
+    await checkSoon('Settings shows messages.statusConnected with the client\'s display name from tools.json → clients ("Connected: Claude Code")', async () => (await statusText()) === MSG.statusConnected.replace('{clients}', label) && label === 'Claude Code', statusText);
+    await checkSoon('a toast says messages.connected ("Claude Code connected")', async () => (await toastText()) === MSG.connected.replace('{client}', label), toastText);
+    check('the status bar pill shows messages.pill, its tooltip names the client', await js('!document.getElementById("agentPill").hidden && /Claude Code/.test(document.getElementById("agentPill").title)') && (await js('document.getElementById("agentPill").textContent')) === MSG.pill);
     await closeSettings();
     await click('#agentPill');
     await checkSoon('clicking the pill opens Settings → AI assistants', '!!document.querySelector(\'[data-fk="ai-page"]:not([hidden])\') && document.querySelector(\'[data-fk="set-tab-ai"]\').classList.contains("on")');
@@ -4110,6 +4112,7 @@ async function run() {
     check('… an effect lists every parameter with value, display, unit, min, max, step (or options)', anEffect && anEffect.params.length > 0 && anEffect.params.every(q => (q.options && q.options.includes(q.value)) || (typeof q.value === 'number' && 'display' in q && 'min' in q && 'max' in q && 'step' in q)), JSON.stringify(anEffect).slice(0, 300));
     const pl = (await mc.call('list_presets')).data;
     check('list_presets: 64 presets with number, name, empty; the current one; four footswitches', pl.presets.length === 64 && pl.current === p.number && pl.presets.some(x => x.empty) && Object.keys(pl.footswitches).join() === 'IA,IB,IIA,IIB', JSON.stringify(pl.footswitches));
+    check('list_presets: an empty preset\'s name is null', pl.presets.filter(x => x.empty).every(x => x.name === null) && pl.presets.filter(x => !x.empty).every(x => typeof x.name === 'string'), JSON.stringify(pl.presets.slice(22, 26)));
     const lib = (await mc.call('list_library', { kind: 'capture' })).data;
     check('list_library capture: every slot and the factory and user library with type and instrument', lib.slots.length === 25 && lib.library.some(x => x.source === 'factory' && x.name === 'Plexi 1959 SLP' && x.type === 'amp_head' && x.instrument === 'guitar') && lib.library.some(x => x.source === 'user'), JSON.stringify(lib.library.slice(0, 2)));
     const bass = (await mc.call('list_library', { kind: 'capture', instrument: 'bass' })).data;
@@ -4165,6 +4168,8 @@ async function run() {
       JSON.stringify(tx));
     check('apply_tone returns one line per change and the preset read back', !r.isError && r.data.changes.length === 6 && r.data.changes[0] === 'capture slot ' + capSlot + ' “' + (await js('state.captureNames.get(' + capSlot + ')')) + '”' && r.data.changes[1] === 'amp Gain 5.0, Level ' + levelTo.toFixed(1) && r.data.preset.amp.gain === 5 && r.data.preset.effects[4].model === reverb.name && r.data.preset.effects[4].on === true && r.data.preset.capture.slot === capSlot, r.text.slice(0, 500));
     check('… and waited for a state read of the pedal', (await txSince(n0)).some(t => /^TX Current preset state request/.test(t)));
+    const rb = await js('__agent.lastReadBack');
+    check('apply_tone\'s read-back checks the effect models: not a confirmatory re-read after the slot change (skipFXModelApply off), asked after every model select', rb && rb.skipFXModelApply === false && rb.askedAfterModels === true, JSON.stringify(rb));
     check('the UI follows: Post FX 3 node shows the reverb, the Gain knob 50 %', (await js('document.querySelector(\'[data-fk="node-post3"] .model\').textContent')) === reverb.name && (await js('state.amp.gain')) === 128);
     check('Activity: "Assistant: applied a tone: …"', (await assistantLines(n0)).length === 1 && /^Assistant: applied a tone: capture slot /.test((await assistantLines(n0))[0]), JSON.stringify(await assistantLines(n0)));
     await shot('ai-03-apply-tone');
@@ -4241,6 +4246,53 @@ async function run() {
     check('… reads still work', !r.isError && r.data.number > 0);
     await key('Escape');
     await waitFor('!document.querySelector(".modal-bg")');
+    // cloud_preview is a pedal action too: refused while the user's own dialog is open.
+    await click('#renameBtn');
+    await waitFor('!!document.querySelector(".modal-bg")');
+    r = await mc.call('cloud_preview', { product_id: await js('__agent.demoCloud[1].product_id') });
+    check('busy: cloud_preview is refused (errors.busy) while a dialog of the user\'s own is open', r.isError && r.text === ERR.busy, r.text);
+    await key('Escape');
+    await waitFor('!document.querySelector(".modal-bg")');
+    await js('__ui.presetReorderBusy = true');
+    r = await mc.call('set_amp', { treble: 4 });
+    await js('__ui.presetReorderBusy = false');
+    check('busy: also while a preset move runs', r.isError && r.text === ERR.busy, r.text);
+
+    // The contract's refusals (tools.json → messages), word for word.
+    n0 = await mark();
+    r = await mc.call('apply_tone', { capture_slot: 30 });
+    check('messages.captureSlotRange with the field filled in ("capture_slot must be between 1 and 25 …")', r.isError && r.text === MSG.captureSlotRange.replace('{field}', 'capture_slot').replace('{count}', '25'), r.text);
+    r = await mc.call('use_cab_slot', { slot: 6 });
+    check('messages.cabSlotRange ("slot must be between 1 and 5 …")', r.isError && r.text === MSG.cabSlotRange.replace('{field}', 'slot').replace('{count}', '5'), r.text);
+    r = await mc.call('use_capture_slot', { slot: 2, on: false });
+    check('messages.slotOrOff for use_*_slot with slot and on:false', r.isError && r.text === MSG.slotOrOff, r.text);
+    r = await mc.call('set_tempo', { bpm: 245 });
+    const r35 = await mc.call('set_tempo', { bpm: 35 });
+    check('set_tempo outside the pedal\'s range is refused with messages.tempoRange (NanOS 2.3: 40–240), not clamped', r.isError && r.text === MSG.tempoRange.replace('{min}', '40').replace('{max}', '240') && r35.isError && r35.text === r.text, r.text + ' | ' + r35.text);
+    await js('__demo.hooks.midiClock = true; __demo.reportTempo()');
+    await waitFor('__nanoAgentUI.tempoLocked()');
+    r = await mc.call('set_tempo', { bpm: 120 });
+    await js('__demo.hooks.midiClock = false; __demo.reportTempo()');
+    await waitFor('!__nanoAgentUI.tempoLocked()');
+    check('set_tempo is refused while an external MIDI clock sets the tempo (the pedal would ignore it)', r.isError && /external MIDI clock/.test(r.text), r.text);
+    check('… none of these sent anything', reads(await txSince(n0)).filter(t => !/^TX Tempo/.test(t)).length === 0 && !(await txSince(n0)).some(t => /^TX Tempo /.test(t) && t.includes('2D ' + f32hex(120))), JSON.stringify(reads(await txSince(n0))));
+
+    // Loudness after a model change is measured from what the pedal will restore (the cached values), not the default.
+    if (levelModel) {
+      const k = levelModel.slot;
+      await mc.call('set_effect', { slot: k, model: levelModel.name });
+      await js('state.blocks.' + k + '.paramsLoaded = true');   // read from the pedal: setFXParam caches its values
+      await mc.call('set_effect_param', { slot: k, param: 'Level', value: levelModel.p.min });
+      await mc.call('set_effect', { slot: k, model: 'None' });
+      n0 = await mark();
+      r = await mc.call('apply_tone', { effects: [{ slot: k, model: levelModel.name, params: { Level: levelModel.p.min + (levelModel.p.max - levelModel.p.min) * 0.75 } }] });
+      check('loudness: emptying a slot and choosing the same effect again cannot jump its Level (measured from the cached value the pedal restores)', r.isError && /in smaller steps \(at most 25 % of its range per call\)/.test(r.text) && reads(await txSince(n0)).length === 0, r.text);
+    }
+
+    // use_*_slot on: true reads the slot after the switch's write is done.
+    await mc.call('use_cab_slot', { on: false });
+    r = await mc.call('use_cab_slot', { on: true });
+    check('use_cab_slot on:false then on:true: the result names the slot the cab is back on', !r.isError && r.data.cab.on === true && Number.isInteger(r.data.cab.slot) && r.data.cab.slot >= 1, JSON.stringify(r.data));
 
     // Confirmation tools: the editor's own dialog, "Asked by Claude Code." first; packets only after the click.
     const confirmFlow = async (tool, args, { title, cancelWith = 'click' } = {}) => {
@@ -4321,10 +4373,11 @@ async function run() {
     r = await mc.call('cloud_open', { product_id: 'not-a-uuid' });
     check('cloud_open: a product_id that is not a UUID is refused', r.isError && /product_id is not a Cortex Cloud product id/.test(r.text), r.text);
     c = await confirmFlow('cloud_send', { product_id: cloudId });
-    check('cloud_send: the existing Send dialog with "Asked by …"; Cancel sends nothing; Send uploads (type 13)', c.title === 'Send Glass Clean Combo to the pedal?' && c.asked === 'Asked by Claude Code.' && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0 && !c.ok.isError && c.ok.data.sent && c.ok.data.name === 'Glass Clean Combo' && c.tx.some(t => /^TX Capture upload "Glass Clean Combo"/.test(t)), JSON.stringify(c).slice(0, 500));
-    await waitFor('/Load Glass Clean Combo into a slot now/.test((document.querySelector(".modal h2") || {}).textContent || "")');
-    await click('.modal-bg .modal .row button:nth-child(1)');   // Later
-    await waitFor('!document.querySelector(".modal-bg")');
+    check('cloud_send: the existing Send dialog with "Asked by …"; Cancel sends nothing; Send uploads (type 13)', c.title === 'Send Glass Clean Combo to the pedal?' && c.asked === MSG.askedBy.replace('{client}', label) && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0 && !c.ok.isError && c.ok.data.sent && c.ok.data.name === 'Glass Clean Combo' && c.tx.some(t => /^TX Capture upload "Glass Clean Combo"/.test(t)), JSON.stringify(c).slice(0, 500));
+    await settle();
+    check('cloud_send leaves no "Load … into a slot now?" dialog behind (the assistant loads it itself)', !(await js('!!document.querySelector(".modal-bg")')));
+    c = await confirmFlow('load_capture_into_slot', { source: 'user', name: 'Glass Clean Combo', slot: 12 });
+    check('… so the follow-up load_capture_into_slot is not busy and loads it', !c.ok.isError && c.ok.data.slot === 12 && c.tx.some(t => /^TX Load library capture "Glass Clean Combo" into slot 12: /.test(t)), JSON.stringify(c.ok).slice(0, 300));
     r = await mc.call('cloud_search', { query: 'glass' });
     check('cloud_search: onPedal true once the capture is in the pedal\'s library', r.data.results[0].onPedal === true, r.text.slice(0, 200));
     n0 = await mark();
@@ -4358,6 +4411,35 @@ async function run() {
     check('select_preset 5 (no unsaved edits): one preset change, the list follows', !r.isError && r.data.number === 5 && tx.filter(x => /^TX Preset change \d+:/.test(x)).length === 1 && tx.some(x => x.startsWith('TX Preset change 5:')) && (await js('document.querySelector(".preset-row.active .t").textContent')) === r.data.name, JSON.stringify(tx));
     r = await mc.call('get_slot_usage', { scan: true }, 120000);
     check('get_slot_usage scan=true: scans the presets and comes back', !r.isError && r.data.scanned === true && Object.keys(r.data.capture).length > 0 && (await js('state.selectedPreset')) === 5, r.text.slice(0, 200));
+    const libUsers = await js('__ui.usage.library');
+    check('get_slot_usage: key "0" lists the presets that play a capture straight from the library', libUsers.length > 0 && JSON.stringify(r.data.capture['0']) === JSON.stringify(libUsers), JSON.stringify(r.data.capture['0']) + ' vs ' + JSON.stringify(libUsers));
+    await mc.call('preview_cab', { source: 'factory', name: '412 V30' });
+    await js('__demo.hooks.refuseStop = true');
+    r = await mc.call('get_slot_usage', { scan: true }, 60000);
+    await js('__demo.hooks.refuseStop = false');
+    check('get_slot_usage scan=true is refused when the scan could not start (the preview did not stop)', r.isError && /scan did not start/.test(r.text), r.text);
+    await mc.call('stop_preview');
+    await waitFor('!__nanoAgentUI.irAudition.active');
+    // save: refused with messages.nothingToSave on a clean preset, and while the editor does not know the preset.
+    r = await mc.call('save');
+    check('save without unsaved edits is refused with messages.nothingToSave', r.isError && r.text === MSG.nothingToSave.replace('{number}', '5'), r.text);
+    await mc.call('set_amp', { mid: 6 });
+    await waitFor('state.presetDirty');
+    await js('__ui.presetUnknown = true');
+    r = await mc.call('save');
+    const rd = await mc.call('discard_edits');
+    await js('__ui.presetUnknown = false');
+    check('save and discard_edits are refused while the editor does not know which preset the pedal is on', r.isError && rd.isError && r.text === (await js('__nanoAgentUI.PRESET_UNKNOWN')) && rd.text === r.text, r.text + ' | ' + rd.text);
+    n0 = await mark();
+    let pend = mc.call('save', {}, 60000);
+    await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+    await js('state.selectedPreset = 6');   // the pedal switched presets (a footswitch) while the dialog is open
+    await click(modalButton('ok'));
+    r = await pend;
+    await js('state.selectedPreset = 5');
+    check('save: if the pedal switched presets while the dialog was open, nothing is saved', r.isError && /switched to another preset/.test(r.text) && !(await txSince(n0)).some(t => /^TX save preset/i.test(t)), r.text);
+    await mc.call('discard_edits');
+    await waitFor('!state.presetDirty');
 
     // Not connected: every pedal tool says so; get_status still answers.
     await js('__demo.stop()');
@@ -4382,13 +4464,59 @@ async function run() {
     const bad = JSON.parse(await hello({ type: 'hello', token: 'f'.repeat(64), contract: 1, client: { name: 'x' } }) || '{}');
     const other = JSON.parse(await hello({ type: 'hello', token: tok, contract: 99, client: { name: 'x' } }) || '{}');
     check('socket: a wrong token is refused (hello ok:false) and the connection closed', bad.type === 'hello' && bad.ok === false, JSON.stringify(bad));
-    check('socket: another contract version is refused with the contract\'s sentence', other.ok === false && other.error === "This assistant's setup is from another version of Nano Cortex Editor. Copy the setup line again from Settings → AI assistants.", JSON.stringify(other));
+    check('socket: another contract version is refused with messages.contractMismatch', other.ok === false && other.error === MSG.contractMismatch, JSON.stringify(other));
     const { createMcpServer, ANOTHER_EDITOR } = require('../src/mcp-server');
     const second = createMcpServer({ env: A.env, onCall: async () => ({ ok: true }), retryMs: 200 });
     second.start();
     await waitFor(() => second.status().phase === 'blocked');
-    check('one editor at a time: a second editor sees "Another Nano Cortex Editor is already serving AI assistants." and does not take over', second.status().phase === 'blocked' && second.status().error === ANOTHER_EDITOR && fs.existsSync(sock));
+    check('one editor at a time: a second editor sees messages.anotherEditor and does not take over', second.status().phase === 'blocked' && second.status().error === ANOTHER_EDITOR && ANOTHER_EDITOR === MSG.anotherEditor && fs.existsSync(sock));
+    check('… and leaves the serving editor\'s token alone', fs.readFileSync(tokenFile, 'utf8').trim() === tok);
     second.stop();
+
+    // Over-long and malformed lines: the connection closes and nothing after them is acted on.
+    const raw = (payload) => new Promise((resolve) => {
+      const c2 = net.createConnection(sock);
+      let got = '';
+      c2.on('connect', () => c2.write(payload));
+      c2.on('data', (d) => { got += d; });
+      c2.on('close', () => resolve({ got, closed: true }));
+      c2.on('error', () => resolve({ got, closed: true }));
+      setTimeout(() => { c2.destroy(); resolve({ got, closed: false }); }, 3000);
+    });
+    const clients0 = JSON.stringify(A.shell.status().clients);
+    const helloLine = JSON.stringify({ type: 'hello', token: tok, contract: CONTRACT.contractVersion, client: { name: 'intruder' } });
+    const long = await raw(JSON.stringify({ type: 'hello', token: tok, contract: CONTRACT.contractVersion, client: { name: 'intruder' }, pad: 'x'.repeat(1024 * 1024 + 10) }) + '\n');
+    const after = await raw('garbage\n' + helloLine + '\n');
+    check('a line over 1 MiB (with a valid hello) is never acted on: no answer, the connection closes', long.got === '' && long.closed, JSON.stringify(long).slice(0, 200));
+    check('a line after a malformed one (a valid hello) is never acted on: no answer, the connection closes, no new client', after.got === '' && after.closed && JSON.stringify(A.shell.status().clients) === clients0 && !A.log.some(l => /intruder/.test(l)), JSON.stringify(after) + ' ' + JSON.stringify(A.shell.status().clients));
+
+    // An assistant that goes away while its confirmation is open: the dialog closes as cancelled, the queue moves on.
+    const mc2 = mcpClient('codex-mcp-client');
+    await mc2.init();
+    await mc.call('set_amp', { mid: 6.5 });
+    await waitFor('state.presetDirty');
+    n0 = await mark();
+    pend = mc2.call('save', {}, 60000);
+    await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+    check('the second assistant\'s dialog says "Asked by Codex." (tools.json → clients)', (await modalAsked()) === MSG.askedBy.replace('{client}', CONTRACT.clients.names['codex-mcp-client']), await modalAsked());
+    mc2.close();
+    await checkSoon('… when that assistant exits, its dialog closes (cancelled) and nothing is saved', async () => !(await js('!!document.querySelector(".modal-bg")')) && !(await txSince(n0)).some(t => /^TX save preset/i.test(t)));
+    const t0 = Date.now();
+    r = await mc.call('get_status');
+    check('… and the next call from another assistant answers at once', !r.isError && Date.now() - t0 < 3000, String(Date.now() - t0) + ' ms');
+    await mc.call('discard_edits');
+
+    // AppImage / portable exe: the setup names the outer executable and a lasting copy of the helper.
+    {
+      const { stablePaths } = require('../src/mcp-setup');
+      const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'nano-ud-'));
+      const sp = stablePaths({ packaged: true, execPath: '/tmp/.mount_abc/nano-cortex-editor', helper: helperPath, env: { APPIMAGE: '/home/me/Apps/nano-cortex-editor.AppImage' }, userData: ud, version: '9.8.7' });
+      const plain = stablePaths({ packaged: true, execPath: '/opt/x/nano', helper: helperPath, env: {}, userData: ud, version: '9.8.7' });
+      check('AppImage / portable: the setup names APPIMAGE (or PORTABLE_EXECUTABLE_FILE) and a helper copy in userData that carries the version; otherwise execPath',
+        sp.exe === '/home/me/Apps/nano-cortex-editor.AppImage' && sp.helper === path.join(ud, 'mcp-helper', 'mcp', 'helper.js') && fs.existsSync(path.join(ud, 'mcp-helper', 'mcp', 'endpoint.js')) && fs.existsSync(path.join(ud, 'mcp-helper', 'mcp', 'tools.json'))
+        && JSON.parse(fs.readFileSync(path.join(ud, 'mcp-helper', 'package.json'), 'utf8')).version === '9.8.7' && plain.exe === '/opt/x/nano' && plain.helper === helperPath, JSON.stringify(sp));
+      fs.rmSync(ud, { recursive: true, force: true });
+    }
 
     // Turning the switch off closes everything and removes the socket and the token.
     await openAiSettings();
