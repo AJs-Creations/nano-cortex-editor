@@ -40,6 +40,8 @@
       "editor/**",
       "pro/**",
       "mcp/**",
+      "!mcp/build-mcpb.js",
+      "!mcp/conformance.js",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md"
     ],
