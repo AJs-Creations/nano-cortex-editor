@@ -22,6 +22,7 @@
     "dist:linux": "npm run build:core && electron-builder --linux --x64 --arm64",
     "build:preview": "node scripts/build-core.js && node scripts/build-preview.js",
     "test:ux": "npm run build:core && node scripts/run-electron.js test/ux-test.js",
+    "test:mcp": "node mcp/conformance.js",
     "build:icon": "node scripts/run-electron.js scripts/build-icon.js",
     "docs:screenshots": "npm run build:core && node scripts/run-electron.js scripts/docs-screenshots.js && python3 scripts/docs-images.py"
   },
@@ -38,8 +39,12 @@
       "assets/icon.svg",
       "editor/**",
       "pro/**",
+      "mcp/**",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md"
+    ],
+    "asarUnpack": [
+      "mcp/**"
     ],
     "mac": {
       "category": "public.app-category.music",

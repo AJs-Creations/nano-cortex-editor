@@ -1,6 +1,7 @@
 # Pull-request checks.
 #  - smoke (required): npm ci, regenerate the protocol layer from the vendored editor (fails loudly if
-#    upstream moved anything), and syntax-check every script.
+#    upstream moved anything), syntax-check every script, and the MCP helper's conformance test
+#    (mcp/conformance.js, the same test the native edition's helper passes).
 #  - ux-test (required): the full input-driven UX test on demo data. It drives a real Electron window
 #    with mouse, wheel and key events and asserts the exact packets sent. GitHub's macOS runners are slow
 #    VMs, so the test waits on conditions (UI state, packets arriving, writes settling) rather than fixed
@@ -33,7 +34,9 @@ jobs:
       - run: npm ci
       - run: npm run build:core
       - name: Syntax check
-        run: for f in src/*.js pro/*.js scripts/*.js test/*.js; do node --check "$f"; done
+        run: for f in src/*.js pro/*.js scripts/*.js test/*.js mcp/*.js; do node --check "$f"; done
+      - name: MCP helper conformance
+        run: npm run test:mcp
 
   # The release builds Windows too; this catches a Windows-only break (e.g. CRLF checkouts) before a tag does.
   build-core-windows:

@@ -46,3 +46,20 @@ contextBridge.exposeInMainWorld('nanoShell', {
   // The shell shows the file dialog and answers with that role's bytes; the page never passes a path.
   metroSample: (op, role) => ipcRenderer.invoke('metro-sample', String(op), String(role)),
 });
+
+// <nanoAgent> AI assistants (src/mcp-shell.js, mcp/PROTOCOL.md). The UX test loads exactly this block as its preload.
+// Calls arrive as data and are answered as data; the page never names a path or a URL here.
+contextBridge.exposeInMainWorld('nanoAgent', {
+  contract: () => ipcRenderer.invoke('agent-contract'),
+  status: () => ipcRenderer.invoke('agent-status'),
+  setEnabled: (on) => ipcRenderer.invoke('agent-set', !!on),
+  onStatus: (fn) => ipcRenderer.on('agent-status', (_e, status) => fn(status)),
+  onConnected: (fn) => ipcRenderer.on('agent-connected', (_e, label) => fn(String(label || ''))),
+  onCall: (fn) => ipcRenderer.on('agent-call', (_e, call) => fn(call)),
+  reply: (id, answer) => ipcRenderer.send('agent-reply', Number(id), answer),
+  front: () => ipcRenderer.send('agent-front'),
+  cloud: (op, args) => ipcRenderer.invoke('agent-cloud', String(op), args && typeof args === 'object' ? args : {}),
+  addToClaudeDesktop: () => ipcRenderer.invoke('agent-desktop'),
+  install: (kind) => ipcRenderer.invoke('agent-install', kind === 'cursor' ? 'cursor' : 'vscode'),
+});
+// </nanoAgent>
