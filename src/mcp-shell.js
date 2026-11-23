@@ -1,38 +1,37 @@
 'use strict';
 
 // The shell's half of AI assistants (mcp/PROTOCOL.md): owns the socket server (src/mcp-server.js) while Settings →
-// General → AI features (the master switch, `features`) and Settings → AI assistants are both on, forwards every call to the editor page and its answer back, and answers the page's requests
-// (status, switch, Cortex Cloud, Claude Desktop, install links). src/main.js creates it with Electron's objects; the
+// General → AI assistants is on, forwards every call to the editor page and its answer back, and answers the page's requests
+// (status, switch, Cortex Cloud, Claude Desktop, ChatGPT). src/main.js creates it with Electron's objects; the
 // UX test creates it with its own window and fakes, so the same IPC is tested.
 //
 // IPC (page side: window.nanoAgent in src/editor-preload.js; every request checks that it came from the editor page):
 //   agent-contract  → mcp/tools.json             agent-status → the status below      agent-set(on) → the status
-//   agent-features(on) → the status (the master switch: off stops the server, closes every connection and cancels
-//                        the open call's dialog)
+//                    (off stops the server, closes every connection and cancels the open call's dialog)
 //   agent-call      ← { id, tool, args, client } (to the page)   agent-reply(id, { ok, result | error }) (from the page)
 //   agent-status    ← status (pushed on change)  agent-connected ← label (a new assistant)
 //   agent-front     the page opened an assistant confirmation: bring the window to the front
-//   agent-cloud(op, args)  op: search | bundle | open | signed-in       agent-desktop → add to Claude Desktop
-//   agent-install(kind)    kind: cursor | vscode (the shell builds the link; the page never names a URL)
+//   agent-cloud(op, args)  op: search | bundle | open | signed-in
+//   agent-desktop → add to Claude Desktop          agent-chatgpt → add to ChatGPT (~/.codex/config.toml)
 // No call is ever evaluated as code: the page receives data and answers with data.
 
 const { createMcpServer, CONTRACT, MESSAGES } = require('./mcp-server');
-const { addToClaudeDesktop } = require('./mcp-setup');
+const { addToClaudeDesktop, addToChatGPT } = require('./mcp-setup');
 
 const KIND = new Map(CONTRACT.tools.map((t) => [t.name, t.kind]));
 const pageTimeout = (tool, args) => (KIND.get(tool) === 'confirm' ? 11 * 60 * 1000
   : tool === 'get_slot_usage' && args && args.scan ? 6 * 60 * 1000 : tool === 'cloud_preview' ? 4 * 60 * 1000 : 3 * 60 * 1000);
 
-// The status line, in the contract's words (tools.json → messages).
-function statusText(on, st, features = true) {
-  if (!features || !on || st.phase === 'off') return MESSAGES.statusOff;
+// The status line, in the contract's words (tools.json → messages); shown only while the switch is on.
+function statusText(on, st) {
+  if (!on || st.phase === 'off') return '';
   if (st.phase === 'blocked') return MESSAGES.anotherEditor;
   if (st.phase === 'error') return 'Cannot listen: ' + st.error + '.';
   if (st.clients.length) return MESSAGES.statusConnected.replace('{clients}', st.clients.join(', '));
   return MESSAGES.statusWaiting;
 }
 
-function createAgentShell({ ipcMain, getPage, store, features = { get: () => false, set() {} }, env = process.env, version = '0.0.0', setup, cloud = {}, focusWindow = () => {}, openExternal = () => false, log = () => {} }) {
+function createAgentShell({ ipcMain, getPage, store, env = process.env, version = '0.0.0', setup, cloud = {}, focusWindow = () => {}, log = () => {} }) {
   const pending = new Map();   // call id → { resolve, timer }
   let nextId = 1;
 
@@ -51,13 +50,11 @@ function createAgentShell({ ipcMain, getPage, store, features = { get: () => fal
   function status() {
     const st = server.status();
     const on = !!store.get();
-    const ft = !!features.get();
     return {
-      features: ft, on, phase: st.phase, clients: st.clients, error: st.error, text: statusText(on, st, ft),
+      on, phase: st.phase, clients: on ? st.clients : [], error: st.error, text: statusText(on, st),
       setup: setup ? {
-        claudeCode: setup.claudeCode, codex: setup.codex, json: setup.json,
         claudeDesktop: setup.claudeDesktop, desktopEntry: JSON.stringify({ 'nano-cortex': setup.entry }, null, 2),
-        exe: setup.exe, helper: setup.helper,
+        chatgpt: setup.chatgpt, chatgptTable: setup.chatgptTable,
       } : null,
     };
   }
@@ -93,17 +90,7 @@ function createAgentShell({ ipcMain, getPage, store, features = { get: () => fal
     on = !!on;
     store.set(on);
     log('[assistants] AI assistants ' + (on ? 'on' : 'off'));
-    if (on && features.get()) server.start(); else server.stop();
-    return status();
-  });
-  // The master switch. Off: nothing listens, whatever the AI assistants switch says (server.stop() closes every
-  // connection and aborts its call, which cancels the open dialog through agent-cancel above).
-  ipcMain.handle('agent-features', (e, on) => {
-    if (!fromPage(e)) return null;
-    on = !!on;
-    features.set(on);
-    log('[assistants] AI features ' + (on ? 'on' : 'off'));
-    if (on && store.get()) server.start(); else server.stop();
+    if (on) server.start(); else server.stop();
     const st = status();
     push('agent-status', st);
     return st;
@@ -137,17 +124,21 @@ function createAgentShell({ ipcMain, getPage, store, features = { get: () => fal
       return { ok: true, ...r };
     } catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
   });
-  ipcMain.handle('agent-install', (e, kind) => {
-    if (!fromPage(e) || !setup) return false;
-    const link = kind === 'cursor' ? setup.cursor : kind === 'vscode' ? setup.vscode : null;
-    return link ? !!openExternal(link) : false;
+  ipcMain.handle('agent-chatgpt', (e) => {
+    if (!fromPage(e)) return { ok: false, error: 'Not allowed.' };
+    if (!setup || !setup.chatgpt) return { ok: false, error: 'ChatGPT is not available on this system.' };
+    try {
+      const r = addToChatGPT(setup.chatgpt, setup.entry);
+      log('[assistants] ' + (r.exists ? 'nano-cortex is already in ' + r.file : 'added nano-cortex to ' + r.file + (r.backup ? ' (backup: ' + r.backup + ')' : '')));
+      return { ok: true, ...r };
+    } catch (err) { return { ok: false, error: String((err && err.message) || err) }; }
   });
 
   return {
     status,
     pageGone,
-    // At launch: listen when both switches are on.
-    start() { if (features.get() && store.get()) server.start(); return status(); },
+    // At launch: listen when the switch is on.
+    start() { if (store.get()) server.start(); return status(); },
     stop() { server.stop(); pageGone(); },
     server,
   };

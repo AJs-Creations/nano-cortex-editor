@@ -123,7 +123,7 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
     if (c.closing) return;
     if (!c.greeted) {
       if (!msg || msg.type !== 'hello') return refuse(c, 'The first message must be a hello.');
-      if (!token || !sameToken(msg.token, token)) return refuse(c, 'The token is wrong. Turn AI assistants off and on again in Settings → AI assistants, then try again.');
+      if (!token || !sameToken(msg.token, token)) return refuse(c, 'The token is wrong. Turn Settings → General → AI assistants off and on again, then try again.');
       if (msg.contract !== CONTRACT.contractVersion) return refuse(c, CONTRACT_MISMATCH);
       const client = msg.client && typeof msg.client === 'object' ? msg.client : {};
       c.client = { name: String(client.name || '').slice(0, 80), version: String(client.version || '').slice(0, 40) };

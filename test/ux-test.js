@@ -218,7 +218,7 @@ const rgbOf = (css) => {
 
 // AI assistants (MCP): the shell's agent half (src/mcp-shell.js, the module main uses) on a temporary NANO_MCP_DIR,
 // wired to this window. The window's preload is exactly the nanoAgent block of src/editor-preload.js.
-const agentT = { on: false, installs: [], opened: [], focus: 0, log: [] };
+const agentT = { on: false, opened: [], focus: 0, log: [] };
 function setUpAgent() {
   const { createAgentShell } = require('../src/mcp-shell');
   const { setupInfo } = require('../src/mcp-setup');
@@ -226,7 +226,7 @@ function setUpAgent() {
   agentT.dir = fs.mkdtempSync(path.join(tmp, 'nano-mcp-'));
   fs.chmodSync(agentT.dir, 0o700);
   agentT.home = fs.mkdtempSync(path.join(tmp, 'nano-home-'));
-  agentT.env = { ...process.env, NANO_MCP_DIR: agentT.dir, APPDATA: path.join(agentT.home, 'AppData') };
+  agentT.env = { ...process.env, NANO_MCP_DIR: agentT.dir, APPDATA: path.join(agentT.home, 'AppData'), CODEX_HOME: path.join(agentT.home, '.codex') };
   agentT.setup = setupInfo({ exe: process.execPath, helper: path.join(__dirname, '..', 'mcp', 'helper.js'), env: agentT.env, home: agentT.home });
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'editor-preload.js'), 'utf8');
   const block = /\/\/ <nanoAgent>[\s\S]*?\/\/ <\/nanoAgent>/.exec(src);
@@ -236,13 +236,11 @@ function setUpAgent() {
   agentT.shell = createAgentShell({
     ipcMain, getPage: () => wc, env: agentT.env, version: require('../package.json').version, setup: agentT.setup,
     store: { get: () => agentT.on, set: (v) => { agentT.on = v; } },
-    features: { get: () => agentT.features === true, set: (v) => { agentT.features = v; } },
     cloud: {
       search: async () => ({ ok: false, error: 'no Cortex Cloud in the UX test' }), bundle: async () => ({ ok: false, error: 'no Cortex Cloud in the UX test' }),
       open: (id) => { agentT.opened.push(id); return true; }, signedIn: () => null,
     },
     focusWindow: () => { agentT.focus++; },
-    openExternal: (link) => { agentT.installs.push(link); return true; },
     log: (line) => agentT.log.push(line),
   });
 }
@@ -2351,7 +2349,7 @@ async function run() {
   await js('document.activeElement.blur()');
   n0 = await mark();
   await click('#settingsBtn'); await waitFor(settingsOpen);
-  check('Settings has General, Device and About tabs, General first (no AI assistants tab while AI features is off, the default)', (await js('[...document.querySelectorAll(".settings-tabs [role=tab]")].map(b => b.textContent + (b.classList.contains("on") ? "*" : "")).join("|")')) === 'General*|Device|About');
+  check('Settings has General, Device and About tabs, General first (there is no AI tab)', (await js('[...document.querySelectorAll(".settings-tabs [role=tab]")].map(b => b.textContent + (b.classList.contains("on") ? "*" : "")).join("|")')) === 'General*|Device|About');
   await settle();
   check('nothing is read from the pedal before the Device tab opens', (await txSince(n0)).length === 0);
   await click('[data-fk="set-tab-device"]');
@@ -4006,8 +4004,8 @@ async function run() {
     }
     const openAiSettings = async () => {
       if (!(await js('!!document.querySelector(".settings-modal")'))) await click('#settingsBtn');
-      await click('[data-fk="set-tab-ai"]');
-      await waitFor('!!document.querySelector(\'[data-fk="ai-page"]:not([hidden])\')');
+      await click('[data-fk="set-tab-general"]');
+      await waitFor('!!document.querySelector(\'[data-fk="set-ai"]\') && !document.querySelector(\'[data-fk="set-ai"]\').closest("[hidden]")');
     };
     const closeSettings = async () => { if (await js('!!document.querySelector(".settings-modal")')) { await click('.settings-modal .row .btn.primary'); await waitFor('!document.querySelector(".modal-bg")'); } };
     const modalTitle = () => js('(document.querySelector(".modal-bg:last-of-type .modal h2") || {}).textContent || ""');
@@ -4021,51 +4019,40 @@ async function run() {
     let r = await mc.call('get_status');
     check('MCP: with AI assistants off every call answers errors.editorNotRunning', r.isError && r.text === ERR.editorNotRunning, r.text);
 
-    // The master switch, Settings → General → AI features: off by default, and while it is off nothing AI exists and
-    // nothing listens, even with "ai": true in settings.json (the launch path, shell.start()).
-    {
-      const M = CONTRACT.messages;
-      A.on = true; A.shell.start();
-      await click('#settingsBtn');
-      await waitFor('!!document.querySelector(".settings-modal") && !!document.querySelector(\'[data-fk="set-ai-features"]\')');
-      check('AI features: off by default, in Settings → General, worded messages.aiFeaturesSwitch / aiFeaturesExplain',
-        (await js('document.querySelector(\'[data-fk="set-ai-features"]\').getAttribute("aria-checked")')) === 'false'
-        && (await js('document.querySelector(\'[data-fk="set-ai-features"]\').textContent')) === M.aiFeaturesSwitch
-        && (await js('document.querySelector(\'[data-fk="ai-features-explain"]\').textContent')) === M.aiFeaturesExplain
-        && await js('!document.querySelector(\'[data-fk="set-ai-features"]\').closest("[hidden]")'));
-      check('… while it is off: no AI assistants tab, no Assistant pill, and no socket although the AI assistants switch is on',
-        await js('!document.querySelector(\'[data-fk="set-tab-ai"]\') && !document.querySelector(\'[data-fk="ai-page"]\') && document.getElementById("agentPill").hidden')
-        && !fs.existsSync(sock) && A.shell.status().phase === 'off');
-      A.on = false;
-      await click('[data-fk="set-ai-features"]');
-      await checkSoon('turning AI features on (a real click) shows the AI assistants tab and stores aiFeatures; nothing listens until "Allow AI assistants…" is on',
-        async () => A.features === true && await js('!!document.querySelector(\'[data-fk="set-tab-ai"]\')') && !fs.existsSync(sock), () => 'features=' + A.features);
-    }
-
-    // Settings → AI assistants: the switch with real clicks starts and stops the server.
-    await openAiSettings();
+    // One switch, Settings → General → AI assistants: off by default, and while it is off nothing AI shows and
+    // nothing listens. The launch path (shell.start()) with the setting off listens to nothing.
     const MSG = CONTRACT.messages;
-    check('Settings → AI assistants: the switch is off by default, the status line says messages.statusOff, no socket file', (await js('document.querySelector(\'[data-fk="set-ai"]\').getAttribute("aria-checked")')) === 'false' && (await statusText()) === MSG.statusOff && !fs.existsSync(sock), await statusText());
-    check('contract texts: the switch and the explanation are tools.json → messages.settingsSwitch / settingsExplain, word for word',
-      (await js('document.querySelector(\'[data-fk="set-ai"]\').textContent')) === MSG.settingsSwitch
-      && (await js('document.querySelector(\'[data-fk="ai-explain"]\').textContent')) === MSG.settingsExplain, await js('document.querySelector(\'[data-fk="ai-explain"]\').textContent'));
+    A.shell.start();
+    await click('#settingsBtn');
+    await waitFor('!!document.querySelector(".settings-modal") && !!document.querySelector(\'[data-fk="set-ai"]\')');
+    check('Settings → General has the AI assistants switch, off by default, worded messages.aiSwitch / aiExplain, word for word',
+      (await js('document.querySelector(\'[data-fk="set-ai"]\').getAttribute("aria-checked")')) === 'false'
+      && (await js('document.querySelector(\'[data-fk="set-ai"]\').textContent')) === MSG.aiSwitch
+      && (await js('document.querySelector(\'[data-fk="ai-explain"]\').textContent')) === MSG.aiExplain
+      && await js('!document.querySelector(\'[data-fk="set-ai"]\').closest("[hidden]") && document.querySelector(\'[data-fk="set-tab-general"]\').classList.contains("on")'));
+    check('… while it is off: no AI tab, no status, no buttons, no indicator, and no socket',
+      await js('!document.querySelector(\'[data-fk="set-tab-ai"]\') && [...document.querySelectorAll(".settings-tabs [role=tab]")].map(b => b.textContent).join("|") === "General|Device|About" && document.querySelector(\'[data-fk="ai-on"]\').hidden && document.getElementById("agentPill").hidden')
+      && !fs.existsSync(sock) && A.shell.status().phase === 'off');
+    check('the switch lines up with the other toggles on the page (same left edge as Developer tools)',
+      await js('Math.abs(document.querySelector(\'[data-fk="set-ai"]\').getBoundingClientRect().left - document.querySelector(\'[data-fk="set-devtools"]\').getBoundingClientRect().left) < 1'),
+      await js('document.querySelector(\'[data-fk="set-ai"]\').getBoundingClientRect().left + " vs " + document.querySelector(\'[data-fk="set-devtools"]\').getBoundingClientRect().left'));
     await click('[data-fk="set-ai"]');
-    await checkSoon('turning the switch on starts listening: editor.sock appears, the status says messages.statusWaiting, the setting is stored', async () => fs.existsSync(sock) && (await statusText()) === MSG.statusWaiting && A.on === true, async () => (await statusText()) + ' on=' + A.on);
+    await checkSoon('turning the switch on (a real click) starts listening: editor.sock appears, the status says messages.statusWaiting, the setting is stored', async () => fs.existsSync(sock) && (await statusText()) === MSG.statusWaiting && A.on === true, async () => (await statusText()) + ' on=' + A.on);
+    check('… and General shows, under it, the status, Add to Claude Desktop… (not on Linux), Add to ChatGPT… and the manual line; still no AI tab',
+      await js('!document.querySelector(\'[data-fk="ai-on"]\').hidden && !document.querySelector(\'[data-fk="set-tab-ai"]\')')
+      && (await js('document.querySelector(\'[data-fk="ai-add-claude"]\').textContent')) === MSG.addClaude
+      && (await js('document.querySelector(\'[data-fk="ai-add-claude-row"]\').hidden')) === !A.setup.claudeDesktop
+      && (await js('document.querySelector(\'[data-fk="ai-add-chatgpt"]\').textContent')) === MSG.addChatGPT
+      && (await js('document.querySelector(\'[data-fk="ai-other"]\').textContent')) === MSG.otherAssistants
+      && await js('document.querySelector(\'[data-fk="ai-status"]\').getBoundingClientRect().height < 40 && document.querySelector(\'[data-fk="ai-explain"]\').getBoundingClientRect().height < 90')
+      && await js('!document.querySelector(\'[data-fk="ai-claude-code-copy"], [data-fk="ai-cursor-install"], [data-fk="ai-vscode-install"], [data-fk="ai-json-copy"], .ai-setup-name\')'));
     if (process.platform !== 'win32') check('the token file is private (0600) and the folder 0700', (fs.statSync(tokenFile).mode & 0o777) === 0o600 && (fs.statSync(A.dir).mode & 0o777) === 0o700);
+    await js('document.querySelector(\'[data-fk="ai-on"]\').scrollIntoView({ block: "center" }), true');
     await shot('ai-01-settings-on');
-
-    // Set up rows: the exact lines with this installation's paths, copied with the Copy buttons.
     const exe = process.execPath;
-    const want = {
-      cc: 'claude mcp add -s user -e ELECTRON_RUN_AS_NODE=1 nano-cortex -- "' + exe + '" "' + helperPath + '"',
-      cx: 'codex mcp add nano-cortex --env ELECTRON_RUN_AS_NODE=1 -- "' + exe + '" "' + helperPath + '"',
-      json: JSON.stringify({ mcpServers: { 'nano-cortex': { command: exe, args: [helperPath], env: { ELECTRON_RUN_AS_NODE: '1' } } } }),
-    };
-    for (const [fk, key, label] of [['ai-claude-code', 'cc', 'Claude Code'], ['ai-codex', 'cx', 'Codex'], ['ai-json', 'json', 'Other assistants (JSON)']]) {
-      await click('[data-fk="' + fk + '-copy"]');
-      await checkSoon('Set up, ' + label + ': Copy copies the exact line with this installation\'s executable and helper', async () => (await js('__agent.copied')) === want[key] && (await js('document.querySelector(\'[data-fk="' + fk + '-text"]\').textContent')) === want[key], async () => js('__agent.copied'));
-    }
-    check('… and the clipboard holds it', clipboard.readText() === want.json, clipboard.readText().slice(0, 120));
+    const before = opened.length;
+    await click('[data-fk="ai-other"]');
+    await checkSoon('"Other assistants …: see the manual" opens the manual\'s AI assistants chapter in the browser', () => opened.length === before + 1 && opened[before] === LINKS.manual + '#17-ai-assistants', () => JSON.stringify(opened.slice(before)));
 
     // Claude Desktop: shows the entry, asks, merges keeping every other entry, backs up the old file.
     if (A.setup.claudeDesktop) {
@@ -4073,50 +4060,69 @@ async function run() {
       fs.mkdirSync(path.dirname(cfg), { recursive: true });
       const old = JSON.stringify({ theme: 'dark', mcpServers: { other: { command: '/usr/bin/other', args: ['x'] } } }, null, 2);
       fs.writeFileSync(cfg, old);
-      await click('[data-fk="ai-desktop-add"]');
-      await checkSoon('Add to Claude Desktop… shows the entry it will write and the file, and asks first', async () => (await js('!document.querySelector(\'[data-fk="ai-desktop-confirm"]\').hidden')) && JSON.parse(await js('document.querySelector(\'[data-fk="ai-desktop-entry"]\').textContent'))['nano-cortex'].command === exe && fs.readFileSync(cfg, 'utf8') === old);
-      await click('[data-fk="ai-desktop-cancel"]');
+      await click('[data-fk="ai-add-claude"]');
+      await checkSoon('Add to Claude Desktop… shows the entry it will write and the file, and asks first', async () => (await js('!document.querySelector(\'[data-fk="ai-add-claude-confirm"]\').hidden')) && JSON.parse(await js('document.querySelector(\'[data-fk="ai-add-claude-entry"]\').textContent'))['nano-cortex'].command === exe && fs.readFileSync(cfg, 'utf8') === old);
+      await click('[data-fk="ai-add-claude-cancel"]');
       check('… Cancel leaves the file alone', fs.readFileSync(cfg, 'utf8') === old && !fs.existsSync(cfg + '.bak'));
-      await click('[data-fk="ai-desktop-add"]');
-      await click('[data-fk="ai-desktop-confirm-add"]');
+      await click('[data-fk="ai-add-claude"]');
+      await click('[data-fk="ai-add-claude-confirm-add"]');
       await checkSoon('… Add merges nano-cortex into claude_desktop_config.json, keeps the other entries and settings, and backs up the old file', () => {
         try {
           const now = JSON.parse(fs.readFileSync(cfg, 'utf8'));
           return now.theme === 'dark' && now.mcpServers.other.command === '/usr/bin/other' && JSON.stringify(now.mcpServers['nano-cortex']) === JSON.stringify({ command: exe, args: [helperPath], env: { ELECTRON_RUN_AS_NODE: '1' } }) && fs.readFileSync(cfg + '.bak', 'utf8') === old;
         } catch { return false; }
       }, () => (fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : 'no file'));
-      check('… and says so', /^Added to Claude Desktop/.test(await js('document.querySelector(\'[data-fk="ai-desktop-note"]\').textContent')));
-    } else {
-      check('Linux: no Claude Desktop row (there is no Linux build of it)', await js('document.querySelector(\'[data-fk="ai-desktop"]\').hidden'));
+      check('… and says so', /^Added to Claude Desktop/.test(await js('document.querySelector(\'[data-fk="ai-add-claude-note"]\').textContent')));
     }
-    // Cursor and VS Code install links, built by the shell; Learn more opens the assistant's official MCP page.
-    await click('[data-fk="ai-cursor-install"]');
-    await click('[data-fk="ai-vscode-install"]');
-    await waitFor(() => A.installs.length >= 2);
-    const entry = { command: exe, args: [helperPath], env: { ELECTRON_RUN_AS_NODE: '1' } };
-    const cursorLink = A.installs.find(l => l.startsWith('cursor://')) || '';
-    const vscodeLink = A.installs.find(l => l.startsWith('vscode:')) || '';
-    check('Cursor: "Add to Cursor" opens cursor://anysphere.cursor-deeplink/mcp/install?name=nano-cortex&config=<base64 of the entry>',
-      /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=nano-cortex&config=/.test(cursorLink) && JSON.stringify(JSON.parse(Buffer.from(decodeURIComponent(cursorLink.split('config=')[1]), 'base64').toString('utf8'))) === JSON.stringify(entry), cursorLink.slice(0, 120));
-    check('VS Code: "Add to VS Code" opens vscode:mcp/install?<URL-encoded {name, command, args, env}>',
-      /^vscode:mcp\/install\?/.test(vscodeLink) && JSON.stringify(JSON.parse(decodeURIComponent(vscodeLink.slice('vscode:mcp/install?'.length)))) === JSON.stringify({ name: 'nano-cortex', ...entry }), vscodeLink.slice(0, 120));
-    const before = opened.length;
-    await click('[data-fk="ai-claude-code-learn"]');
-    await click('[data-fk="ai-codex-learn"]');
-    await waitFor(() => opened.length >= before + 2);
-    check('Learn more opens the official MCP pages in the browser (Claude Code, Codex)', opened.slice(before).join(' ') === 'https://code.claude.com/docs/en/mcp https://developers.openai.com/codex/mcp', opened.slice(before).join(' '));
 
-    // An assistant connects: status line, pill, toast.
+    // ChatGPT: the desktop app reads ~/.codex/config.toml (here a temporary CODEX_HOME). Shows the table, asks, appends
+    // it keeping the file, backs up the old file; an existing nano-cortex table is left alone.
+    {
+      const toml = A.setup.chatgpt;
+      const table = '[mcp_servers.nano-cortex]\ncommand = ' + JSON.stringify(exe) + '\nargs = [' + JSON.stringify(helperPath) + ']\nenv = { ELECTRON_RUN_AS_NODE = "1" }\n';
+      const addChatGPT = async () => { await click('[data-fk="ai-add-chatgpt"]'); await waitFor('!document.querySelector(\'[data-fk="ai-add-chatgpt-confirm"]\').hidden'); };
+      const note = () => js('document.querySelector(\'[data-fk="ai-add-chatgpt-note"]\').hidden ? "" : document.querySelector(\'[data-fk="ai-add-chatgpt-note"]\').textContent');
+      check('ChatGPT: the file is CODEX_HOME/config.toml (~/.codex/config.toml by default)', toml === path.join(A.env.CODEX_HOME, 'config.toml') && !fs.existsSync(toml), toml);
+      await addChatGPT();
+      check('Add to ChatGPT… shows the [mcp_servers.nano-cortex] table and the file, and asks first', (await js('document.querySelector(\'[data-fk="ai-add-chatgpt-entry"]\').textContent')) === table
+        && (await js('document.querySelector(\'[data-fk="ai-add-chatgpt-confirm"]\').textContent')).includes(toml) && !fs.existsSync(toml), await js('document.querySelector(\'[data-fk="ai-add-chatgpt-entry"]\').textContent'));
+      await click('[data-fk="ai-add-chatgpt-cancel"]');
+      check('… Cancel writes nothing', !fs.existsSync(toml));
+      await addChatGPT();
+      await click('[data-fk="ai-add-chatgpt-confirm-add"]');
+      await checkSoon('… with no config.toml yet: creates it holding exactly the table, no backup, and says "Restart the ChatGPT app."', async () => fs.existsSync(toml) && fs.readFileSync(toml, 'utf8') === table && !fs.existsSync(toml + '.bak') && /Restart the ChatGPT app\.$/.test(await note()), note);
+      const other = '# my settings\nmodel = "gpt-5"\n\n[mcp_servers.other]\ncommand = "/usr/bin/other"\nargs = ["x"]\n\n[profiles.fast]\nmodel = "gpt-5-mini"';
+      fs.writeFileSync(toml, other);
+      fs.rmSync(toml + '.bak', { force: true });
+      await addChatGPT();
+      await click('[data-fk="ai-add-chatgpt-confirm-add"]');
+      await checkSoon('… with other tables: appends the table after them, keeps the file otherwise byte for byte, backs up the old file', () => fs.readFileSync(toml, 'utf8') === other + '\n\n' + table && fs.existsSync(toml + '.bak') && fs.readFileSync(toml + '.bak', 'utf8') === other, () => fs.readFileSync(toml, 'utf8'));
+      const mine = other + '\n\n[mcp_servers."nano-cortex"]\ncommand = "/somewhere/else"\n';
+      fs.writeFileSync(toml, mine);
+      fs.rmSync(toml + '.bak', { force: true });
+      await addChatGPT();
+      await click('[data-fk="ai-add-chatgpt-confirm-add"]');
+      await checkSoon('… with a nano-cortex table already there: changes nothing, no backup, and says so', async () => fs.readFileSync(toml, 'utf8') === mine && !fs.existsSync(toml + '.bak') && /already/.test(await note()), note);
+      const { codexTable, tomlString } = require('../src/mcp-setup');
+      check('TOML strings are escaped (Windows backslashes, quotes, control characters)',
+        tomlString('C:\\Program Files\\Nano "X"\\nano.exe') === '"C:\\\\Program Files\\\\Nano \\"X\\"\\\\nano.exe"' && tomlString('a\tb\x01') === '"a\\tb' + String.fromCharCode(92) + 'u0001"'
+        && codexTable({ command: 'C:\\A\\b.exe', args: ['C:\\h.js'], env: { ELECTRON_RUN_AS_NODE: '1' } }) === '[mcp_servers.nano-cortex]\ncommand = "C:\\\\A\\\\b.exe"\nargs = ["C:\\\\h.js"]\nenv = { ELECTRON_RUN_AS_NODE = "1" }\n');
+      fs.rmSync(path.dirname(toml), { recursive: true, force: true });
+    }
+
+    // An assistant connects: status line, indicator, toast.
     let n0 = await mark();
     r = await mc.call('get_status');
     check('MCP get_status through the helper: edition, connected, preset, assistants', !r.isError && r.data.editor.edition === 'electron' && r.data.editor.version === LINKS.version && r.data.connected === true && r.data.preset.number === (await js('state.selectedPreset')) && r.data.preset.unsaved === false && r.data.audition === null && JSON.stringify(r.data.assistants.clients) === '["Claude Code"]', r.text.slice(0, 300));
     const label = CONTRACT.clients.names['claude-code'];
     await checkSoon('Settings shows messages.statusConnected with the client\'s display name from tools.json → clients ("Connected: Claude Code")', async () => (await statusText()) === MSG.statusConnected.replace('{clients}', label) && label === 'Claude Code', statusText);
     await checkSoon('a toast says messages.connected ("Claude Code connected")', async () => (await toastText()) === MSG.connected.replace('{client}', label), toastText);
-    check('the status bar pill shows messages.pill, its tooltip names the client', await js('!document.getElementById("agentPill").hidden && /Claude Code/.test(document.getElementById("agentPill").title)') && (await js('document.getElementById("agentPill").textContent')) === MSG.pill);
+    check('the status bar shows messages.pill ("Assistant connected"), its tooltip names the client', await js('!document.getElementById("agentPill").hidden && /Claude Code/.test(document.getElementById("agentPill").title)') && (await js('document.getElementById("agentPill").textContent')) === MSG.pill);
     await closeSettings();
+    check('… it is a label, not a button: not focusable, no role', await js('(() => { const p = document.getElementById("agentPill"); return p.tagName === "SPAN" && p.tabIndex < 0 && !p.getAttribute("role"); })()'));
     await click('#agentPill');
-    await checkSoon('clicking the pill opens Settings → AI assistants', '!!document.querySelector(\'[data-fk="ai-page"]:not([hidden])\') && document.querySelector(\'[data-fk="set-tab-ai"]\').classList.contains("on")');
+    await sleep(300);
+    check('… and clicking it does nothing (no Settings)', await js('!document.querySelector(".settings-modal")'));
     await shot('ai-02-connected');
     await closeSettings();
 
@@ -4540,51 +4546,44 @@ async function run() {
       fs.rmSync(ud, { recursive: true, force: true });
     }
 
-    // AI features off while an assistant is connected (a real click in General): the server stops, the connection
-    // closes, the tab and the pill go; the AI assistants switch keeps its setting.
+    // Dialog deadline: an assistant's confirmation closes by itself as cancelled (here after 1.5 s; 9 minutes in use),
+    // with the toast messages.dialogExpired, and nothing is written.
     {
-      r = await mc.call('get_status');
-      await waitFor('!document.getElementById("agentPill").hidden');
-      await openAiSettings();
-      await click('[data-fk="set-tab-general"]');
-      await click('[data-fk="set-ai-features"]');
-      await checkSoon('AI features off while connected: no socket, no client, no AI tab, no pill, aiFeatures stored off, "Allow AI assistants" kept on',
-        async () => !fs.existsSync(sock) && !A.shell.status().clients.length && A.features === false && A.on === true
-          && await js('!document.querySelector(\'[data-fk="set-tab-ai"]\') && !document.querySelector(\'[data-fk="ai-page"]\') && document.getElementById("agentPill").hidden'),
-        () => JSON.stringify(A.shell.status()));
-      r = await mc.call('get_status');
-      check('… and the helper answers errors.editorNotRunning', r.isError && r.text === ERR.editorNotRunning, r.text);
-      await click('[data-fk="set-ai-features"]');
-      await checkSoon('AI features on again: the tab is back and, with "Allow AI assistants" on, the editor listens again', async () => fs.existsSync(sock) && await js('!!document.querySelector(\'[data-fk="set-tab-ai"]\')'));
-      // Settings showing the AI assistants tab when the master switch goes off (through the page's bridge, as the shell
-      // IPC gets it): the tab goes and Settings falls back to General.
-      await click('[data-fk="set-tab-ai"]');
-      await js('nanoAgent.setFeatures(false).then(() => true)');
-      await checkSoon('… off while the AI assistants tab is showing: the tab goes, Settings shows General', '!document.querySelector(\'[data-fk="set-tab-ai"]\') && document.querySelector(\'[data-fk="set-tab-general"]\').classList.contains("on") && !document.querySelector(".settings .set-row").closest("[hidden]")');
-      await closeSettings();
-      // With an assistant's dialog open (Settings cannot open over a dialog, so through the bridge): the dialog closes
-      // as cancelled and nothing is written.
-      await js('nanoAgent.setFeatures(true).then(() => true)');
-      await checkSoon('AI features on (bridge): listening again', async () => fs.existsSync(sock));
+      await js('__agent.setDialogDeadline(1500)');
+      n0 = await mark();
+      pend = mc.call('rename', { name: 'Late Click' }, 60000);
+      await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+      r = await pend;
+      await checkSoon('dialog deadline: the assistant\'s dialog closes by itself, the call answers errors.cancelled, the toast says messages.dialogExpired, nothing is written',
+        async () => !(await js('!!document.querySelector(".modal-bg")')) && r.isError && r.text === ERR.cancelled && (await toastText()) === CONTRACT.messages.dialogExpired && !(await txSince(n0)).some(t => /rename/i.test(t)),
+        async () => r.text + ' | ' + (await toastText()));
+      await js('__agent.setDialogDeadline(9 * 60 * 1000)');
+    }
+
+    // The switch off with an assistant's dialog open (Settings cannot open over a dialog, so through the page's
+    // bridge, as the shell IPC gets it): the dialog closes, the call answers cancelled, nothing is saved.
+    {
       r = await mc.call('set_amp', { mid: 6.5 });
       await waitFor('state.presetDirty');
       n0 = await mark();
       pend = mc.call('save', {}, 60000);
       await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
-      await js('nanoAgent.setFeatures(false).then(() => true)');
+      await js('nanoAgent.setEnabled(false).then(() => true)');
       r = await pend;
-      await checkSoon('AI features off with an assistant\'s save dialog open: the dialog closes, the call answers errors.cancelled, nothing is saved',
-        async () => !(await js('!!document.querySelector(".modal-bg")')) && r.isError && r.text === ERR.cancelled && !(await txSince(n0)).some(t => /^TX save preset/i.test(t)) && !fs.existsSync(sock),
+      await checkSoon('the switch off with an assistant\'s save dialog open: no socket, the dialog closes, the call answers errors.cancelled, nothing is saved',
+        async () => !(await js('!!document.querySelector(".modal-bg")')) && r.isError && r.text === ERR.cancelled && !(await txSince(n0)).some(t => /^TX save preset/i.test(t)) && !fs.existsSync(sock) && A.on === false,
         () => r.text);
-      await js('nanoAgent.setFeatures(true).then(() => true)');
-      await checkSoon('AI features on again (bridge)', async () => fs.existsSync(sock));
+      await js('nanoAgent.setEnabled(true).then(() => true)');
+      await checkSoon('… on again: listening again', async () => fs.existsSync(sock));
       await mc.call('discard_edits');
     }
 
     // Turning the switch off closes everything and removes the socket and the token.
     await openAiSettings();
+    r = await mc.call('get_status');
+    await waitFor('!document.getElementById("agentPill").hidden');
     await click('[data-fk="set-ai"]');
-    await checkSoon('turning the switch off: editor.sock and the token are gone, the status says "Off", the pill hides', async () => !fs.existsSync(sock) && !fs.existsSync(tokenFile) && (await statusText()) === 'Off' && (await js('document.getElementById("agentPill").hidden')) && A.on === false, statusText);
+    await checkSoon('turning the switch off while an assistant is connected (a real click): editor.sock and the token are gone, no client, the status and the buttons are hidden, the indicator hides, the setting is stored off', async () => !fs.existsSync(sock) && !fs.existsSync(tokenFile) && !A.shell.status().clients.length && (await js('document.querySelector(\'[data-fk="ai-on"]\').hidden && document.getElementById("agentPill").hidden')) && A.on === false, () => JSON.stringify(A.shell.status()));
     r = await mc.call('get_status');
     check('… and the helper answers errors.editorNotRunning again', r.isError && /Nano Cortex Editor is not running/.test(r.text), r.text);
     await closeSettings();

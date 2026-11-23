@@ -53,7 +53,6 @@ contextBridge.exposeInMainWorld('nanoAgent', {
   contract: () => ipcRenderer.invoke('agent-contract'),
   status: () => ipcRenderer.invoke('agent-status'),
   setEnabled: (on) => ipcRenderer.invoke('agent-set', !!on),
-  setFeatures: (on) => ipcRenderer.invoke('agent-features', !!on),
   onStatus: (fn) => ipcRenderer.on('agent-status', (_e, status) => fn(status)),
   onConnected: (fn) => ipcRenderer.on('agent-connected', (_e, label) => fn(String(label || ''))),
   onCall: (fn) => ipcRenderer.on('agent-call', (_e, call) => fn(call)),
@@ -62,6 +61,6 @@ contextBridge.exposeInMainWorld('nanoAgent', {
   front: () => ipcRenderer.send('agent-front'),
   cloud: (op, args) => ipcRenderer.invoke('agent-cloud', String(op), args && typeof args === 'object' ? args : {}),
   addToClaudeDesktop: () => ipcRenderer.invoke('agent-desktop'),
-  install: (kind) => ipcRenderer.invoke('agent-install', kind === 'cursor' ? 'cursor' : 'vscode'),
+  addToChatGPT: () => ipcRenderer.invoke('agent-chatgpt'),
 });
 // </nanoAgent>

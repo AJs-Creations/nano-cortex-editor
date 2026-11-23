@@ -6,7 +6,8 @@
 // store anything on the pedal open the editor's own dialog and run exactly the path the user's click would.
 // No tool runs code, sends raw packets, touches files or reaches the dev remote.
 //
-// Also here: Settings → AI assistants, the status bar pill "Assistant", the toast when an assistant connects.
+// Also here: the AI assistants switch in Settings → General (with the status and the two Add buttons under it), the
+// status bar label "Assistant connected", the toast when an assistant connects, the 9-minute dialog deadline.
 // Loaded after ui.js. Without the bridge (the browser preview) it does nothing.
 
 (() => {
@@ -785,6 +786,7 @@
     if (tool !== 'get_status' && !tool.startsWith('cloud_') && !state.connected) return refuse(C.errors.notConnected);
     if ((def.kind === 'live' || def.kind === 'confirm') && busyNow()) return refuse(C.errors.busy);
     const ctx = { client, asked: msg('askedBy', { client: client || C.clients.fallback }) };
+    const disarm = def.kind === 'confirm' ? armDeadline() : () => {};
     try {
       const r = await TOOLS[tool](args, ctx);
       say(r.line);
@@ -793,7 +795,7 @@
       if (err === CANCELLED) { say(tool + ' cancelled in the editor'); return { ok: false, error: C.errors.cancelled }; }
       if (err instanceof Refusal) return refuse(err.message);
       return refuse('The editor hit an error: ' + ((err && err.message) || err));
-    }
+    } finally { disarm(); }
   }
   let current = null;   // the call being run: { id }
   if (bridge) bridge.onCall((call) => {
@@ -804,138 +806,112 @@
   });
 
   // ------------------------------------------------------------------ what the user sees
-  // features: the master switch Settings → General → AI features. While it is off nothing AI shows: no AI assistants
-  // tab, no pill, no connect toast (and the shell does not listen).
-  let lastStatus = { features: false, on: false, phase: 'off', clients: [], text: '', setup: null };
-  const featuresOn = () => !!lastStatus.features;
-  const pill = document.getElementById('agentPill');
-  let page = null;   // the open Settings page's live parts
+  // One switch, Settings → General → AI assistants (off by default). While it is off nothing AI shows: no status, no
+  // buttons, no indicator, no toast (and the shell does not listen). While it is on, General shows under it the status
+  // line, Add to Claude Desktop…, Add to ChatGPT… and a line pointing to the manual for other assistants.
+  let lastStatus = { on: false, phase: 'off', clients: [], text: '', setup: null };
+  const pill = document.getElementById('agentPill');   // a label, not a button
+  let page = null;   // the open Settings rows' live parts
   function applyStatus(st) {
     if (!st || typeof st !== 'object') return;
-    const was = featuresOn();
     lastStatus = st;
-    const clients = featuresOn() ? st.clients || [] : [];
+    const clients = st.on ? st.clients || [] : [];
     if (pill) {
       pill.hidden = !clients.length;
-      pill.title = clients.length ? msg('statusConnected', { clients: clients.join(', ') }) + '. Click for Settings → AI assistants.' : '';
+      pill.title = clients.length ? msg('statusConnected', { clients: clients.join(', ') }) : '';
     }
+    if (page && !page.alive()) page = null;
     if (page) page.update();
-    if (was !== featuresOn()) U.refreshSettings();
   }
-  if (pill) pill.addEventListener('click', () => U.openSettings('ai'));
+  // An open assistant confirmation, cancelled the way the user's Cancel would. → true if there was one.
+  function cancelAssistantDialog() {
+    const bg = [...document.querySelectorAll('.modal-bg')].find((b) => b.querySelector('.modal-asked'));
+    const cancel = bg && bg.querySelector('.modal .row button');
+    if (cancel) cancel.click();
+    return !!cancel;
+  }
+  // Dialog deadline: an assistant's confirmation closes by itself as cancelled after 9 minutes (the helper gives up at
+  // 10), with a toast, so a late click never acts on a request the assistant was already told failed. The UX test
+  // shortens it (demo mode only).
+  let dialogDeadlineMs = 9 * 60 * 1000;
+  function armDeadline() {
+    let poll = null;
+    const expire = () => { if (cancelAssistantDialog()) { U.toast(C.messages.dialogExpired); say('a confirmation expired before an answer'); } };
+    const timer = setTimeout(() => { expire(); poll = setInterval(expire, 250); }, dialogDeadlineMs);
+    return () => { clearTimeout(timer); clearInterval(poll); };
+  }
   if (bridge) {
     bridge.onStatus(applyStatus);
-    bridge.onConnected((label) => { contractReady().then(() => featuresOn() && U.toast(msg('connected', { client: label || C.clients.fallback }))); });
+    bridge.onConnected((label) => { contractReady().then(() => lastStatus.on && U.toast(msg('connected', { client: label || C.clients.fallback }))); });
     // The shell gave up on a call (its assistant went away, or AI assistants were turned off): an open assistant
     // confirmation is cancelled the way the user's Cancel would.
-    bridge.onCancel((id) => {
-      if (!current || current.id !== id) return;
-      const bg = [...document.querySelectorAll('.modal-bg')].find((b) => b.querySelector('.modal-asked'));
-      const cancel = bg && bg.querySelector('.modal .row button');
-      if (cancel) cancel.click();
-    });
+    bridge.onCancel((id) => { if (current && current.id === id) cancelAssistantDialog(); });
     bridge.status().then(applyStatus).catch(() => {});
     contractReady();
   }
 
-  const LEARN = {
-    claudeCode: 'https://code.claude.com/docs/en/mcp',
-    codex: 'https://developers.openai.com/codex/mcp',
-    claudeDesktop: 'https://modelcontextprotocol.io/docs/develop/connect-local-servers',
-    cursor: 'https://cursor.com/docs/context/mcp',
-    vscode: 'https://code.visualstudio.com/docs/copilot/customization/mcp-servers',
-  };
-  const copied = { last: '' };
-  async function copyText(text, btn) {
-    copied.last = text;
-    try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied'; } catch { btn.textContent = 'Copy failed'; }
-    setTimeout(() => { if (btn.isConnected) btn.textContent = 'Copy'; }, 1500);
-  }
-  function buildPage() {
+  // "Add to …": shows what it will write and where, and asks first (inline, since Settings is already a dialog).
+  function addRow(fk, label, intro, preview, add, done) {
     const el = U.el;
-    const status = el('span', { class: 'set-unit ai-status', dataset: { fk: 'ai-status' } });
-    const sw = U.toggleSwitch('set-ai', C.messages.settingsSwitch, !!lastStatus.on, async (v) => {
+    const note = el('p', { class: 'set-note', dataset: { fk: fk + '-note' }, hidden: true });
+    const confirm = el('div', { class: 'ai-confirm', dataset: { fk: fk + '-confirm' }, hidden: true });
+    const btn = el('button', { class: 'btn small', dataset: { fk }, onclick: () => {
+      confirm.replaceChildren(
+        el('p', { class: 'set-note', text: intro() }),
+        el('pre', { class: 'ai-code', dataset: { fk: fk + '-entry' }, text: preview() }),
+        el('div', { class: 'ai-confirm-row' },
+          el('button', { class: 'btn small', dataset: { fk: fk + '-cancel' }, onclick: () => { confirm.hidden = true; btn.disabled = false; } }, 'Cancel'),
+          el('button', { class: 'btn small primary', dataset: { fk: fk + '-confirm-add' }, onclick: async () => {
+            const r = await add().catch((err) => ({ ok: false, error: err.message }));
+            confirm.hidden = true; btn.disabled = false;
+            note.hidden = false;
+            note.textContent = r && r.ok ? done(r) : 'Not added: ' + ((r && r.error) || 'unknown error');
+          } }, 'Add')));
+      confirm.hidden = false; btn.disabled = true; note.hidden = true;
+    } }, label);
+    return el('div', { class: 'ai-setup', dataset: { fk: fk + '-row' } }, el('div', { class: 'ai-setup-head' }, btn), confirm, note);
+  }
+  const base = (f) => String(f || '').split(/[\\/]/).pop();
+  function buildRows() {
+    const el = U.el;
+    const S = () => lastStatus.setup || {};
+    const sw = U.toggleSwitch('set-ai', C.messages.aiSwitch, !!lastStatus.on, async (v) => {
       sw.disabled = true;
       try { applyStatus(await bridge.setEnabled(v)); } finally { sw.disabled = false; if (page) page.update(); }
     });
-    const learn = (k, fk) => U.linkEl(LEARN[k], 'Learn more', fk);
-    const codeRow = (fk, label, textOf, learnKey) => {
-      const code = el('code', { class: 'ai-code', dataset: { fk: fk + '-text' } });
-      const btn = el('button', { class: 'btn small', dataset: { fk: fk + '-copy' }, onclick: () => copyText(textOf(), btn) }, 'Copy');
-      const row = el('div', { class: 'ai-setup', dataset: { fk } },
-        el('div', { class: 'ai-setup-head' }, el('span', { class: 'ai-setup-name', text: label }), el('div', { class: 'grow' }), btn, learnKey ? learn(learnKey, fk + '-learn') : null),
-        code);
-      return { row, update: () => { code.textContent = textOf(); } };
-    };
-    const S = () => lastStatus.setup || {};
-    const cc = codeRow('ai-claude-code', 'Claude Code', () => S().claudeCode || '', 'claudeCode');
-    const cx = codeRow('ai-codex', 'Codex and the ChatGPT desktop app', () => S().codex || '', 'codex');
-    const js = codeRow('ai-json', 'Other assistants', () => S().json || '', null);
-    // Claude Desktop: shows the entry it will write and asks first (inline, since Settings is already a dialog).
-    const deskNote = el('p', { class: 'set-note', dataset: { fk: 'ai-desktop-note' }, hidden: true });
-    const deskConfirm = el('div', { class: 'ai-confirm', dataset: { fk: 'ai-desktop-confirm' }, hidden: true });
-    const deskBtn = el('button', { class: 'btn small', dataset: { fk: 'ai-desktop-add' }, onclick: () => {
-      deskConfirm.replaceChildren(
-        el('p', { class: 'set-note', text: 'This adds the entry below to ' + S().claudeDesktop + '. Every other entry stays, and the old file is kept as claude_desktop_config.json.bak. Restart Claude Desktop afterwards.' }),
-        el('pre', { class: 'ai-code', dataset: { fk: 'ai-desktop-entry' }, text: S().desktopEntry || '' }),
-        el('div', { class: 'ai-confirm-row' },
-          el('button', { class: 'btn small', dataset: { fk: 'ai-desktop-cancel' }, onclick: () => { deskConfirm.hidden = true; deskBtn.disabled = false; } }, 'Cancel'),
-          el('button', { class: 'btn small primary', dataset: { fk: 'ai-desktop-confirm-add' }, onclick: async () => {
-            const r = await bridge.addToClaudeDesktop().catch((err) => ({ ok: false, error: err.message }));
-            deskConfirm.hidden = true; deskBtn.disabled = false;
-            deskNote.hidden = false;
-            deskNote.textContent = r && r.ok ? 'Added to Claude Desktop' + (r.backup ? ' (the old file is kept as ' + r.backup.split(/[\\/]/).pop() + ')' : '') + '. Restart Claude Desktop to use it.' : 'Not added: ' + ((r && r.error) || 'unknown error');
-          } }, 'Add to Claude Desktop')));
-      deskConfirm.hidden = false; deskBtn.disabled = true; deskNote.hidden = true;
-    } }, 'Add to Claude Desktop…');
-    const desk = el('div', { class: 'ai-setup', dataset: { fk: 'ai-desktop' } },
-      el('div', { class: 'ai-setup-head' }, el('span', { class: 'ai-setup-name', text: 'Claude Desktop' }), el('div', { class: 'grow' }), deskBtn, learn('claudeDesktop', 'ai-desktop-learn')),
-      deskConfirm, deskNote);
-    const installRow = (kind, label) => el('div', { class: 'ai-setup', dataset: { fk: 'ai-' + kind } },
-      el('div', { class: 'ai-setup-head' }, el('span', { class: 'ai-setup-name', text: label }), el('div', { class: 'grow' }),
-        el('button', { class: 'btn small', dataset: { fk: 'ai-' + kind + '-install' }, title: 'Opens ' + label + ' to add Nano Cortex Editor', onclick: () => bridge.install(kind) }, 'Add to ' + label),
-        learn(kind, 'ai-' + kind + '-learn')));
-    const root = el('div', { class: 'ai-page', dataset: { fk: 'ai-page' } },
-      el('section', {}, el('h3', { text: 'AI assistants' }),
-        U.setRow('', sw),
-        U.setNote(C.messages.settingsExplain, 'ai-explain'),
-        U.setRow('Status', status)),
-      el('section', {}, el('h3', { text: 'Set up' }),
-        U.setNote('Copy the line for your assistant (it holds this installation’s paths), or use the button. The editor has to be open, with the switch above on, while the assistant works.', 'ai-setup-note'),
-        cc.row, cx.row, desk, installRow('cursor', 'Cursor'), installRow('vscode', 'VS Code'), js.row));
-    page = {
+    const status = el('p', { class: 'set-note ai-status', dataset: { fk: 'ai-status' } });
+    const claude = addRow('ai-add-claude', C.messages.addClaude,
+      () => 'This adds the entry below to ' + S().claudeDesktop + '. Every other entry stays, and the old file is kept as ' + base(S().claudeDesktop) + '.bak.',
+      () => S().desktopEntry || '', () => bridge.addToClaudeDesktop(),
+      (r) => (r.replaced ? 'Claude Desktop had a nano-cortex entry already; it now points at this installation.' : 'Added to Claude Desktop.') + ' Restart Claude Desktop.');
+    const chatgpt = addRow('ai-add-chatgpt', C.messages.addChatGPT,
+      () => 'The ChatGPT desktop app reads its MCP servers from ' + S().chatgpt + ' (shared with Codex). This adds the table below at the end; the rest of the file stays as it is, and the old file is kept as ' + base(S().chatgpt) + '.bak.',
+      () => S().chatgptTable || '', () => bridge.addToChatGPT(),
+      (r) => (r.exists ? S().chatgpt + ' has a nano-cortex entry already, so nothing was changed.' : 'Added. Restart the ChatGPT app.'));
+    const other = el('p', { class: 'set-note' }, U.linkEl(((window.NANO_LINKS && window.NANO_LINKS.manual) || '') + '#17-ai-assistants', C.messages.otherAssistants, 'ai-other'));
+    const onBox = el('div', { class: 'ai-on', dataset: { fk: 'ai-on' } }, status, claude, chatgpt, other);
+    const p = {
+      alive: () => document.contains(onBox),
       update() {
-        status.textContent = lastStatus.text || C.messages.statusOff;
         sw.classList.toggle('on', !!lastStatus.on); sw.setAttribute('aria-checked', String(!!lastStatus.on));
-        cc.update(); cx.update(); js.update();
-        desk.hidden = !S().claudeDesktop;
+        onBox.hidden = !lastStatus.on;
+        status.textContent = lastStatus.text || '';
+        claude.hidden = !S().claudeDesktop;
+        chatgpt.hidden = !S().chatgpt;
       },
     };
-    page.update();
-    return root;
+    page = p;
+    p.update();
+    if (bridge) bridge.status().then(applyStatus).catch(() => {});
+    // Under the switch, in the control column like the other rows' notes.
+    return [U.setRow('', sw), U.setRow('', el('div', { class: 'ai-under' }, U.setNote(C.messages.aiExplain, 'ai-explain'), onBox))];
   }
-  U.addSettingsPage({
-    id: 'ai', label: 'AI assistants',
-    available: () => !!bridge && !!C.messages && featuresOn(),   // the texts come with the contract
-    // General → Advanced: the master switch and its line (the only AI thing shown while it is off).
-    generalRows: () => {
-      if (!bridge || !C.messages) return [];
-      const ft = U.toggleSwitch('set-ai-features', C.messages.aiFeaturesSwitch, featuresOn(), async (v) => {
-        ft.disabled = true;
-        try { applyStatus(await bridge.setFeatures(v)); } finally {
-          ft.disabled = false;
-          ft.classList.toggle('on', featuresOn()); ft.setAttribute('aria-checked', String(featuresOn()));
-        }
-      });
-      return [U.setRow('', ft), U.setNote(C.messages.aiFeaturesExplain, 'ai-features-explain')];
-    },
-    build: () => { if (bridge) bridge.status().then(applyStatus).catch(() => {}); return buildPage(); },
-    closed: () => { page = null; },
-  });
+  U.addGeneralRows(() => (bridge && C.messages ? buildRows() : []));
 
-  // For the UX test: the dispatcher (what the shell's calls run), the last copied setup text, the status.
+  // For the UX test: the dispatcher (what the shell's calls run), the status, the dialog deadline (demo mode only).
   window.__agent = {
-    run, get copied() { return copied.last; }, get status() { return lastStatus; }, get lastReadBack() { return lastReadBack; }, demoCloud: DEMO_CLOUD,
+    setDialogDeadline: (ms) => { if (U.ui.demo) dialogDeadlineMs = Math.max(50, Number(ms) || 0); },
+    run, get status() { return lastStatus; }, get lastReadBack() { return lastReadBack; }, demoCloud: DEMO_CLOUD,
     validate: (tool, args) => { const d = C.tools.get(tool); return d ? validate(d.inputSchema, args, '', tool) : 'unknown'; },
   };
 })();
