@@ -903,8 +903,8 @@
     page = p;
     p.update();
     if (bridge) bridge.status().then(applyStatus).catch(() => {});
-    // Under the switch, in the control column like the other rows' notes.
-    return [U.setRow('', sw), U.setRow('', el('div', { class: 'ai-under' }, U.setNote(C.messages.aiExplain, 'ai-explain'), onBox))];
+    // Under the switch, from the left edge like the neighbouring toggles' explanations.
+    return [U.setRow('', sw), el('div', { class: 'ai-under' }, U.setNote(C.messages.aiExplain, 'ai-explain'), onBox)];
   }
   U.addGeneralRows(() => (bridge && C.messages ? buildRows() : []));
 

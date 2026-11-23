@@ -4045,6 +4045,7 @@ async function run() {
       && (await js('document.querySelector(\'[data-fk="ai-add-chatgpt"]\').textContent')) === MSG.addChatGPT
       && (await js('document.querySelector(\'[data-fk="ai-other"]\').textContent')) === MSG.otherAssistants
       && await js('document.querySelector(\'[data-fk="ai-status"]\').getBoundingClientRect().height < 40 && document.querySelector(\'[data-fk="ai-explain"]\').getBoundingClientRect().height < 90')
+      && await js('(() => { const x = (q) => document.querySelector(q).getBoundingClientRect().left; const edge = x(\'[data-fk="set-devtools-note"]\'); return [\'[data-fk="ai-explain"]\', \'[data-fk="ai-status"]\', \'[data-fk="ai-add-claude"]\', \'[data-fk="ai-add-chatgpt"]\', \'[data-fk="ai-other"]\'].every(q => Math.abs(x(q) - edge) < 1) && Math.abs(edge - x(\'[data-fk="set-autoupdate-note"]\')) < 1; })()')
       && await js('!document.querySelector(\'[data-fk="ai-claude-code-copy"], [data-fk="ai-cursor-install"], [data-fk="ai-vscode-install"], [data-fk="ai-json-copy"], .ai-setup-name\')'));
     if (process.platform !== 'win32') check('the token file is private (0600) and the folder 0700', (fs.statSync(tokenFile).mode & 0o777) === 0o600 && (fs.statSync(A.dir).mode & 0o777) === 0o700);
     await js('document.querySelector(\'[data-fk="ai-on"]\').scrollIntoView({ block: "center" }), true');
