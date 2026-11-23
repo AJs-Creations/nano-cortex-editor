@@ -23,6 +23,9 @@
 # Windows and Linux builds are unsigned and never see the Apple credentials. Windows: SmartScreen → More info → Run
 # anyway.
 #
+# Claude Desktop: the macOS job also builds nano-cortex-<version>.mcpb (mcp/build-mcpb.js), uploaded with the release
+# (and kept as an artifact on dry runs); the native edition's release uploads the same file name.
+#
 # Updates: every build also writes the metadata electron-updater reads in the app (package.json "publish": GitHub,
 # but electron-builder never publishes; --publish never): latest-mac.yml (both mac zips), latest.yml (the NSIS
 # installer), latest-linux.yml and latest-linux-arm64.yml (the AppImages), plus the .blockmap files for
@@ -229,6 +232,11 @@ jobs:
         run: |
           security delete-keychain "$RUNNER_TEMP/apple-signing/signing.keychain-db" 2>/dev/null || true
           rm -rf "$RUNNER_TEMP/apple-signing"
+      # The Claude Desktop bundle (mcp/build-mcpb.js): the same file for both editions (the native release uploads the
+      # same name), built once, here.
+      - name: Claude Desktop bundle (.mcpb, macOS job only)
+        if: runner.os == 'macOS'
+        run: node mcp/build-mcpb.js "$(node -p "require('./package.json').version")" dist pro/assets/icon-512.png
       - name: List the files
         shell: bash
         run: ls -la dist
@@ -242,6 +250,7 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/*.blockmap
+            dist/*.mcpb
             dist/latest*.yml
           if-no-files-found: error
 
@@ -287,7 +296,7 @@ jobs:
             gh release create "$TAG" --title "Nano Cortex Editor ${TAG#v}" --notes-file notes.md --verify-tag
           fi
           shopt -s nullglob
-          gh release upload "$TAG" dist/*.dmg dist/*.zip dist/*.exe dist/*.AppImage dist/*.deb dist/*.blockmap --clobber
+          gh release upload "$TAG" dist/*.dmg dist/*.zip dist/*.exe dist/*.AppImage dist/*.deb dist/*.blockmap dist/*.mcpb --clobber
           # Update metadata last: an app that sees it can already download the files it names.
           meta=(dist/latest*.yml)
           if [ ${#meta[@]} -gt 0 ]; then gh release upload "$TAG" "${meta[@]}" --clobber; fi
@@ -309,7 +318,7 @@ jobs:
         run: |
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null   # fails if there is no such release
           shopt -s nullglob
-          files=(dist/*.dmg dist/*.zip dist/*.exe dist/*.AppImage dist/*.deb dist/*.blockmap)
+          files=(dist/*.dmg dist/*.zip dist/*.exe dist/*.AppImage dist/*.deb dist/*.blockmap dist/*.mcpb)
           meta=(dist/latest*.yml)
           ls -la "${files[@]}" "${meta[@]}"
           gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
