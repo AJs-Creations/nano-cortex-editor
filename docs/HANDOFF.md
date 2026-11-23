@@ -158,6 +158,22 @@ Done in this edition (demo mode only; nothing has touched a pedal yet):
   over stdio; every read tool, `apply_tone` and each live tool with exact packets, every refusal kind, every
   confirmation tool confirmed and cancelled with real clicks, the switch, the pill, Copy, the Claude Desktop merge).
 
+- [x] Review fix round (adversarial review of the branch, 11 findings): bad or over-long lines close the socket and
+  nothing after them is read; the token is written only once the socket is ours; a call whose assistant went away (or
+  AI assistants turned off) cancels its open dialog; `apply_tone`'s read-back checks the effect models; ops run in order
+  and finish before the result; `cloud_preview` is busy-checked and `cloud_send` leaves no follow-up dialog; `save`
+  and `set_cab_mic` refuse when the preset or cab changed under the dialog (and `set_cab_mic` when the pedal did not take
+  it), `save` / `discard_edits` while the preset is unknown; loudness after a model change is measured from the cached
+  value the pedal restores, Sync-locked parameters are refused in `apply_tone`, a cab level change waits for the cab's
+  level to be known; busy also covers a preset move, connecting, the metadata read and Capture mode; `set_tempo` is
+  refused under an external MIDI clock; `cloud_search` success marks Cortex Cloud signed in; AppImage / portable builds
+  name the outer executable and a lasting helper copy in `userData/mcp-helper` (untested on those platforms).
+- [x] Contract a350a6e: every shown text, refusal and client name comes from `tools.json` (`messages`, `clients`; the page
+  gets the contract through `agent-contract`); empty preset names are null; `nothingToSave`, `captureSlotRange` /
+  `cabSlotRange`, `slotOrOff`, `tempoRange` (30–300 schema, refused outside the pedal's range); `get_slot_usage` key "0".
+- [x] Release: the macOS job builds `nano-cortex-<version>.mcpb` (`mcp/build-mcpb.js`), uploaded with the release and kept
+  as an artifact on dry runs; `mcp/build-mcpb.js` and `mcp/conformance.js` are not packed into the app.
+
 Left:
 - [ ] **Hardware session with Anup** (Fable): turn it on, connect Claude Code, read the preset, `apply_tone` on a scratch
   preset, `save_as` to an empty slot, `select_preset`, `preview_cab` / `stop_preview`, `set_cab_mic`,
