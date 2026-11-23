@@ -138,6 +138,36 @@ Produces the ground truth every later step is tested against. Back up presets in
 Build an unsigned app for Anup's Mac with the Bluetooth usage strings set (already in `package.json`). On first
 launch, right-click the app and choose **Open**.
 
+## 1.3.0 AI assistants (MCP)
+
+Contract: `mcp/PROTOCOL.md` and `mcp/tools.json` (shared with the native edition; background and decisions in
+`mac_projects/MCP-PLAN.md` and the native repo's DECISIONS #43–#48). Branch `feature/mcp`.
+
+Done in this edition (demo mode only; nothing has touched a pedal yet):
+- [x] `src/mcp-server.js`: private socket / named pipe, token, one editor at a time (5 s retry), hello checks (token,
+  contract), one call at a time across connections, cleanup on off and on quit.
+- [x] `src/mcp-shell.js` + `src/main.js`: `ai` in `userData/settings.json` (off by default, starts at launch when on),
+  calls forwarded to the page as data and answered as data, the window comes to the front (restored) for an assistant
+  confirmation, Cortex Cloud search / bundle / open with the Cloud tab's session, setup lines with this
+  installation's paths, Claude Desktop merge (keeps other entries, `.bak`), Cursor / VS Code install links, Learn more
+  hosts added to the open-external allowlist. `mcp/**` packaged and unpacked (`asarUnpack`).
+- [x] `pro/agent.js`: all 30 tools on the UI's own functions (validation, loudness limits, `apply_tone` validates
+  everything first and reads back, refusals, Activity lines), the confirmation dialogs ("Asked by …"; Save as and
+  Rename are the existing dialogs prefilled), Settings → AI assistants, the "Assistant" pill, the connect toast.
+- [x] Tests: `npm run test:mcp` (helper conformance, also in CI) and the UX test's "AI assistants" block (a real helper
+  over stdio; every read tool, `apply_tone` and each live tool with exact packets, every refusal kind, every
+  confirmation tool confirmed and cancelled with real clicks, the switch, the pill, Copy, the Claude Desktop merge).
+
+Left:
+- [ ] **Hardware session with Anup** (Fable): turn it on, connect Claude Code, read the preset, `apply_tone` on a scratch
+  preset, `save_as` to an empty slot, `select_preset`, `preview_cab` / `stop_preview`, `set_cab_mic`,
+  `assign_footswitch`; while signed in to the Cloud tab: `cloud_search` (check the `metadata` field names: instrument /
+  device / gain are mapped defensively), `cloud_open`, `cloud_preview`, `cloud_send`. Also the effect values owed
+  before this release (CLAUDE.md "Owed before the next release").
+- [ ] Windows: the named pipe and the Claude Desktop path under `%APPDATA%` (untested); Linux under Xvfb runs the UX test.
+- [ ] The Claude Desktop `.mcpb` bundle (the helper is its body; works with either edition).
+- [ ] User docs: README, `docs/MANUAL.md` chapter, CHANGELOG (the leader writes them for both editions).
+
 ## Session log
 
 ### 2026-10-09 — Advanced metronome (5j)
