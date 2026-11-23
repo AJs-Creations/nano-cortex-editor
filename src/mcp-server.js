@@ -149,6 +149,7 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
       if (c.call === call) c.call = null;
       if (!r || typeof r !== 'object') r = { ok: false, error: 'The editor gave no answer.' };
       send(c, r.ok ? { type: 'result', id: msg.id, ok: true, result: r.result === undefined ? {} : r.result } : { type: 'result', id: msg.id, ok: false, error: String(r.error || 'The editor reported an error.') });
+      if (c.endAfterAnswer) c.socket.end();
     });
   }
 
@@ -156,7 +157,13 @@ function createMcpServer({ env = process.env, editor = {}, onCall, onStatus = ()
     generation++;
     clearTimeout(retryTimer); retryTimer = null;
     const had = phase !== 'off';
-    for (const c of conns) { if (c.call) c.call.abort(); c.socket.destroy(); }
+    // A connection with a call open gets that call's answer (cancelled) before it closes; the others close now.
+    for (const c of conns) {
+      if (!c.call) { c.socket.destroy(); continue; }
+      c.endAfterAnswer = true;
+      setTimeout(() => c.socket.destroy(), 1000).unref();
+      c.call.abort();
+    }
     conns.clear();
     if (server) {
       server.close();

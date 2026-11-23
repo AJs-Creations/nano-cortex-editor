@@ -804,23 +804,28 @@
   });
 
   // ------------------------------------------------------------------ what the user sees
-  let lastStatus = { on: false, phase: 'off', clients: [], text: '', setup: null };
+  // features: the master switch Settings → General → AI features. While it is off nothing AI shows: no AI assistants
+  // tab, no pill, no connect toast (and the shell does not listen).
+  let lastStatus = { features: false, on: false, phase: 'off', clients: [], text: '', setup: null };
+  const featuresOn = () => !!lastStatus.features;
   const pill = document.getElementById('agentPill');
   let page = null;   // the open Settings page's live parts
   function applyStatus(st) {
     if (!st || typeof st !== 'object') return;
+    const was = featuresOn();
     lastStatus = st;
-    const clients = st.clients || [];
+    const clients = featuresOn() ? st.clients || [] : [];
     if (pill) {
       pill.hidden = !clients.length;
       pill.title = clients.length ? msg('statusConnected', { clients: clients.join(', ') }) + '. Click for Settings → AI assistants.' : '';
     }
     if (page) page.update();
+    if (was !== featuresOn()) U.refreshSettings();
   }
   if (pill) pill.addEventListener('click', () => U.openSettings('ai'));
   if (bridge) {
     bridge.onStatus(applyStatus);
-    bridge.onConnected((label) => { contractReady().then(() => U.toast(msg('connected', { client: label || C.clients.fallback }))); });
+    bridge.onConnected((label) => { contractReady().then(() => featuresOn() && U.toast(msg('connected', { client: label || C.clients.fallback }))); });
     // The shell gave up on a call (its assistant went away, or AI assistants were turned off): an open assistant
     // confirmation is cancelled the way the user's Cancel would.
     bridge.onCancel((id) => {
@@ -911,7 +916,19 @@
   }
   U.addSettingsPage({
     id: 'ai', label: 'AI assistants',
-    available: () => !!bridge && !!C.messages,   // the texts come with the contract
+    available: () => !!bridge && !!C.messages && featuresOn(),   // the texts come with the contract
+    // General → Advanced: the master switch and its line (the only AI thing shown while it is off).
+    generalRows: () => {
+      if (!bridge || !C.messages) return [];
+      const ft = U.toggleSwitch('set-ai-features', C.messages.aiFeaturesSwitch, featuresOn(), async (v) => {
+        ft.disabled = true;
+        try { applyStatus(await bridge.setFeatures(v)); } finally {
+          ft.disabled = false;
+          ft.classList.toggle('on', featuresOn()); ft.setAttribute('aria-checked', String(featuresOn()));
+        }
+      });
+      return [U.setRow('', ft), U.setNote(C.messages.aiFeaturesExplain, 'ai-features-explain')];
+    },
     build: () => { if (bridge) bridge.status().then(applyStatus).catch(() => {}); return buildPage(); },
     closed: () => { page = null; },
   });

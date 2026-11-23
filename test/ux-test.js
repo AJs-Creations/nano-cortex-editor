@@ -236,6 +236,7 @@ function setUpAgent() {
   agentT.shell = createAgentShell({
     ipcMain, getPage: () => wc, env: agentT.env, version: require('../package.json').version, setup: agentT.setup,
     store: { get: () => agentT.on, set: (v) => { agentT.on = v; } },
+    features: { get: () => agentT.features === true, set: (v) => { agentT.features = v; } },
     cloud: {
       search: async () => ({ ok: false, error: 'no Cortex Cloud in the UX test' }), bundle: async () => ({ ok: false, error: 'no Cortex Cloud in the UX test' }),
       open: (id) => { agentT.opened.push(id); return true; }, signedIn: () => null,
@@ -2350,7 +2351,7 @@ async function run() {
   await js('document.activeElement.blur()');
   n0 = await mark();
   await click('#settingsBtn'); await waitFor(settingsOpen);
-  check('Settings has General, Device, AI assistants and About tabs, General first', (await js('[...document.querySelectorAll(".settings-tabs [role=tab]")].map(b => b.textContent + (b.classList.contains("on") ? "*" : "")).join("|")')) === 'General*|Device|AI assistants|About');
+  check('Settings has General, Device and About tabs, General first (no AI assistants tab while AI features is off, the default)', (await js('[...document.querySelectorAll(".settings-tabs [role=tab]")].map(b => b.textContent + (b.classList.contains("on") ? "*" : "")).join("|")')) === 'General*|Device|About');
   await settle();
   check('nothing is read from the pedal before the Device tab opens', (await txSince(n0)).length === 0);
   await click('[data-fk="set-tab-device"]');
@@ -4020,6 +4021,27 @@ async function run() {
     let r = await mc.call('get_status');
     check('MCP: with AI assistants off every call answers errors.editorNotRunning', r.isError && r.text === ERR.editorNotRunning, r.text);
 
+    // The master switch, Settings → General → AI features: off by default, and while it is off nothing AI exists and
+    // nothing listens, even with "ai": true in settings.json (the launch path, shell.start()).
+    {
+      const M = CONTRACT.messages;
+      A.on = true; A.shell.start();
+      await click('#settingsBtn');
+      await waitFor('!!document.querySelector(".settings-modal") && !!document.querySelector(\'[data-fk="set-ai-features"]\')');
+      check('AI features: off by default, in Settings → General, worded messages.aiFeaturesSwitch / aiFeaturesExplain',
+        (await js('document.querySelector(\'[data-fk="set-ai-features"]\').getAttribute("aria-checked")')) === 'false'
+        && (await js('document.querySelector(\'[data-fk="set-ai-features"]\').textContent')) === M.aiFeaturesSwitch
+        && (await js('document.querySelector(\'[data-fk="ai-features-explain"]\').textContent')) === M.aiFeaturesExplain
+        && await js('!document.querySelector(\'[data-fk="set-ai-features"]\').closest("[hidden]")'));
+      check('… while it is off: no AI assistants tab, no Assistant pill, and no socket although the AI assistants switch is on',
+        await js('!document.querySelector(\'[data-fk="set-tab-ai"]\') && !document.querySelector(\'[data-fk="ai-page"]\') && document.getElementById("agentPill").hidden')
+        && !fs.existsSync(sock) && A.shell.status().phase === 'off');
+      A.on = false;
+      await click('[data-fk="set-ai-features"]');
+      await checkSoon('turning AI features on (a real click) shows the AI assistants tab and stores aiFeatures; nothing listens until "Allow AI assistants…" is on',
+        async () => A.features === true && await js('!!document.querySelector(\'[data-fk="set-tab-ai"]\')') && !fs.existsSync(sock), () => 'features=' + A.features);
+    }
+
     // Settings → AI assistants: the switch with real clicks starts and stops the server.
     await openAiSettings();
     const MSG = CONTRACT.messages;
@@ -4516,6 +4538,47 @@ async function run() {
         sp.exe === '/home/me/Apps/nano-cortex-editor.AppImage' && sp.helper === path.join(ud, 'mcp-helper', 'mcp', 'helper.js') && fs.existsSync(path.join(ud, 'mcp-helper', 'mcp', 'endpoint.js')) && fs.existsSync(path.join(ud, 'mcp-helper', 'mcp', 'tools.json'))
         && JSON.parse(fs.readFileSync(path.join(ud, 'mcp-helper', 'package.json'), 'utf8')).version === '9.8.7' && plain.exe === '/opt/x/nano' && plain.helper === helperPath, JSON.stringify(sp));
       fs.rmSync(ud, { recursive: true, force: true });
+    }
+
+    // AI features off while an assistant is connected (a real click in General): the server stops, the connection
+    // closes, the tab and the pill go; the AI assistants switch keeps its setting.
+    {
+      r = await mc.call('get_status');
+      await waitFor('!document.getElementById("agentPill").hidden');
+      await openAiSettings();
+      await click('[data-fk="set-tab-general"]');
+      await click('[data-fk="set-ai-features"]');
+      await checkSoon('AI features off while connected: no socket, no client, no AI tab, no pill, aiFeatures stored off, "Allow AI assistants" kept on',
+        async () => !fs.existsSync(sock) && !A.shell.status().clients.length && A.features === false && A.on === true
+          && await js('!document.querySelector(\'[data-fk="set-tab-ai"]\') && !document.querySelector(\'[data-fk="ai-page"]\') && document.getElementById("agentPill").hidden'),
+        () => JSON.stringify(A.shell.status()));
+      r = await mc.call('get_status');
+      check('… and the helper answers errors.editorNotRunning', r.isError && r.text === ERR.editorNotRunning, r.text);
+      await click('[data-fk="set-ai-features"]');
+      await checkSoon('AI features on again: the tab is back and, with "Allow AI assistants" on, the editor listens again', async () => fs.existsSync(sock) && await js('!!document.querySelector(\'[data-fk="set-tab-ai"]\')'));
+      // Settings showing the AI assistants tab when the master switch goes off (through the page's bridge, as the shell
+      // IPC gets it): the tab goes and Settings falls back to General.
+      await click('[data-fk="set-tab-ai"]');
+      await js('nanoAgent.setFeatures(false).then(() => true)');
+      await checkSoon('… off while the AI assistants tab is showing: the tab goes, Settings shows General', '!document.querySelector(\'[data-fk="set-tab-ai"]\') && document.querySelector(\'[data-fk="set-tab-general"]\').classList.contains("on") && !document.querySelector(".settings .set-row").closest("[hidden]")');
+      await closeSettings();
+      // With an assistant's dialog open (Settings cannot open over a dialog, so through the bridge): the dialog closes
+      // as cancelled and nothing is written.
+      await js('nanoAgent.setFeatures(true).then(() => true)');
+      await checkSoon('AI features on (bridge): listening again', async () => fs.existsSync(sock));
+      r = await mc.call('set_amp', { mid: 6.5 });
+      await waitFor('state.presetDirty');
+      n0 = await mark();
+      pend = mc.call('save', {}, 60000);
+      await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+      await js('nanoAgent.setFeatures(false).then(() => true)');
+      r = await pend;
+      await checkSoon('AI features off with an assistant\'s save dialog open: the dialog closes, the call answers errors.cancelled, nothing is saved',
+        async () => !(await js('!!document.querySelector(".modal-bg")')) && r.isError && r.text === ERR.cancelled && !(await txSince(n0)).some(t => /^TX save preset/i.test(t)) && !fs.existsSync(sock),
+        () => r.text);
+      await js('nanoAgent.setFeatures(true).then(() => true)');
+      await checkSoon('AI features on again (bridge)', async () => fs.existsSync(sock));
+      await mc.call('discard_edits');
     }
 
     // Turning the switch off closes everything and removes the socket and the token.

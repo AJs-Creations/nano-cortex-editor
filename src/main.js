@@ -204,7 +204,7 @@ const cloudIRTransfers = new Map();
 // remembered pedal, Developer tools (for the menu) and the update settings (checked at launch). Everything else
 // lives in the editor page's localStorage.
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
-let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false, autoUpdate: true, skippedVersion: null, ai: false };
+let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false, autoUpdate: true, skippedVersion: null, ai: false, aiFeatures: false };
 function loadShellSettings() {
   try { Object.assign(shellSettings, JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))); } catch { /* defaults */ }
 }
@@ -890,7 +890,8 @@ function buildMenu() {
 }
 
 // ---------- AI assistants (MCP; src/mcp-shell.js, mcp/PROTOCOL.md) ----------
-// Off by default (userData/settings.json `ai`). While on, the editor listens on a private local socket for the MCP
+// Off by default (userData/settings.json `ai`), and nothing AI at all while the master switch Settings → General →
+// AI features (`aiFeatures`, off by default) is off. While both are on, the editor listens on a private local socket for the MCP
 // helper (mcp/helper.js, run by this app's own Node: ELECTRON_RUN_AS_NODE=1). Every call goes to the editor page
 // (pro/agent.js) as data; nothing an assistant sends is ever evaluated. Cortex Cloud requests use the Cloud tab's
 // session, like Send to Nano Cortex.
@@ -953,6 +954,7 @@ function startAgent() {
     ipcMain,
     getPage: () => editorPage(),
     store: { get: () => !!shellSettings.ai, set: (on) => { shellSettings.ai = !!on; saveShellSettings(); } },
+    features: { get: () => shellSettings.aiFeatures === true, set: (on) => { shellSettings.aiFeatures = !!on; saveShellSettings(); } },
     version: app.getVersion(),
     setup: setupInfo(setupPaths()),
     cloud: {

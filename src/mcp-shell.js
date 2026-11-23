@@ -1,12 +1,14 @@
 'use strict';
 
 // The shell's half of AI assistants (mcp/PROTOCOL.md): owns the socket server (src/mcp-server.js) while Settings →
-// AI assistants is on, forwards every call to the editor page and its answer back, and answers the page's requests
+// General → AI features (the master switch, `features`) and Settings → AI assistants are both on, forwards every call to the editor page and its answer back, and answers the page's requests
 // (status, switch, Cortex Cloud, Claude Desktop, install links). src/main.js creates it with Electron's objects; the
 // UX test creates it with its own window and fakes, so the same IPC is tested.
 //
 // IPC (page side: window.nanoAgent in src/editor-preload.js; every request checks that it came from the editor page):
 //   agent-contract  → mcp/tools.json             agent-status → the status below      agent-set(on) → the status
+//   agent-features(on) → the status (the master switch: off stops the server, closes every connection and cancels
+//                        the open call's dialog)
 //   agent-call      ← { id, tool, args, client } (to the page)   agent-reply(id, { ok, result | error }) (from the page)
 //   agent-status    ← status (pushed on change)  agent-connected ← label (a new assistant)
 //   agent-front     the page opened an assistant confirmation: bring the window to the front
@@ -22,15 +24,15 @@ const pageTimeout = (tool, args) => (KIND.get(tool) === 'confirm' ? 11 * 60 * 10
   : tool === 'get_slot_usage' && args && args.scan ? 6 * 60 * 1000 : tool === 'cloud_preview' ? 4 * 60 * 1000 : 3 * 60 * 1000);
 
 // The status line, in the contract's words (tools.json → messages).
-function statusText(on, st) {
-  if (!on || st.phase === 'off') return MESSAGES.statusOff;
+function statusText(on, st, features = true) {
+  if (!features || !on || st.phase === 'off') return MESSAGES.statusOff;
   if (st.phase === 'blocked') return MESSAGES.anotherEditor;
   if (st.phase === 'error') return 'Cannot listen: ' + st.error + '.';
   if (st.clients.length) return MESSAGES.statusConnected.replace('{clients}', st.clients.join(', '));
   return MESSAGES.statusWaiting;
 }
 
-function createAgentShell({ ipcMain, getPage, store, env = process.env, version = '0.0.0', setup, cloud = {}, focusWindow = () => {}, openExternal = () => false, log = () => {} }) {
+function createAgentShell({ ipcMain, getPage, store, features = { get: () => false, set() {} }, env = process.env, version = '0.0.0', setup, cloud = {}, focusWindow = () => {}, openExternal = () => false, log = () => {} }) {
   const pending = new Map();   // call id → { resolve, timer }
   let nextId = 1;
 
@@ -49,8 +51,9 @@ function createAgentShell({ ipcMain, getPage, store, env = process.env, version 
   function status() {
     const st = server.status();
     const on = !!store.get();
+    const ft = !!features.get();
     return {
-      on, phase: st.phase, clients: st.clients, error: st.error, text: statusText(on, st),
+      features: ft, on, phase: st.phase, clients: st.clients, error: st.error, text: statusText(on, st, ft),
       setup: setup ? {
         claudeCode: setup.claudeCode, codex: setup.codex, json: setup.json,
         claudeDesktop: setup.claudeDesktop, desktopEntry: JSON.stringify({ 'nano-cortex': setup.entry }, null, 2),
@@ -90,8 +93,20 @@ function createAgentShell({ ipcMain, getPage, store, env = process.env, version 
     on = !!on;
     store.set(on);
     log('[assistants] AI assistants ' + (on ? 'on' : 'off'));
-    if (on) server.start(); else server.stop();
+    if (on && features.get()) server.start(); else server.stop();
     return status();
+  });
+  // The master switch. Off: nothing listens, whatever the AI assistants switch says (server.stop() closes every
+  // connection and aborts its call, which cancels the open dialog through agent-cancel above).
+  ipcMain.handle('agent-features', (e, on) => {
+    if (!fromPage(e)) return null;
+    on = !!on;
+    features.set(on);
+    log('[assistants] AI features ' + (on ? 'on' : 'off'));
+    if (on && store.get()) server.start(); else server.stop();
+    const st = status();
+    push('agent-status', st);
+    return st;
   });
   ipcMain.on('agent-reply', (e, id, answer) => {
     if (!fromPage(e)) return;
@@ -131,8 +146,8 @@ function createAgentShell({ ipcMain, getPage, store, env = process.env, version 
   return {
     status,
     pageGone,
-    // At launch: listen when the setting is on.
-    start() { if (store.get()) server.start(); return status(); },
+    // At launch: listen when both switches are on.
+    start() { if (features.get() && store.get()) server.start(); return status(); },
     stop() { server.stop(); pageGone(); },
     server,
   };

@@ -5943,8 +5943,12 @@
   const setNote = (text, fk) => el('p', { class: 'set-note', text, dataset: fk ? { fk } : null });
   const devOnly = (node) => { node.classList.add('dev-only'); return node; };
 
-  // Extra Settings tabs: { id, label, build() → element, available?(), closed?() }, before About.
+  // Extra Settings tabs: { id, label, build() → element, available?(), closed?(), generalRows?() → nodes }, before
+  // About. generalRows go into General → Advanced (the AI features master switch). refreshSettings() re-checks
+  // available() while Settings is open: a page that stops being available loses its tab (Settings falls back to
+  // General if it was showing), one that becomes available gets it.
   const settingsPages = [];
+  let settingsRefresh = null;
   // tab: 'general' (default), 'device', 'about' or an extra page's id.
   async function openSettings(tab) {
     if (settingsOpen) return;
@@ -6080,6 +6084,7 @@
       el('section', {}, el('h3', { text: 'Advanced' }),
         setRow('', updSwitch),
         setNote(shellBridge ? 'Checks GitHub for new versions.' : desktopOnly, 'set-autoupdate-note'),
+        ...settingsPages.flatMap(p => (p.generalRows && p.generalRows()) || []),
         setRow('', devSwitch),
         setNote('Shows the Activity log, session recording and protocol details. For troubleshooting and development.', 'set-devtools-note'),
         devOnly(setRow('', drawerAtLaunch)),
@@ -6104,10 +6109,13 @@
     // Tabs: General (the sections above), Device (the pedal's own settings, read when the tab opens), the pages other
     // files add (AI assistants: pro/agent.js, through addSettingsPage) and About.
     let devPage = null;
-    const extras = settingsPages.filter(p => !p.available || p.available()).map(p => ({ ...p, node: p.build() }));
-    const panes = el('div', { class: 'settings-panes' }, general, ...extras.map(p => p.node), about);
+    let extras = [];                 // the extra pages shown now
+    const built = new Map();         // page → { …page, node }, built when its tab appears
+    const panes = el('div', { class: 'settings-panes' }, general, about);
     const tabs = el('div', { class: 'seg settings-tabs', role: 'tablist', 'aria-label': 'Settings' });
+    let currentTab = 'general';
     const showTab = (id) => {
+      currentTab = id;
       for (const b of tabs.children) { const on = b.dataset.tab === id; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); }
       general.hidden = id !== 'general';
       about.hidden = id !== 'about';
@@ -6115,18 +6123,30 @@
       if (id === 'device') { if (!devPage) panes.append(devPage = devicePage()); else readDevice(); }
       if (devPage) devPage.hidden = id !== 'device';
     };
-    const tabIds = ['general', 'device', ...extras.map(p => p.id), 'about'];
-    tabs.append(...[['general', 'General'], ['device', 'Device'], ...extras.map(p => [p.id, p.label]), ['about', 'About']].map(([id, label]) =>
-      el('button', { role: 'tab', 'aria-selected': 'false', dataset: { tab: id, fk: 'set-tab-' + id }, onclick: () => showTab(id) }, label)));
-    const startTab = tab !== 'general' && tabIds.includes(tab) ? tab : 'general';
-    showTab(startTab);
+    const tabIds = () => ['general', 'device', ...extras.map(p => p.id), 'about'];
+    const drawTabs = (want) => {
+      const now = settingsPages.filter(p => !p.available || p.available());
+      for (const [p, e] of built) if (!now.includes(p)) { e.node.remove(); built.delete(p); if (e.closed) e.closed(); }
+      extras = now.map(p => {
+        let e = built.get(p);
+        if (!e) { e = { ...p, node: p.build() }; built.set(p, e); panes.insertBefore(e.node, about); }
+        return e;
+      });
+      tabs.replaceChildren(...[['general', 'General'], ['device', 'Device'], ...extras.map(p => [p.id, p.label]), ['about', 'About']].map(([id, label]) =>
+        el('button', { role: 'tab', 'aria-selected': 'false', dataset: { tab: id, fk: 'set-tab-' + id }, onclick: () => showTab(id) }, label)));
+      showTab(tabIds().includes(want) ? want : 'general');
+    };
+    drawTabs(tab || 'general');
+    const startTab = currentTab;
+    settingsRefresh = () => drawTabs(currentTab);
     const content = el('div', { class: 'settings-body' }, tabs, panes);
     await modal({
       title: 'Settings', wide: true, cls: 'settings-modal', content, enterSubmits: false,
       focus: startTab !== 'general' ? tabs.querySelector('[data-tab="' + startTab + '"]') : swatches.querySelector('.on'),
       buttons: [{ id: 'ok', label: 'Done', primary: true }],
     });
-    for (const p of extras) if (p.closed) p.closed();
+    settingsRefresh = null;
+    for (const e of built.values()) if (e.closed) e.closed();
     dev.redraw = null;
     settingsOpen = false;
     render();
@@ -6806,6 +6826,7 @@
     receivePreview, receiveCapture,
     modal, toast, render, el, keyLabel, openLink, linkEl, toggleSwitch, setRow, setNote,
     openSettings, addSettingsPage: (page) => { settingsPages.push(page); },
+    refreshSettings: () => { if (settingsRefresh) settingsRefresh(); },
     log: (line) => log(line),
   });
 
