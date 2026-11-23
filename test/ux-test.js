@@ -3,9 +3,12 @@
 // produces, and saves a screenshot per step to test-output/.
 //   npm run test:ux            (macOS / Windows)
 //   xvfb-run -a npm run test:ux   (Linux without a display)
-const { app, BrowserWindow, nativeImage } = require('electron');
+const { app, BrowserWindow, nativeImage, ipcMain, clipboard } = require('electron');
 const fs = require('fs');
+const os = require('os');
+const net = require('net');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const PAGE = process.env.PAGE || path.join(__dirname, '..', 'pro', 'index.html');
 const OUT = process.env.OUT || path.join(__dirname, '..', 'test-output');
@@ -212,6 +215,36 @@ const rgbOf = (css) => {
   m = /^color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/.exec(css || '');
   return m ? [m[1] * 255, m[2] * 255, m[3] * 255].map(Math.round) : null;
 };
+
+// AI assistants (MCP): the shell's agent half (src/mcp-shell.js, the module main uses) on a temporary NANO_MCP_DIR,
+// wired to this window. The window's preload is exactly the nanoAgent block of src/editor-preload.js.
+const agentT = { on: false, installs: [], opened: [], focus: 0, log: [] };
+function setUpAgent() {
+  const { createAgentShell } = require('../src/mcp-shell');
+  const { setupInfo } = require('../src/mcp-setup');
+  const tmp = fs.realpathSync(os.tmpdir());
+  agentT.dir = fs.mkdtempSync(path.join(tmp, 'nano-mcp-'));
+  fs.chmodSync(agentT.dir, 0o700);
+  agentT.home = fs.mkdtempSync(path.join(tmp, 'nano-home-'));
+  agentT.env = { ...process.env, NANO_MCP_DIR: agentT.dir, APPDATA: path.join(agentT.home, 'AppData') };
+  agentT.setup = setupInfo({ exe: process.execPath, helper: path.join(__dirname, '..', 'mcp', 'helper.js'), env: agentT.env, home: agentT.home });
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'editor-preload.js'), 'utf8');
+  const block = /\/\/ <nanoAgent>[\s\S]*?\/\/ <\/nanoAgent>/.exec(src);
+  if (!block) throw new Error('src/editor-preload.js has no // <nanoAgent> … // </nanoAgent> block');
+  agentT.preload = path.join(agentT.home, 'agent-preload.js');
+  fs.writeFileSync(agentT.preload, "const { contextBridge, ipcRenderer } = require('electron');\n" + block[0] + '\n');
+  agentT.shell = createAgentShell({
+    ipcMain, getPage: () => wc, env: agentT.env, version: require('../package.json').version, setup: agentT.setup,
+    store: { get: () => agentT.on, set: (v) => { agentT.on = v; } },
+    cloud: {
+      search: async () => ({ ok: false, error: 'no Cortex Cloud in the UX test' }), bundle: async () => ({ ok: false, error: 'no Cortex Cloud in the UX test' }),
+      open: (id) => { agentT.opened.push(id); return true; }, signedIn: () => null,
+    },
+    focusWindow: () => { agentT.focus++; },
+    openExternal: (link) => { agentT.installs.push(link); return true; },
+    log: (line) => agentT.log.push(line),
+  });
+}
 
 async function run() {
   // ---------------------------------------------------------------- boot
@@ -2317,7 +2350,7 @@ async function run() {
   await js('document.activeElement.blur()');
   n0 = await mark();
   await click('#settingsBtn'); await waitFor(settingsOpen);
-  check('Settings has General, Device and About tabs, General first', (await js('[...document.querySelectorAll(".settings-tabs [role=tab]")].map(b => b.textContent + (b.classList.contains("on") ? "*" : "")).join("|")')) === 'General*|Device|About');
+  check('Settings has General, Device, AI assistants and About tabs, General first', (await js('[...document.querySelectorAll(".settings-tabs [role=tab]")].map(b => b.textContent + (b.classList.contains("on") ? "*" : "")).join("|")')) === 'General*|Device|AI assistants|About');
   await settle();
   check('nothing is read from the pedal before the Device tab opens', (await txSince(n0)).length === 0);
   await click('[data-fk="set-tab-device"]');
@@ -3927,6 +3960,446 @@ async function run() {
     fs.rmSync(shotBase, { recursive: true, force: true });
   }
 
+  // ---------------------------------------------------------------- AI assistants (MCP): src/mcp-server.js, src/mcp-shell.js, pro/agent.js
+  // The shell's agent half (the same module main uses) on a temporary NANO_MCP_DIR, wired to this window, whose preload
+  // is exactly src/editor-preload.js's nanoAgent block. An MCP helper (mcp/helper.js, run by this Electron as Node)
+  // talks MCP over stdio; every edit is checked by the packets it sends.
+  {
+    const A = agentT;
+    const sock = path.join(A.dir, 'editor.sock'), tokenFile = path.join(A.dir, 'token');
+    const CONTRACT = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'mcp', 'tools.json'), 'utf8'));
+    const ERR = CONTRACT.errors;
+    const helperPath = path.join(__dirname, '..', 'mcp', 'helper.js');
+    const hexOf = (bytes) => bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+    const varint = (v) => { const o = []; while (v > 0x7f) { o.push((v & 0x7f) | 0x80); v >>>= 7; } o.push(v); return o; };
+    const f32hex = (v) => { const b = Buffer.alloc(4); b.writeFloatLE(v); return hexOf([...b]); };
+    const ampHex = (id, raw) => { const p = [0, 0xC0, 0x18, id, 0x20, ...varint(raw), 0x28, 0x00, 0x1A, 0, 0, 0]; p[0] = p.length - 2; return hexOf(p); };
+    const statusText = () => js('(document.querySelector(\'[data-fk="ai-status"]\') || {}).textContent || ""');
+    const assistantLines = (n) => js('__ui.logs.filter(l => l.seq > ' + n + ' && /^Assistant: /.test(l.text)).map(l => l.text)');
+    const reads = (tx) => tx.filter(t => !/^TX (Current preset state request|.* param refresh|Preview keep-alive|Cab\/IR settings|Library content|Retrieve|Metadata|Tempo screen)/i.test(t));
+    function mcpClient(name) {
+      const child = spawn(process.execPath, [helperPath], { env: { ...A.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const waiting = new Map();
+      let id = 0, buf = '';
+      child.stdout.on('data', (d) => {
+        buf += d;
+        for (let i; (i = buf.indexOf('\n')) >= 0;) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1);
+          if (!line.trim()) continue;
+          const m = JSON.parse(line); const w = waiting.get(m.id);
+          if (w) { waiting.delete(m.id); w(m); }
+        }
+      });
+      const request = (method, params, ms = 30000) => new Promise((resolve) => {
+        const n = ++id;
+        const t = setTimeout(() => { waiting.delete(n); resolve({ timeout: true }); }, ms);
+        waiting.set(n, (m) => { clearTimeout(t); resolve(m); });
+        child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: n, method, params }) + '\n');
+      });
+      const call = async (tool, args = {}, ms) => {
+        const r = await request('tools/call', { name: tool, arguments: args }, ms);
+        const res = r.result || {};
+        return { isError: !!res.isError, text: res.content && res.content[0] ? res.content[0].text : '', data: res.structuredContent || null, raw: r };
+      };
+      return { child, call, init: () => request('initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name, version: '1' } }), close: () => { try { child.stdin.end(); child.kill(); } catch { /* gone */ } } };
+    }
+    const openAiSettings = async () => {
+      if (!(await js('!!document.querySelector(".settings-modal")'))) await click('#settingsBtn');
+      await click('[data-fk="set-tab-ai"]');
+      await waitFor('!!document.querySelector(\'[data-fk="ai-page"]:not([hidden])\')');
+    };
+    const closeSettings = async () => { if (await js('!!document.querySelector(".settings-modal")')) { await click('.settings-modal .row .btn.primary'); await waitFor('!document.querySelector(".modal-bg")'); } };
+    const modalTitle = () => js('(document.querySelector(".modal-bg:last-of-type .modal h2") || {}).textContent || ""');
+    const modalAsked = () => js('(document.querySelector(".modal-bg:last-of-type .modal-asked") || {}).textContent || ""');
+    const modalButton = (label) => '.modal-bg:last-of-type .modal .row button:nth-child(' + (label === 'cancel' ? 1 : 2) + ')';
+
+    await loadDemo('');
+    const mc = mcpClient('claude-code');
+    const init = await mc.init();
+    check('MCP: the helper answers initialize (server nano-cortex)', init.result && init.result.serverInfo && init.result.serverInfo.name === 'nano-cortex', JSON.stringify(init).slice(0, 200));
+    let r = await mc.call('get_status');
+    check('MCP: with AI assistants off every call answers errors.editorNotRunning', r.isError && r.text === ERR.editorNotRunning, r.text);
+
+    // Settings → AI assistants: the switch with real clicks starts and stops the server.
+    await openAiSettings();
+    check('Settings → AI assistants: the switch is off by default, the status line says "Off", no socket file', (await js('document.querySelector(\'[data-fk="set-ai"]\').getAttribute("aria-checked")')) === 'false' && (await statusText()) === 'Off' && !fs.existsSync(sock), await statusText());
+    check('Settings → AI assistants: the switch text and the explanation are the contract\'s',
+      (await js('document.querySelector(\'[data-fk="set-ai"]\').textContent')) === 'Allow AI assistants to control the editor'
+      && (await js('document.querySelector(\'[data-fk="ai-explain"]\').textContent')) === 'Assistants on this computer, such as Claude, ChatGPT or Codex, can read the pedal and make live edits. Saving and anything stored on the pedal still needs your click in the editor.');
+    await click('[data-fk="set-ai"]');
+    await checkSoon('turning the switch on starts listening: editor.sock appears, the status says "On, waiting for an assistant", the setting is stored', async () => fs.existsSync(sock) && (await statusText()) === 'On, waiting for an assistant' && A.on === true, async () => (await statusText()) + ' on=' + A.on);
+    if (process.platform !== 'win32') check('the token file is private (0600) and the folder 0700', (fs.statSync(tokenFile).mode & 0o777) === 0o600 && (fs.statSync(A.dir).mode & 0o777) === 0o700);
+    await shot('ai-01-settings-on');
+
+    // Set up rows: the exact lines with this installation's paths, copied with the Copy buttons.
+    const exe = process.execPath;
+    const want = {
+      cc: 'claude mcp add -s user -e ELECTRON_RUN_AS_NODE=1 nano-cortex -- "' + exe + '" "' + helperPath + '"',
+      cx: 'codex mcp add nano-cortex --env ELECTRON_RUN_AS_NODE=1 -- "' + exe + '" "' + helperPath + '"',
+      json: JSON.stringify({ mcpServers: { 'nano-cortex': { command: exe, args: [helperPath], env: { ELECTRON_RUN_AS_NODE: '1' } } } }),
+    };
+    for (const [fk, key, label] of [['ai-claude-code', 'cc', 'Claude Code'], ['ai-codex', 'cx', 'Codex'], ['ai-json', 'json', 'Other assistants (JSON)']]) {
+      await click('[data-fk="' + fk + '-copy"]');
+      await checkSoon('Set up, ' + label + ': Copy copies the exact line with this installation\'s executable and helper', async () => (await js('__agent.copied')) === want[key] && (await js('document.querySelector(\'[data-fk="' + fk + '-text"]\').textContent')) === want[key], async () => js('__agent.copied'));
+    }
+    check('… and the clipboard holds it', clipboard.readText() === want.json, clipboard.readText().slice(0, 120));
+
+    // Claude Desktop: shows the entry, asks, merges keeping every other entry, backs up the old file.
+    if (A.setup.claudeDesktop) {
+      const cfg = A.setup.claudeDesktop;
+      fs.mkdirSync(path.dirname(cfg), { recursive: true });
+      const old = JSON.stringify({ theme: 'dark', mcpServers: { other: { command: '/usr/bin/other', args: ['x'] } } }, null, 2);
+      fs.writeFileSync(cfg, old);
+      await click('[data-fk="ai-desktop-add"]');
+      await checkSoon('Add to Claude Desktop… shows the entry it will write and the file, and asks first', async () => (await js('!document.querySelector(\'[data-fk="ai-desktop-confirm"]\').hidden')) && JSON.parse(await js('document.querySelector(\'[data-fk="ai-desktop-entry"]\').textContent'))['nano-cortex'].command === exe && fs.readFileSync(cfg, 'utf8') === old);
+      await click('[data-fk="ai-desktop-cancel"]');
+      check('… Cancel leaves the file alone', fs.readFileSync(cfg, 'utf8') === old && !fs.existsSync(cfg + '.bak'));
+      await click('[data-fk="ai-desktop-add"]');
+      await click('[data-fk="ai-desktop-confirm-add"]');
+      await checkSoon('… Add merges nano-cortex into claude_desktop_config.json, keeps the other entries and settings, and backs up the old file', () => {
+        try {
+          const now = JSON.parse(fs.readFileSync(cfg, 'utf8'));
+          return now.theme === 'dark' && now.mcpServers.other.command === '/usr/bin/other' && JSON.stringify(now.mcpServers['nano-cortex']) === JSON.stringify({ command: exe, args: [helperPath], env: { ELECTRON_RUN_AS_NODE: '1' } }) && fs.readFileSync(cfg + '.bak', 'utf8') === old;
+        } catch { return false; }
+      }, () => (fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : 'no file'));
+      check('… and says so', /^Added to Claude Desktop/.test(await js('document.querySelector(\'[data-fk="ai-desktop-note"]\').textContent')));
+    } else {
+      check('Linux: no Claude Desktop row (there is no Linux build of it)', await js('document.querySelector(\'[data-fk="ai-desktop"]\').hidden'));
+    }
+    // Cursor and VS Code install links, built by the shell; Learn more opens the assistant's official MCP page.
+    await click('[data-fk="ai-cursor-install"]');
+    await click('[data-fk="ai-vscode-install"]');
+    await waitFor(() => A.installs.length >= 2);
+    const entry = { command: exe, args: [helperPath], env: { ELECTRON_RUN_AS_NODE: '1' } };
+    const cursorLink = A.installs.find(l => l.startsWith('cursor://')) || '';
+    const vscodeLink = A.installs.find(l => l.startsWith('vscode:')) || '';
+    check('Cursor: "Add to Cursor" opens cursor://anysphere.cursor-deeplink/mcp/install?name=nano-cortex&config=<base64 of the entry>',
+      /^cursor:\/\/anysphere\.cursor-deeplink\/mcp\/install\?name=nano-cortex&config=/.test(cursorLink) && JSON.stringify(JSON.parse(Buffer.from(decodeURIComponent(cursorLink.split('config=')[1]), 'base64').toString('utf8'))) === JSON.stringify(entry), cursorLink.slice(0, 120));
+    check('VS Code: "Add to VS Code" opens vscode:mcp/install?<URL-encoded {name, command, args, env}>',
+      /^vscode:mcp\/install\?/.test(vscodeLink) && JSON.stringify(JSON.parse(decodeURIComponent(vscodeLink.slice('vscode:mcp/install?'.length)))) === JSON.stringify({ name: 'nano-cortex', ...entry }), vscodeLink.slice(0, 120));
+    const before = opened.length;
+    await click('[data-fk="ai-claude-code-learn"]');
+    await click('[data-fk="ai-codex-learn"]');
+    await waitFor(() => opened.length >= before + 2);
+    check('Learn more opens the official MCP pages in the browser (Claude Code, Codex)', opened.slice(before).join(' ') === 'https://code.claude.com/docs/en/mcp https://developers.openai.com/codex/mcp', opened.slice(before).join(' '));
+
+    // An assistant connects: status line, pill, toast.
+    let n0 = await mark();
+    r = await mc.call('get_status');
+    check('MCP get_status through the helper: edition, connected, preset, assistants', !r.isError && r.data.editor.edition === 'electron' && r.data.editor.version === LINKS.version && r.data.connected === true && r.data.preset.number === (await js('state.selectedPreset')) && r.data.preset.unsaved === false && r.data.audition === null && JSON.stringify(r.data.assistants.clients) === '["Claude Code"]', r.text.slice(0, 300));
+    await checkSoon('Settings shows "Connected: Claude Code"', async () => (await statusText()) === 'Connected: Claude Code', statusText);
+    await checkSoon('a toast says "Claude Code connected"', async () => /^Claude Code connected$/.test(await toastText()), toastText);
+    check('the status bar pill "Assistant" shows, its tooltip names the client', await js('!document.getElementById("agentPill").hidden && document.getElementById("agentPill").textContent === "Assistant" && /Claude Code/.test(document.getElementById("agentPill").title)'));
+    await closeSettings();
+    await click('#agentPill');
+    await checkSoon('clicking the pill opens Settings → AI assistants', '!!document.querySelector(\'[data-fk="ai-page"]:not([hidden])\') && document.querySelector(\'[data-fk="set-tab-ai"]\').classList.contains("on")');
+    await shot('ai-02-connected');
+    await closeSettings();
+
+    // Read tools.
+    n0 = await mark();
+    const cur = await mc.call('get_current_preset');
+    const p = cur.data || {};
+    check('get_current_preset: number, name, amp knobs 0–10 (raw / 25.5), capture, cab with mics, gate, five effects, tempo',
+      !cur.isError && p.number === (await js('state.selectedPreset')) && p.name === (await js('document.querySelector(".preset-title .name").textContent'))
+      && p.amp.gain === Math.round((await js('state.amp.gain')) / 25.5 * 10) / 10 && typeof p.amp.volume_db === 'number'
+      && p.capture.on === true && Number.isInteger(p.capture.slot) && typeof p.capture.name === 'string'
+      && p.cab.factory === true && p.cab.mics.length === 5 && typeof p.cab.level_db === 'number' && p.gate.reduction >= 0
+      && p.effects.length === 5 && p.effects.map(e => e.slot).join() === 'pre1,pre2,post1,post2,post3' && p.tempo.bpm > 0, cur.text.slice(0, 400));
+    const anEffect = p.effects.find(e => e.model !== 'None');
+    check('… an effect lists every parameter with value, display, unit, min, max, step (or options)', anEffect && anEffect.params.length > 0 && anEffect.params.every(q => (q.options && q.options.includes(q.value)) || (typeof q.value === 'number' && 'display' in q && 'min' in q && 'max' in q && 'step' in q)), JSON.stringify(anEffect).slice(0, 300));
+    const pl = (await mc.call('list_presets')).data;
+    check('list_presets: 64 presets with number, name, empty; the current one; four footswitches', pl.presets.length === 64 && pl.current === p.number && pl.presets.some(x => x.empty) && Object.keys(pl.footswitches).join() === 'IA,IB,IIA,IIB', JSON.stringify(pl.footswitches));
+    const lib = (await mc.call('list_library', { kind: 'capture' })).data;
+    check('list_library capture: every slot and the factory and user library with type and instrument', lib.slots.length === 25 && lib.library.some(x => x.source === 'factory' && x.name === 'Plexi 1959 SLP' && x.type === 'amp_head' && x.instrument === 'guitar') && lib.library.some(x => x.source === 'user'), JSON.stringify(lib.library.slice(0, 2)));
+    const bass = (await mc.call('list_library', { kind: 'capture', instrument: 'bass' })).data;
+    check('list_library filters the library part (instrument=bass), slots stay complete', bass.library.length === 1 && bass.library[0].name === 'SVT CL Bass' && bass.slots.length === 25, JSON.stringify(bass.library));
+    const cabs = (await mc.call('list_library', { kind: 'cab' })).data;
+    check('list_library cab: slots, factory cabs and user IRs (no type/instrument)', cabs.slots.length === 5 && cabs.library.some(x => x.source === 'factory' && x.name === '412 V30' && !('type' in x)) && cabs.library.some(x => x.source === 'user'), JSON.stringify(cabs.library.slice(0, 2)));
+    const fx = (await mc.call('list_effects')).data;
+    check('list_effects: five slots, models with category and params, no "None"', fx.slots.length === 5 && fx.slots.every(s => s.models.length > 0 && !s.models.some(m => m.name === 'None')) && fx.slots[4].models.some(m => m.category === 'Reverb'), JSON.stringify(fx.slots.map(s => s.models.length)));
+    const one = (await mc.call('list_effects', { slot: 'post2' })).data;
+    check('list_effects slot=post2: that slot only', one.slots.length === 1 && one.slots[0].slot === 'post2');
+    const usage = (await mc.call('get_slot_usage')).data;
+    check('get_slot_usage without a scan: scanned false', usage.scanned === false && usage.capture === null);
+    const lines = await assistantLines(n0);
+    check('Activity: one "Assistant: …" line per call (reads too)', lines.length === 8 && lines[0] === 'Assistant: read the current preset' && lines.includes('Assistant: listed the presets'), JSON.stringify(lines));
+    check('reads send nothing that changes the pedal', reads(await txSince(n0)).length === 0, JSON.stringify(await txSince(n0)));
+
+    // apply_tone: everything validated first, applied in order, read back; the exact packets, the UI updated.
+    const post3 = fx.slots.find(s => s.slot === 'post3');
+    const post3Now = await js('state.blocks.post3.model');
+    const reverb = post3.models.find(m => m.category === 'Reverb' && m.params.some(q => /^mix$/i.test(q.name)) && m.name !== post3Now);
+    const mixSpec = reverb.params.find(q => /^mix$/i.test(q.name));
+    const mixValue = Math.round((mixSpec.min + (mixSpec.max - mixSpec.min) * 0.3) / (mixSpec.step || 1)) * (mixSpec.step || 1);
+    const beforeAmp = await js('({ ...state.amp })');
+    const gateWasOn = await js('state.gate.on');
+    const post3WasOn = await js('state.blocks.post3.on');
+    const capSlot = (await js('state.capture.selectedSlot')) === 3 ? 4 : 3;
+    const levelTo = Math.min(10, Math.round(beforeAmp.level / 25.5 * 10) / 10 + 1);
+    n0 = await mark();
+    r = await mc.call('apply_tone', {
+      capture_slot: capSlot, amp: { gain: 5, level: levelTo }, gate: { on: !gateWasOn, reduction: 40 },
+      effects: [{ slot: 'post3', model: reverb.name.toUpperCase(), params: { [mixSpec.name.toLowerCase()]: mixValue }, on: true }],
+    });
+    let tx = reads(await txWait(n0, t => t.some(x => /^TX Post FX 3 (ON|param)/.test(x))));
+    const modelId = await js('JSON.stringify(state.blocks.post3.models.find(m => m.name === ' + JSON.stringify(reverb.name) + ').id)');
+    const mixNorm = await js('(() => { const b = state.blocks.post3; const q = b.params.find(x => x.name === ' + JSON.stringify(mixSpec.name) + '); return hex(float32LE(paramValueToNormalized({ ...q, value: ' + mixValue + ' }))); })()');
+    const mixIndex = await js('(() => { const q = state.blocks.post3.params.find(x => x.name === ' + JSON.stringify(mixSpec.name) + '); return q.wireIndex === undefined ? q.index : q.wireIndex; })()');
+    const ids = JSON.parse(modelId);
+    const wantTx = [
+      'TX 08C0 capture change ' + capSlot + ': 08 C0 18 04 20 ' + hexOf([capSlot - 1]) + ' 1C 00 00 00',
+      'TX Amp gain = 128: ' + ampHex(0, 128),
+      'TX Amp level = ' + Math.round(levelTo * 25.5) + ': ' + ampHex(1, Math.round(levelTo * 25.5)),
+      'TX Gate reduction 40%: ' + hexOf([0x0B, 0xC0, 0x18, 0x0B, 0x20, ...varint(148), 0x28, 0x00, 0x1A, 0, 0, 0]),
+      'TX Post FX 3 model select ' + reverb.name + ': ' + hexOf([7 + ids.length, 0xC0, 0x18, 0x04, 0x20, ...ids, 0x88, 0, 0, 0]),
+      'TX Post FX 3 param ' + mixSpec.name + '=',   // checked below with its exact bytes
+      'TX Gate ' + (gateWasOn ? 'OFF' : 'ON') + ': 0A C0 08 01 18 09 20 ' + (gateWasOn ? '01' : '00') + ' 1F 00 00 00',
+      'TX Post FX 3 ON: 0A C0 08 01 18 08 20 00 1F 00 00 00',
+    ];
+    if (post3WasOn) wantTx.pop();   // already on: the switch sends nothing
+    const mixTx = tx.find(t => t.startsWith(wantTx[5])) || '';
+    check('apply_tone sends exactly: capture slot, amp gain and level, gate reduction, the reverb model, its Mix, then the gate and Post FX 3 switches',
+      tx.length === wantTx.length && wantTx.every((w, i) => i === 5 ? true : tx.includes(w)) && mixTx.endsWith(': 0F C0 08 01 18 04 20 ' + hexOf([mixIndex]) + ' 2D ' + mixNorm + ' 63 00 00 00')
+      && tx.indexOf(wantTx[4]) < tx.indexOf(mixTx) && (post3WasOn || tx.indexOf(mixTx) < tx.indexOf(wantTx[7])) && tx.indexOf(wantTx[0]) < tx.indexOf(wantTx[1]),
+      JSON.stringify(tx));
+    check('apply_tone returns one line per change and the preset read back', !r.isError && r.data.changes.length === 6 && r.data.changes[0] === 'capture slot ' + capSlot + ' “' + (await js('state.captureNames.get(' + capSlot + ')')) + '”' && r.data.changes[1] === 'amp Gain 5.0, Level ' + levelTo.toFixed(1) && r.data.preset.amp.gain === 5 && r.data.preset.effects[4].model === reverb.name && r.data.preset.effects[4].on === true && r.data.preset.capture.slot === capSlot, r.text.slice(0, 500));
+    check('… and waited for a state read of the pedal', (await txSince(n0)).some(t => /^TX Current preset state request/.test(t)));
+    check('the UI follows: Post FX 3 node shows the reverb, the Gain knob 50 %', (await js('document.querySelector(\'[data-fk="node-post3"] .model\').textContent')) === reverb.name && (await js('state.amp.gain')) === 128);
+    check('Activity: "Assistant: applied a tone: …"', (await assistantLines(n0)).length === 1 && /^Assistant: applied a tone: capture slot /.test((await assistantLines(n0))[0]), JSON.stringify(await assistantLines(n0)));
+    await shot('ai-03-apply-tone');
+
+    // Single live tools, each with its exact packet and summary.
+    const single = async (tool, args, label) => { const m = await mark(); const res = await mc.call(tool, args); const t = reads(await txWait(m, x => x.length > 0)); return { res, tx: t, lines: await assistantLines(m), label }; };
+    let s = await single('set_amp', { bass: 3.2 });
+    check('set_amp bass 3.2 → one packet, amp bass raw 82; summary "amp Bass 3.2"', s.tx.length === 1 && s.tx[0] === 'TX Amp bass = 82: ' + ampHex(2, 82) && s.res.data.summary === 'amp Bass 3.2' && s.res.data.amp.bass === 3.2 && s.lines[0] === 'Assistant: amp Bass 3.2', JSON.stringify(s));
+    s = await single('set_amp', { volume_db: -3 });
+    check('set_amp volume_db -3 → the capture volume packet', s.tx.length === 1 && s.tx[0] === 'TX Capture volume -3.0 dB: ' + hexOf([0x0A, 0xC0, 0x18, 0x0A, 0x20, ...varint(112), 0x28, 0x00, 0x1A, 0, 0, 0]), JSON.stringify(s.tx));
+    s = await single('set_gate', { reduction: 55 });
+    check('set_gate reduction 55 → one packet (55 + 108)', s.tx.length === 1 && s.tx[0] === 'TX Gate reduction 55%: ' + hexOf([0x0B, 0xC0, 0x18, 0x0B, 0x20, ...varint(163), 0x28, 0x00, 0x1A, 0, 0, 0]) && s.res.data.gate.reduction === 55, JSON.stringify(s.tx));
+    s = await single('set_effect_param', { slot: 'post3', param: mixSpec.name, value: mixValue + (mixSpec.max - mixSpec.min) / 10 });
+    check('set_effect_param → one parameter packet for that slot and index', s.tx.length === 1 && new RegExp('^TX Post FX 3 param ' + mixSpec.name + '=.*: 0F C0 08 01 18 04 20 ' + hexOf([mixIndex]) + ' 2D ([0-9A-F]{2} ){4}63 00 00 00$').test(s.tx[0]) && s.res.data.param === mixSpec.name, JSON.stringify(s));
+    s = await single('set_effect', { slot: 'post3', on: false });
+    check('set_effect on=false → the Post FX 3 OFF packet', s.tx.length === 1 && s.tx[0] === 'TX Post FX 3 OFF: 0A C0 08 01 18 08 20 01 1F 00 00 00' && s.res.data.on === false, JSON.stringify(s.tx));
+    s = await single('set_cab_tone', { high_pass_hz: 100 });
+    const hpNorm = await js('hex(float32LE(cabIRRangeToNormalized(100, 20, 800, 1.68)))');
+    check('set_cab_tone high_pass_hz 100 → the cab high-pass packet', s.tx.length === 1 && s.tx[0] === 'TX Cab/IR high pass 100 Hz: 09 C0 35 ' + hpNorm + ' 5E 00 00 00' && s.res.data.cab.high_pass_hz === 100, JSON.stringify(s.tx));
+    const capTo = capSlot === 3 ? 2 : 3;
+    s = await single('use_capture_slot', { slot: capTo });
+    check('use_capture_slot → the capture slot packet; result names the capture', s.tx.length === 1 && s.tx[0] === 'TX 08C0 capture change ' + capTo + ': 08 C0 18 04 20 ' + hexOf([capTo - 1]) + ' 1C 00 00 00' && s.res.data.capture.slot === capTo, JSON.stringify(s));
+    const irTo = (await js('state.cabIR.selectedSlot')) === 2 ? 3 : 2;
+    s = await single('use_cab_slot', { slot: irTo });
+    check('use_cab_slot → the cab slot packet', s.tx.length === 1 && s.tx[0] === 'TX Cab/IR slot select ' + irTo + ': 08 C0 18 03 20 ' + hexOf([irTo]) + ' 1C 00 00 00' && s.res.data.cab.slot === irTo, JSON.stringify(s.tx));
+    n0 = await mark();
+    r = await mc.call('set_tempo', { bpm: 133.5 });
+    tx = await txWait(n0, t => t.some(x => /^TX Tempo /.test(x) && x.includes(f32hex(133.5))));
+    check('set_tempo 133.5 → the tempo goes out (NanOS 2.3: decimals) and the field shows it', !r.isError && r.data.bpm === 133.5 && tx.some(x => /^TX Tempo /.test(x) && x.includes('2D ' + f32hex(133.5))) && (await js('state.presetTempo')) === 133.5, JSON.stringify(tx));
+
+    // Refusals: loudness, names, schema, apply_tone all-or-nothing, unsaved edits, busy, not connected.
+    n0 = await mark();
+    const lvl = await js('Math.round(state.amp.level / 25.5 * 10) / 10');
+    r = await mc.call('set_amp', { level: Math.min(10, lvl + 2.5) });
+    check('loudness: amp Level may rise by at most 2 per call (stepRefusal)', r.isError && r.text === 'Raise Level in smaller steps (at most 2 per call) so the user can check the volume between steps.', r.text);
+    r = await mc.call('set_amp', { volume_db: 3 });
+    r = await mc.call('set_amp', { volume_db: 9.5 });
+    check('loudness: volume_db may rise by at most 6 dB per call', r.isError && r.text === 'Raise volume_db in smaller steps (at most 6 dB per call) so the user can check the volume between steps.', r.text);
+    r = await mc.call('set_amp', { volume_db: 7 });
+    check('loudness: volume_db is limited to +6 dB (maxRefusal)', r.isError && r.text === 'volume_db is limited to +6 dB when an assistant sets it; the user can go higher in the editor.', r.text);
+    r = await mc.call('set_cab_tone', { level_db: 6.5 });
+    check('loudness: cab level_db is limited to +6 dB', r.isError && /^cab level_db (is limited to \+6 dB|in smaller steps)|^Raise cab level_db in smaller steps/.test(r.text), r.text);
+    const levelModel = await js('(() => { for (const k of ["pre1","pre2"]) { const m = state.blocks[k].models.find(m => m.params && m.params.some(q => /^level$/i.test(q.name) && q.meta && q.meta.kind !== "enum")); if (m) return { slot: k, name: m.name, p: m.params.find(q => /^level$/i.test(q.name)).meta }; } return null; })()');
+    if (levelModel) {
+      await mc.call('set_effect', { slot: levelModel.slot, model: levelModel.name });
+      const curLevel = (await mc.call('get_current_preset')).data.effects.find(e => e.slot === levelModel.slot).params.find(q => /^level$/i.test(q.name)).value;
+      const share = (levelModel.p.max - levelModel.p.min) * 0.25;
+      r = await mc.call('set_effect_param', { slot: levelModel.slot, param: 'level', value: Math.min(levelModel.p.max, curLevel + share + (levelModel.p.max - levelModel.p.min) * 0.05) });
+      check('loudness: an effect Level may rise by at most a quarter of its range ("25 % of its range")', r.isError && /^Raise (Pre FX [12]) Level in smaller steps \(at most 25 % of its range per call\)/.test(r.text), r.text);
+    }
+    r = await mc.call('set_effect', { slot: 'post3', model: 'No Such Verb' });
+    check('an unknown model is refused, naming the slot', r.isError && r.text === 'Post FX 3 has no effect “No Such Verb”. list_effects lists the models for post3.', r.text);
+    r = await mc.call('set_effect_param', { slot: 'post3', param: 'Wobble', value: 1 });
+    check('an unknown parameter is refused and the real ones are named', r.isError && /^Post FX 3 .+ has no parameter “Wobble”\. Its parameters: /.test(r.text), r.text);
+    r = await mc.call('set_effect', { slot: 'post9', on: true });
+    check('schema: "slot must be one of pre1, pre2, post1, post2, post3."', r.isError && r.text === 'slot must be one of pre1, pre2, post1, post2, post3.', r.text);
+    r = await mc.call('set_amp', { gain: 11 });
+    check('schema: a range ("gain must be between 0 and 10.")', r.isError && r.text === 'gain must be between 0 and 10.', r.text);
+    r = await mc.call('set_amp', { gian: 4 });
+    check('schema: an unknown key is refused', r.isError && r.text === 'gian is not an input of set_amp.', r.text);
+    r = await mc.call('apply_tone', { amp: { gain: 2 }, effects: [{ slot: 'pre1', model: 'Nope' }] });
+    check('apply_tone validates everything first: one bad part refuses the whole call', r.isError && /^Pre FX 1 has no effect “Nope”/.test(r.text), r.text);
+    check('refusals sent nothing', reads(await txSince(n0)).filter(t => !/^TX (Amp|Capture volume|Pre FX [12] model select)/.test(t) || false).length === 0 && !(await txSince(n0)).some(t => /^TX Amp gain/.test(t)), JSON.stringify(reads(await txSince(n0))));
+    check('Activity: "Assistant: refused set_amp: Raise Level in smaller steps …"', (await assistantLines(n0)).includes('Assistant: refused set_amp: Raise Level in smaller steps (at most 2 per call) so the user can check the volume between steps.'), JSON.stringify(await assistantLines(n0)));
+    await waitFor('state.presetDirty');
+    n0 = await mark();
+    r = await mc.call('select_preset', { number: 9 });
+    check('select_preset with unsaved edits is refused (errors.unsavedEdits), nothing is sent, the user sees a toast', r.isError && r.text === ERR.unsavedEdits && !(await txSince(n0)).some(t => /^TX Preset change/.test(t)) && /save or discard your edits first/.test(await toastText()), r.text + ' | ' + (await toastText()));
+    await click('#renameBtn');
+    await waitFor('!!document.querySelector(".modal-bg")');
+    r = await mc.call('set_amp', { treble: 4 });
+    check('busy: while a dialog of the user\'s own is open, live tools answer errors.busy', r.isError && r.text === ERR.busy, r.text);
+    r = await mc.call('get_current_preset');
+    check('… reads still work', !r.isError && r.data.number > 0);
+    await key('Escape');
+    await waitFor('!document.querySelector(".modal-bg")');
+
+    // Confirmation tools: the editor's own dialog, "Asked by Claude Code." first; packets only after the click.
+    const confirmFlow = async (tool, args, { title, cancelWith = 'click' } = {}) => {
+      const out = {};
+      const focus0 = A.focus;
+      let m = await mark();
+      let pending = mc.call(tool, args, 60000);
+      out.opened = await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+      out.title = await modalTitle(); out.asked = await modalAsked(); out.front = A.focus > focus0;
+      await shot('ai-confirm-' + tool);
+      out.beforeClick = reads(await txSince(m)).length;
+      if (cancelWith === 'escape') await key('Escape'); else await click(modalButton('cancel'));
+      out.cancel = await pending;
+      await settle();
+      out.afterCancel = reads(await txSince(m));
+      m = await mark();
+      pending = mc.call(tool, args, 60000);
+      await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+      out.title2 = await modalTitle();
+      await click(modalButton('ok'));
+      out.ok = await pending;
+      out.tx = reads(await txWait(m, x => x.length > 0, { timeout: 8000 }));
+      return out;
+    };
+    // save
+    let c = await confirmFlow('save', {});
+    const pn = await js('state.selectedPreset'), pname = await js('__nanoAgentUI.presetName(state.selectedPreset)');
+    check('save: "Save changes to preset N “Name”?" with "Asked by Claude Code." first; the window comes to the front', c.opened && c.title === 'Save changes to preset ' + pn + ' “' + pname + '”?' && c.asked === 'Asked by Claude Code.' && c.front, JSON.stringify(c).slice(0, 300));
+    check('save: nothing is sent before the click; Cancel → errors.cancelled and nothing saved', c.beforeClick === 0 && c.cancel.isError && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0, JSON.stringify(c.afterCancel));
+    check('save: the Save click saves (type 3) and returns { saved, number, name }', !c.ok.isError && c.ok.data.saved === true && c.ok.data.number === pn && c.tx.some(t => /^TX save preset/.test(t) || /^TX Save preset/.test(t)), JSON.stringify(c.ok.data) + ' ' + JSON.stringify(c.tx));
+    await waitFor('!state.presetDirty');
+    // save_as: the Save as dialog prefilled; Escape once.
+    const empty = (await mc.call('list_presets')).data.presets.find(x => x.empty && x.number > 30).number;
+    c = await confirmFlow('save_as', { name: 'Agent Tone', number: empty }, { cancelWith: 'escape' });
+    check('save_as: the Save as dialog, prefilled with the name and the destination, "Asked by …" first', c.title === 'Save as a new preset' && c.asked === 'Asked by Claude Code.', c.title);
+    check('save_as: Escape → errors.cancelled, nothing sent', c.cancel.isError && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0, JSON.stringify(c.afterCancel));
+    check('save_as: the click saves into preset ' + empty + ' as "Agent Tone" and switches to it', !c.ok.isError && c.ok.data.saved && c.ok.data.number === empty && c.ok.data.name === 'Agent Tone' && c.tx.some(t => new RegExp('^TX save preset ' + empty + ': ').test(t)) && (await js('state.selectedPreset')) === empty, JSON.stringify(c.ok.data) + JSON.stringify(c.tx));
+    // rename
+    c = await confirmFlow('rename', { name: 'Agent Tone Two' });
+    check('rename: the Rename dialog with the name filled in; Cancel → cancelled; Rename → type 111', c.title === 'Rename preset ' + empty && c.asked === 'Asked by Claude Code.' && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0 && !c.ok.isError && c.ok.data.name === 'Agent Tone Two' && c.tx.some(t => new RegExp('^TX Rename preset ' + empty + ' to "Agent Tone Two": .*6F 00 00 00$').test(t)), JSON.stringify(c).slice(0, 400));
+    // load_capture_into_slot / load_cab_into_slot
+    c = await confirmFlow('load_capture_into_slot', { source: 'factory', name: 'plexi 1959 slp', slot: 9 });
+    check('load_capture_into_slot: "Load “X” into capture slot N?"; Cancel sends nothing; Load sends type 80', c.title === 'Load “Plexi 1959 SLP” into capture slot 9?' && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0 && !c.ok.isError && c.ok.data.loaded && c.ok.data.slot === 9 && c.tx.some(t => /^TX Load library capture "Plexi 1959 SLP" into slot 9: .*50 00 00 00$/.test(t)), JSON.stringify(c).slice(0, 500));
+    c = await confirmFlow('load_cab_into_slot', { source: 'factory', name: '412 Greenback', slot: 4 });
+    check('load_cab_into_slot: "Load “X” into cab slot N?"; Cancel sends nothing; Load sends the cab slot content', c.title === 'Load “412 Greenback” into cab slot 4?' && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0 && !c.ok.isError && c.ok.data.slot === 4 && c.tx.some(t => /^TX Load library cab "412 Greenback" into cab slot 4: /.test(t)), JSON.stringify(c).slice(0, 500));
+    // set_cab_mic
+    const micNow = await js('state.cabIR.mic');
+    const micTo = ['Ribbon 160', 'Condenser 414'].find(m => m !== micNow);
+    c = await confirmFlow('set_cab_mic', { mic: micTo.toLowerCase(), position: 4 });
+    check('set_cab_mic: "Change the mic of cab slot N?" with old → new; Cancel sends nothing; Change sends the mic packet (94)', /^Change the mic of (cab slot \d|the cab)/.test(c.title) && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0 && !c.ok.isError && c.ok.data.mic === micTo && c.ok.data.position === 4 && c.tx.some(t => /^TX Cab mic\/position [^:]+: [0-9A-F]{2} C0 1A .* 5E 00 00 00$/.test(t)), JSON.stringify(c).slice(0, 500));
+    // assign_footswitch: the mic change left unsaved edits, so after Assign the editor's own unsaved-edits question comes.
+    await waitFor('state.presetDirty');
+    n0 = await mark();
+    let pending = mc.call('assign_footswitch', { footswitch: 'IB', preset: 12 }, 60000);
+    await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+    const fsTitle = await modalTitle();
+    await click(modalButton('cancel'));
+    r = await pending;
+    check('assign_footswitch: "Assign preset N “Name” to footswitch IB?"; Cancel → cancelled, nothing sent', fsTitle === 'Assign preset 12 “' + (await js('__nanoAgentUI.presetName(12)')) + '” to footswitch IB?' && r.isError && r.text === ERR.cancelled && !(await txSince(n0)).some(t => /^TX Assign/.test(t)), fsTitle + ' ' + r.text);
+    pending = mc.call('assign_footswitch', { footswitch: 'IB', preset: 12 }, 60000);
+    await waitFor('!!document.querySelector(".modal-bg .modal-asked")');
+    await click(modalButton('ok'));
+    await waitFor('/^Save changes to /.test((document.querySelector(".modal-bg .modal h2") || {}).textContent || "") && !document.querySelector(".modal-bg .modal-asked")');
+    check('… Assign, then the editor\'s own unsaved-edits question (as for the user\'s own click); nothing sent yet', /Assigning a footswitch discards edits/.test(await js('document.querySelector(".modal-bg .modal p").textContent')) && !(await txSince(n0)).some(t => /^TX Assign/.test(t)));
+    await click('.modal-bg .modal .row button:nth-child(2)');   // Don't save
+    r = await pending;
+    tx = reads(await txWait(n0, t => t.some(x => /^TX Assign/.test(x))));
+    const fsWant = await js('hex(__footswitchFrame("b1", 11))');
+    check('… "Don’t save" assigns: exactly the assignment frame, result { assigned, footswitch, preset }', !r.isError && r.data.assigned && r.data.footswitch === 'IB' && r.data.preset === 12 && tx.filter(t => /^TX Assign/.test(t)).length === 1 && tx.includes('TX Assign preset 12 to footswitch IB: ' + fsWant), JSON.stringify(r.data) + JSON.stringify(tx));
+
+    // Cortex Cloud (demo: three made-up captures).
+    n0 = await mark();
+    r = await mc.call('cloud_search', { query: 'glass' });
+    check('cloud_search (demo): the made-up set, with the result fields; onPedal false', !r.isError && r.data.total === 1 && r.data.results[0].name === 'Glass Clean Combo' && r.data.results[0].onPedal === false && 'product_id' in r.data.results[0] && !('hash' in r.data.results[0]), r.text.slice(0, 300));
+    const cloudId = r.data.results[0].product_id;
+    r = await mc.call('cloud_open', { product_id: cloudId });
+    check('cloud_open: the shell loads that capture page in the Cloud tab', !r.isError && A.opened.includes(cloudId), JSON.stringify(A.opened));
+    r = await mc.call('cloud_open', { product_id: 'not-a-uuid' });
+    check('cloud_open: a product_id that is not a UUID is refused', r.isError && /product_id is not a Cortex Cloud product id/.test(r.text), r.text);
+    c = await confirmFlow('cloud_send', { product_id: cloudId });
+    check('cloud_send: the existing Send dialog with "Asked by …"; Cancel sends nothing; Send uploads (type 13)', c.title === 'Send Glass Clean Combo to the pedal?' && c.asked === 'Asked by Claude Code.' && c.cancel.text === ERR.cancelled && c.afterCancel.length === 0 && !c.ok.isError && c.ok.data.sent && c.ok.data.name === 'Glass Clean Combo' && c.tx.some(t => /^TX Capture upload "Glass Clean Combo"/.test(t)), JSON.stringify(c).slice(0, 500));
+    await waitFor('/Load Glass Clean Combo into a slot now/.test((document.querySelector(".modal h2") || {}).textContent || "")');
+    await click('.modal-bg .modal .row button:nth-child(1)');   // Later
+    await waitFor('!document.querySelector(".modal-bg")');
+    r = await mc.call('cloud_search', { query: 'glass' });
+    check('cloud_search: onPedal true once the capture is in the pedal\'s library', r.data.results[0].onPedal === true, r.text.slice(0, 200));
+    n0 = await mark();
+    r = await mc.call('cloud_preview', { product_id: await js('__agent.demoCloud[1].product_id') });
+    tx = await txWait(n0, t => t.some(x => /^TX Capture preview "Velvet Crunch Head"/.test(x)));
+    check('cloud_preview: a Live Preview (type 150) of the capture; get_status reports it', !r.isError && r.data.audition.kind === 'capture' && tx.some(x => /^TX Capture preview "Velvet Crunch Head" 1\/\d+:/.test(x)) && (await mc.call('get_status')).data.audition.name === 'Velvet Crunch Head', r.text);
+    n0 = await mark();
+    r = await mc.call('stop_preview');
+    tx = await txWait(n0, t => t.some(x => /^TX Stop capture preview/.test(x)));
+    check('stop_preview: the stop (148) and a state read', !r.isError && r.data.stopped === true && tx.some(x => /^TX Stop capture preview/.test(x)), JSON.stringify(tx));
+    n0 = await mark();
+    r = await mc.call('preview_cab', { source: 'factory', name: '412 V30' });
+    tx = await txWait(n0, t => t.some(x => /^TX Preview IR "412 V30"/.test(x)));
+    check('preview_cab: the IR audition (158) of a factory cab', !r.isError && r.data.audition.name === '412 V30' && tx.some(x => /^TX Preview IR "412 V30": /.test(x)) && (await js('!!__nanoAgentUI.irAudition.active')), JSON.stringify(tx));
+    n0 = await mark();
+    r = await mc.call('stop_preview');
+    tx = await txWait(n0, t => t.some(x => /^TX Stop IR preview/.test(x)));
+    check('stop_preview ends the cab audition', !r.isError && r.data.stopped && !(await js('!!__nanoAgentUI.irAudition.active')), JSON.stringify(tx));
+
+    // discard_edits and select_preset (clean): the preset change.
+    await mc.call('set_amp', { mid: 7 });
+    await waitFor('state.presetDirty');
+    const here = await js('state.selectedPreset');
+    n0 = await mark();
+    r = await mc.call('discard_edits');
+    tx = await txWait(n0, t => t.some(x => /^TX Preset change \d+:/.test(x)));
+    check('discard_edits: reloads the preset (one preset change), no dialog, edits gone', !r.isError && tx.filter(x => /^TX Preset change \d+:/.test(x)).length === 1 && tx.some(x => x.startsWith('TX Preset change ' + here + ':')) && !(await js('state.presetDirty')) && !(await js('!!document.querySelector(".modal-bg")')), JSON.stringify(tx));
+    n0 = await mark();
+    r = await mc.call('select_preset', { number: 5 });
+    tx = await txWait(n0, t => t.some(x => /^TX Preset change \d+:/.test(x)));
+    check('select_preset 5 (no unsaved edits): one preset change, the list follows', !r.isError && r.data.number === 5 && tx.filter(x => /^TX Preset change \d+:/.test(x)).length === 1 && tx.some(x => x.startsWith('TX Preset change 5:')) && (await js('document.querySelector(".preset-row.active .t").textContent')) === r.data.name, JSON.stringify(tx));
+    r = await mc.call('get_slot_usage', { scan: true }, 120000);
+    check('get_slot_usage scan=true: scans the presets and comes back', !r.isError && r.data.scanned === true && Object.keys(r.data.capture).length > 0 && (await js('state.selectedPreset')) === 5, r.text.slice(0, 200));
+
+    // Not connected: every pedal tool says so; get_status still answers.
+    await js('__demo.stop()');
+    await waitFor('!state.connected');
+    r = await mc.call('set_amp', { gain: 1 });
+    const st = await mc.call('get_status');
+    check('not connected: tools answer errors.notConnected, get_status says connected false', r.isError && r.text === ERR.notConnected && !st.isError && st.data.connected === false && st.data.pedal === null, r.text);
+    await js('__demo.start()');
+    await waitFor(BOOTED); await settle();
+
+    // The socket side: a wrong token and another contract are refused; one editor at a time.
+    const hello = (msg) => new Promise((resolve) => {
+      const c2 = net.createConnection(sock);
+      let got = '';
+      c2.on('connect', () => c2.write(JSON.stringify(msg) + '\n'));
+      c2.on('data', (d) => { got += d; });
+      c2.on('close', () => resolve(got.trim()));
+      c2.on('error', () => resolve(got.trim()));
+      setTimeout(() => c2.destroy(), 3000);
+    });
+    const tok = fs.readFileSync(tokenFile, 'utf8').trim();
+    const bad = JSON.parse(await hello({ type: 'hello', token: 'f'.repeat(64), contract: 1, client: { name: 'x' } }) || '{}');
+    const other = JSON.parse(await hello({ type: 'hello', token: tok, contract: 99, client: { name: 'x' } }) || '{}');
+    check('socket: a wrong token is refused (hello ok:false) and the connection closed', bad.type === 'hello' && bad.ok === false, JSON.stringify(bad));
+    check('socket: another contract version is refused with the contract\'s sentence', other.ok === false && other.error === "This assistant's setup is from another version of Nano Cortex Editor. Copy the setup line again from Settings → AI assistants.", JSON.stringify(other));
+    const { createMcpServer, ANOTHER_EDITOR } = require('../src/mcp-server');
+    const second = createMcpServer({ env: A.env, onCall: async () => ({ ok: true }), retryMs: 200 });
+    second.start();
+    await waitFor(() => second.status().phase === 'blocked');
+    check('one editor at a time: a second editor sees "Another Nano Cortex Editor is already serving AI assistants." and does not take over', second.status().phase === 'blocked' && second.status().error === ANOTHER_EDITOR && fs.existsSync(sock));
+    second.stop();
+
+    // Turning the switch off closes everything and removes the socket and the token.
+    await openAiSettings();
+    await click('[data-fk="set-ai"]');
+    await checkSoon('turning the switch off: editor.sock and the token are gone, the status says "Off", the pill hides', async () => !fs.existsSync(sock) && !fs.existsSync(tokenFile) && (await statusText()) === 'Off' && (await js('document.getElementById("agentPill").hidden')) && A.on === false, statusText);
+    r = await mc.call('get_status');
+    check('… and the helper answers errors.editorNotRunning again', r.isError && /Nano Cortex Editor is not running/.test(r.text), r.text);
+    await closeSettings();
+    mc.close();
+  }
+
   check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 }
 
@@ -3934,7 +4407,8 @@ app.whenReady().then(async () => {
   // backgroundThrottling off: on macOS an occluded window gets almost no animation
   // frames, and every step here waits for one.
   // enableLargerThanScreen: CI runners (macOS) have a small display, and the layout checks need the full 1400×900.
-  win = new BrowserWindow({ width: 1400, height: 900, useContentSize: true, show: true, enableLargerThanScreen: true, webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+  setUpAgent();
+  win = new BrowserWindow({ width: 1400, height: 900, useContentSize: true, show: true, enableLargerThanScreen: true, webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false, preload: agentT.preload } });
   wc = win.webContents;
   wc.setWindowOpenHandler(({ url }) => { opened.push(url); return { action: 'deny' }; });
   wc.on('console-message', (e) => {
@@ -3952,5 +4426,7 @@ app.whenReady().then(async () => {
   const failed = results.filter(r => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} passed`);
   fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify(results, null, 2));
+  agentT.shell.stop();
+  for (const d of [agentT.dir, agentT.home]) fs.rmSync(d, { recursive: true, force: true });
   app.exit(failed.length ? 1 : 0);
 });
