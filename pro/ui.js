@@ -305,6 +305,7 @@
     return isFactoryCabIR();
   }
 
+  const CAB_MICS = Object.freeze(['Condenser 184', 'Condenser 414', 'Dynamic 421', 'Dynamic 57', 'Ribbon 160']);   // the factory cabs' mics
   const shortMic = (m) => String(m || '').replace('Condenser', 'Cond').replace('Dynamic', 'Dyn').replace('Ribbon', 'Rib');
 
   const actualStageEnabled = (key) => key === 'gate' ? Boolean(state.gate.on)
@@ -456,7 +457,12 @@
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Discard', primary: true }],
     });
     if (choice !== 'ok') { render(); return; }
-    if (!(await stopAnyAudition('Discard'))) return;
+    await discardNow();
+  }
+  // The reload itself (also the assistants' discard_edits, which the user asked for in the chat): true when done.
+  async function discardNow() {
+    if (!(await stopAnyAudition('Discard'))) return false;
+    const n = state.selectedPreset;
     ui.lastAction = 'Discarding edits\u2026'; renderStatus();
     state.exp.loaded = false;   // the pedal reloads the saved set too; read it again
     await selectPreset(n);
@@ -464,19 +470,22 @@
     ui.lastAction = '';
     toast('Edits discarded; preset ' + n + ' reloaded');
     render();
+    return true;
   }
 
   // Save the live sound into another slot under a new name, then switch to it. The source preset keeps
   // its saved state (the pedal drops unsaved edits on the switch). Same type-3 write as savePreset(),
   // with the chosen slot and name; verified on the pedal 2026-10-08 from the native app.
-  async function doSaveAs(preselect) {
-    if (!state.connected) { toast('Connect your Nano Cortex to save'); return; }
-    if (presetUnknownRefuses()) return;
+  // opts (AI assistants, pro/agent.js): name prefills the name, asked is the dialog's "Asked by …" line. Resolves
+  // { number, name } when saved, { cancelled: true } or { error }.
+  async function doSaveAs(preselect, opts = {}) {
+    if (!state.connected) { toast('Connect your Nano Cortex to save'); return { error: 'Not connected.' }; }
+    if (presetUnknownRefuses()) return { error: PRESET_UNKNOWN };
     const from = state.selectedPreset;
     let target = Number.isInteger(preselect) && preselect !== from ? preselect : 0;
     for (let i = 1; !target && i <= 64; i++) if (i !== from && presetName(i) === 'Empty') { target = i; break; }
     if (!target) target = from % 64 + 1;
-    const input = el('input', { class: 'search', type: 'text', value: (presetName(from) === 'Empty' ? 'Preset ' + from : presetName(from)) + ' copy', maxlength: '64', 'aria-label': 'New preset name', spellcheck: 'false' });
+    const input = el('input', { class: 'search', type: 'text', value: opts.name != null ? String(opts.name) : (presetName(from) === 'Empty' ? 'Preset ' + from : presetName(from)) + ' copy', maxlength: '64', 'aria-label': 'New preset name', spellcheck: 'false', dataset: { fk: 'saveas-name' } });
     const warn = el('p', { class: 'warn' });
     const list = el('div', { class: 'slots presets', role: 'listbox', 'aria-label': 'Destination preset' });
     const draw = () => {
@@ -488,17 +497,17 @@
     };
     draw();
     const choice = await modal({
-      title: 'Save as a new preset', wide: true, focus: input,
+      title: 'Save as a new preset', wide: true, focus: input, asked: opts.asked,
       body: 'Writes the current sound, including unsaved edits, into the slot you pick. Preset ' + from + ' keeps what it had.',
       content: el('div', {}, el('label', { class: 'field' }, el('span', { text: 'Name' }), input), list, warn),
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Save to the chosen slot', primary: true }],
     });
-    if (choice !== 'ok') { render(); return; }
+    if (choice !== 'ok') { render(); return { cancelled: true }; }
     const name = input.value.trim();
-    if (name.length < 4) { toast('Preset name must have at least 4 characters.'); return; }
-    if (new TextEncoder().encode(name).length > 64) { toast('Preset name is too long.'); return; }
-    if (!(await stopAnyAudition('Save as'))) return;
-    await savePresetAs(target, name);
+    if (name.length < 4) { toast('Preset name must have at least 4 characters.'); return { error: 'Preset name must have at least 4 characters.' }; }
+    if (new TextEncoder().encode(name).length > 64) { toast('Preset name is too long.'); return { error: 'Preset name is too long.' }; }
+    if (!(await stopAnyAudition('Save as'))) return { error: 'The pedal did not confirm stopping the preview, so nothing was saved.' };
+    return (await savePresetAs(target, name)) ? { number: target, name } : { error: 'Save failed: the Bluetooth write did not go through.' };
   }
   async function savePresetAs(n, name) {
     const nameBytes = new TextEncoder().encode(name);
@@ -563,7 +572,8 @@
     body.push(0x48, 0x00);
     return buildFrame(body, MSG.SetPresetSlotsRequest);
   }
-  async function assignFootswitch(slotKey, presetIndex) {
+  // opts.onCancel: called when the user cancels the unsaved-edits question (AI assistants report it as cancelled).
+  async function assignFootswitch(slotKey, presetIndex, opts = {}) {
     const fs = FOOTSWITCHES.find(f => f.key === slotKey);
     if (!fs || !(presetIndex >= 0 && presetIndex < 64)) return false;
     if (!state.connected) { toast('Connect your Nano Cortex first'); return false; }
@@ -581,7 +591,7 @@
           { id: 'save', label: 'Save and assign', primary: true },
         ],
       });
-      if (choice === 'cancel' || !choice) { render(); return false; }
+      if (choice === 'cancel' || !choice) { if (opts.onCancel) opts.onCancel(); render(); return false; }
     }
     if (!(await stopAnyAudition('the footswitch assignment'))) return false;
     if (dirty && choice === 'save') await doSave();
@@ -603,22 +613,26 @@
   window.__assignFootswitch = assignFootswitch;
   window.__footswitchFrame = footswitchFrame;
 
-  async function doRename() {
-    if (!state.connected) { toast('Connect your Nano Cortex to rename presets'); return; }
-    if (presetUnknownRefuses()) return;
+  // opts (AI assistants): name prefills the field, asked is the "Asked by …" line. Resolves { number, name },
+  // { cancelled: true } or { error }. (A click handler passes its event here: that is no opts.)
+  async function doRename(opts) {
+    if (!opts || opts instanceof Event) opts = {};
+    if (!state.connected) { toast('Connect your Nano Cortex to rename presets'); return { error: 'Not connected.' }; }
+    if (presetUnknownRefuses()) return { error: PRESET_UNKNOWN };
     const n = state.selectedPreset;
-    const input = el('input', { class: 'search', type: 'text', value: presetName(n), maxlength: '64', 'aria-label': 'Preset name', spellcheck: 'false' });
+    const input = el('input', { class: 'search', type: 'text', value: opts.name != null ? String(opts.name) : presetName(n), maxlength: '64', 'aria-label': 'Preset name', spellcheck: 'false', dataset: { fk: 'rename-name' } });
     const choice = await modal({
-      title: 'Rename preset ' + n, content: input, focus: input,
+      title: 'Rename preset ' + n, content: input, focus: input, asked: opts.asked,
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Rename', primary: true }],
     });
-    if (choice !== 'ok') { render(); return; }
-    if (!(await stopAnyAudition('Rename'))) return;
+    if (choice !== 'ok') { render(); return { cancelled: true }; }
+    if (!(await stopAnyAudition('Rename'))) return { error: 'The pedal did not confirm stopping the preview, so the preset was not renamed.' };
     const err = await renamePresetTo(n, input.value);
-    if (err) { toast(err); return; }
+    if (err) { toast(err); return { error: err }; }
     ui.sideSig = '';
     toast('Renamed preset ' + n + ' to ' + input.value.trim());
     render();
+    return { number: n, name: input.value.trim() };
   }
 
   // ------------------------------------------------------------------ tuner
@@ -2087,10 +2101,11 @@
   }
 
   let cabIRLoadId = 0;
+  // Resolves with the slot once this load finished (null when it did not happen).
   function queueCabIRLoad(item, preselectedSlot = 0) {
     if (ui.cabIRLoadPaused) {
       toast('The last IR load was not confirmed. Reconnect the pedal before loading another IR.');
-      return;
+      return Promise.resolve(null);
     }
     const job = {
       id: ++cabIRLoadId,
@@ -2101,11 +2116,13 @@
       slot: null,
       phase: 'queued',
     };
+    const done = new Promise((resolve) => { job.resolve = resolve; });
     const queued = Boolean(ui.cabIRLoadActive || ui.cabIRLoadQueue.length);
     ui.cabIRLoadQueue.push(job);
     if (queued) toast('Queued ' + item.name + '. It will load after the current IR change.');
     render();
     startNextCabIRLoad();
+    return done;
   }
 
   function startNextCabIRLoad() {
@@ -2157,6 +2174,7 @@
     else if (!acknowledged && !timeout && job.slot) toast('Could not confirm loading ' + job.name + ' into a slot.');
     ui.slotPreselect = 0;
     ui.cabIRLoadActive = null;
+    if (job.resolve) job.resolve(success ? job.slot : null);
     render();
     startNextCabIRLoad();
   }
@@ -2187,11 +2205,9 @@
       onPick: (m) => loadFromLibrary(kind, m, slot || 0),
     });
   }
+  // Resolves with the slot it went into, or null.
   async function loadFromLibrary(kind, item, preselectedSlot = 0) {
-    if (kind === 'cab') {
-      queueCabIRLoad(item, preselectedSlot);
-      return;
-    }
+    if (kind === 'cab') return queueCabIRLoad(item, preselectedSlot);
     if (preselectedSlot) ui.captureSlotPreselect = Number(preselectedSlot) || 0;
     let slot;
     try {
@@ -2199,10 +2215,11 @@
     } finally {
       ui.captureSlotPreselect = 0;
     }
-    if (!slot) { render(); return; }
+    if (!slot) { render(); return null; }
     if (ui.demo) demo.pickCapture(slot);
     toast('Capture ' + item.name + ' loaded into slot ' + slot);
     render();
+    return slot;
   }
 
   // Delete a user IR from the pedal's library: 82 { 1: 2, 4: { 1: index, 2: name } } → 83 { 1: 6, 3: 1 }
@@ -2678,17 +2695,20 @@
   // The shell hands over { cns: base64, meta } when "Send to Nano Cortex" is clicked on
   // a capture page in the Cloud tab. Confirm, stream it to the pedal, refresh the
   // library, then offer a slot.
-  async function receiveCapture(bundle) {
+  // opts (AI assistants' cloud_send): asked is the dialog's "Asked by …" line; done(outcome) hears how the send ended
+  // ({ sent: true, name } | { cancelled: true } | { error }) before the "Load … into a slot now?" question.
+  async function receiveCapture(bundle, opts = {}) {
     const meta = bundle.meta || {};
-    if (!state.connected) { toast('Connect your Nano Cortex first, then send ' + (meta.name || 'the capture') + ' again.'); return false; }
-    if (ui.uploading || NanoTransfer.busy) { toast('Another transfer to the pedal is still running. Try again when it has finished.'); return false; }
+    const report = (r) => { if (opts.done) opts.done(r); return false; };
+    if (!state.connected) { toast('Connect your Nano Cortex first, then send ' + (meta.name || 'the capture') + ' again.'); return report({ error: 'Not connected.' }); }
+    if (ui.uploading || NanoTransfer.busy) { toast('Another transfer to the pedal is still running. Try again when it has finished.'); return report({ error: 'Another transfer to the pedal is still running.' }); }
     const cns = typeof bundle.cns === 'string' ? Uint8Array.from(atob(bundle.cns), c => c.charCodeAt(0)) : Uint8Array.from(bundle.cns);
     const choice = await modal({
-      title: 'Send ' + meta.name + ' to the pedal?',
+      title: 'Send ' + meta.name + ' to the pedal?', asked: opts.asked,
       body: (meta.authorName ? 'By ' + meta.authorName + '. ' : '') + (cns.length / 1024).toFixed(1) + ' KB over Bluetooth. It lands in the pedal\u2019s library; nothing in your presets changes until you load it into a slot.',
       buttons: [{ id: 'cancel', label: 'Cancel' }, { id: 'ok', label: 'Send', primary: true }],
     });
-    if (choice !== 'ok') { render(); return false; }
+    if (choice !== 'ok') { render(); return report({ cancelled: true }); }
     ui.uploading = true;
     let reply;
     try {
@@ -2696,15 +2716,16 @@
     } catch (err) {
       toast('Sending failed: ' + err.message);
       ui.uploading = false; ui.lastAction = ''; render();
-      return false;
+      return report({ error: 'Sending failed: ' + err.message });
     }
     ui.uploading = false;
     ui.lastAction = '';
-    if (!reply.ok) { toast('The pedal refused ' + meta.name + (reply.message ? ': ' + reply.message : '.')); render(); return false; }
+    if (!reply.ok) { toast('The pedal refused ' + meta.name + (reply.message ? ': ' + reply.message : '.')); render(); return report({ error: 'The pedal refused ' + meta.name + (reply.message ? ': ' + reply.message : '.') }); }
     toast(meta.name + ' is now in the pedal\u2019s library.');
     state.library.loaded = false;
     await ensureLibrary();
     render();
+    report({ sent: true, name: meta.name });
     const load = await modal({
       title: 'Load ' + meta.name + ' into a slot now?',
       body: 'You can also do it later from \u201cLoad from library\u2026\u201d in the Capture inspector.',
@@ -3016,7 +3037,7 @@
   async function receivePreview(bundle) {
     const meta = (bundle && bundle.meta) || {};
     const name = meta.name || 'capture';
-    const refuse = (error) => { if (error) toast(error); pushPreviewState(error); render(); return false; };
+    const refuse = (error) => { ui.lastPreviewError = error || ''; if (error) toast(error); pushPreviewState(error); render(); return false; };
     if (!state.connected) return refuse('Connect your Nano Cortex first, then preview ' + name + '.');
     if (ui.uploading || NanoTransfer.busy) return refuse('Another transfer to the pedal is still running. Try again when it has finished.');
     if (ui.previewBusy || irAudition.busy) return refuse('Wait for the current preview to start or stop, then try again.');
@@ -3333,6 +3354,7 @@
     (await modal({ title, body: text, buttons: [{ id: 'cancel', label: options.cancel || 'Cancel' }, { id: 'ok', label: options.ok || 'OK', primary: true }] })) === 'ok';
   window.showNotice = async (title, text) => { await modal({ title, body: text, buttons: [{ id: 'ok', label: 'OK', primary: true }] }); return true; };
   window.showSaveResult = function (text, kind, detail) {
+    ui.lastSave = { kind: kind || '', text: detail || text || '', at: Date.now() };   // what the assistants' save reports
     if (kind === 'ok') {
       if (ui.demo) demo.store(state.selectedPreset);
       toast('Saved to preset ' + state.selectedPreset + ', ' + presetName(state.selectedPreset));
@@ -4637,7 +4659,7 @@
       : 'Mic and position apply to factory cabs only';
     const out = [head(s, [], bypassSwitch('cab', on))];
 
-    const MICS = ['Condenser 184', 'Condenser 414', 'Dynamic 421', 'Dynamic 57', 'Ribbon 160'];
+    const MICS = CAB_MICS;
     const micRow = el('div', { class: 'params wide' },
       el('div', { class: 'choice' + (micPositionEditable ? '' : ' locked'), title: micPositionEditable ? null : micPositionLockTitle },
         el('span', { class: 'label', text: 'Mic' }),
@@ -5452,13 +5474,15 @@
 
   // cls: extra class on the dialog. enterSubmits: false lets Enter reach controls in `content` (a settings sheet)
   // instead of meaning "the primary button".
-  function modal({ title, body, buttons, content, wide, focus, cls, enterSubmits = true }) {
+  // asked: "Asked by <assistant>." as the first line (AI assistants' confirmations, pro/agent.js).
+  function modal({ title, body, buttons, content, wide, focus, cls, enterSubmits = true, asked }) {
     return new Promise((resolve) => {
       const prev = document.activeElement;
       const close = (id) => { bg.remove(); document.removeEventListener('keydown', onKey, true); if (prev) prev.focus({ preventScroll: true }); resolve(id); };
       const btns = buttons.map(b => el('button', { class: 'btn' + (b.primary ? ' primary' : ''), onclick: () => close(b.id) }, b.label));
       const bg = el('div', { class: 'modal-bg', onclick: (e) => { if (e.target === bg) close(null); } },
         el('div', { class: 'modal' + (wide ? ' wide' : '') + (cls ? ' ' + cls : ''), role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+          asked ? el('p', { class: 'modal-asked', dataset: { fk: 'modal-asked' }, text: asked }) : null,
           el('h2', { text: title }), body ? el('p', { text: body }) : null, content || null,
           el('div', { class: 'row' }, btns)));
       const onKey = (e) => {
@@ -5914,7 +5938,9 @@
   const setNote = (text, fk) => el('p', { class: 'set-note', text, dataset: fk ? { fk } : null });
   const devOnly = (node) => { node.classList.add('dev-only'); return node; };
 
-  // tab: 'general' (default), 'device' or 'about'.
+  // Extra Settings tabs: { id, label, build() → element, available?(), closed?() }, before About.
+  const settingsPages = [];
+  // tab: 'general' (default), 'device', 'about' or an extra page's id.
   async function openSettings(tab) {
     if (settingsOpen) return;
     if (document.querySelector('.modal-bg')) return;   // another dialog is up
@@ -6070,26 +6096,32 @@
         setNote('Neural DSP and Nano Cortex are trademarks of Neural DSP Technologies Oy; this project is not affiliated with or endorsed by Neural DSP.', 'about-trademark'),
         setNote('MIT licence, \u00a9 2026 AJs Creations. The Bluetooth protocol layer comes from the community Nano Cortex Editor by DrD85 and nano-cortex-web-editor by choldy (both MIT).', 'about-license')));
 
-    // Tabs: General (the sections above), Device (the pedal's own settings, read when the tab opens) and About.
+    // Tabs: General (the sections above), Device (the pedal's own settings, read when the tab opens), the pages other
+    // files add (AI assistants: pro/agent.js, through addSettingsPage) and About.
     let devPage = null;
-    const panes = el('div', { class: 'settings-panes' }, general, about);
+    const extras = settingsPages.filter(p => !p.available || p.available()).map(p => ({ ...p, node: p.build() }));
+    const panes = el('div', { class: 'settings-panes' }, general, ...extras.map(p => p.node), about);
     const tabs = el('div', { class: 'seg settings-tabs', role: 'tablist', 'aria-label': 'Settings' });
     const showTab = (id) => {
       for (const b of tabs.children) { const on = b.dataset.tab === id; b.classList.toggle('on', on); b.setAttribute('aria-selected', String(on)); }
       general.hidden = id !== 'general';
       about.hidden = id !== 'about';
+      for (const p of extras) p.node.hidden = id !== p.id;
       if (id === 'device') { if (!devPage) panes.append(devPage = devicePage()); else readDevice(); }
       if (devPage) devPage.hidden = id !== 'device';
     };
-    tabs.append(...[['general', 'General'], ['device', 'Device'], ['about', 'About']].map(([id, label]) =>
+    const tabIds = ['general', 'device', ...extras.map(p => p.id), 'about'];
+    tabs.append(...[['general', 'General'], ['device', 'Device'], ...extras.map(p => [p.id, p.label]), ['about', 'About']].map(([id, label]) =>
       el('button', { role: 'tab', 'aria-selected': 'false', dataset: { tab: id, fk: 'set-tab-' + id }, onclick: () => showTab(id) }, label)));
-    showTab(tab === 'device' || tab === 'about' ? tab : 'general');
+    const startTab = tab !== 'general' && tabIds.includes(tab) ? tab : 'general';
+    showTab(startTab);
     const content = el('div', { class: 'settings-body' }, tabs, panes);
     await modal({
       title: 'Settings', wide: true, cls: 'settings-modal', content, enterSubmits: false,
-      focus: tab === 'device' || tab === 'about' ? tabs.querySelector('[data-tab="' + tab + '"]') : swatches.querySelector('.on'),
+      focus: startTab !== 'general' ? tabs.querySelector('[data-tab="' + startTab + '"]') : swatches.querySelector('.on'),
       buttons: [{ id: 'ok', label: 'Done', primary: true }],
     });
+    for (const p of extras) if (p.closed) p.closed();
     dev.redraw = null;
     settingsOpen = false;
     render();
@@ -6731,6 +6763,40 @@
       reportTempo, setScreen: (open) => { screenOpen = Boolean(open); }, get pedalTempo() { return { open: screenOpen, global: Boolean(hooks.globalTempo), globalTempo, clock: Boolean(hooks.midiClock), now: tempoNow(), metro: pedalMetro }; } };
   })();
   window.__demo = demo;
+
+  // ------------------------------------------------------------------ AI assistants (pro/agent.js)
+  // The one internal object the assistants' facade uses: the same functions the controls call, so every write goes
+  // through the real packet builders (and demo mode answers them). Nothing here runs code or sends raw packets.
+  function setStageOn(key, on) {   // the bypass switch, set to a value instead of toggled (toggleStage)
+    on = Boolean(on);
+    if (stageEnabled(key) === on) return false;
+    setStageEnabled(key, on);
+    noteExpressionLocalOverride(key, 'bypass', on);
+    queueStageEnabled(key, on);
+    render();
+    return true;
+  }
+  function pickCaptureSlot(i) { setCapture(i); if (ui.demo) demo.pickCapture(i); render(); }   // a capture slot button
+  function pickCabSlot(i) {   // an IR slot button
+    const name = state.irNames.get(i) || ('IR ' + i);
+    Object.assign(state.currentIR, { shortName: name, fullName: name, inBank: true, slot: i });
+    selectCabIRSlot(i);
+    if (ui.demo) demo.pickIR(i);
+    render();
+  }
+  window.__nanoAgentUI = Object.freeze({
+    ui, demo, irAudition, FOOTSWITCHES, CAB_MICS, STAGES, PRESET_UNKNOWN,
+    presetName, activeCaptureSlot, activeIRSlot, selectedIRIsFactory, captureSlotCount, irSlotCount,
+    isDirtyNow, stageEnabled, sameName, auditioning, irAuditioning, fwAtLeast23, clampTempo,
+    setStageOn, pickCaptureSlot, pickCabSlot, chooseModel, noteExpressionLocalOverride,
+    setTempo: (bpm) => tempoCommit(bpm),
+    goToPreset, discardNow, doSave, doSaveAs, doRename, assignFootswitch,
+    ensureLibrary, loadFromLibrary, scanUsage, startIRPreview, stopIRPreview, stopCapturePreview,
+    receivePreview, receiveCapture,
+    modal, toast, render, el, keyLabel, openLink, linkEl, toggleSwitch, setRow, setNote,
+    openSettings, addSettingsPage: (page) => { settingsPages.push(page); },
+    log: (line) => log(line),
+  });
 
   // ------------------------------------------------------------------ boot
   // index.html writes shortcuts the Mac way; show Ctrl+… on Windows and Linux.
