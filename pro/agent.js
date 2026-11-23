@@ -42,13 +42,18 @@
   }
 
   // ------------------------------------------------------------------ the contract
-  const C = { tools: new Map(), defs: {}, errors: {}, safety: {}, loaded: null };
+  // Every text the user or the assistant sees comes from the contract (mcp/tools.json, handed over by the shell:
+  // errors, safety, messages, clients), word for word as in the native edition.
+  const C = { tools: new Map(), defs: {}, errors: {}, safety: {}, messages: null, clients: {}, loaded: null };
   function useContract(contract) {
     if (!contract || !Array.isArray(contract.tools)) return false;
     C.tools = new Map(contract.tools.map((t) => [t.name, t]));
     C.defs = contract.$defs || {};
     C.errors = contract.errors || {};
     C.safety = contract.safety || {};
+    C.messages = contract.messages || {};
+    C.clients = contract.clients || {};
+    if (pill && C.messages.pill) pill.textContent = C.messages.pill;
     C.levelRe = new RegExp(C.safety.effectLevelParams || '^(level|volume|output|out level|vol)$', 'i');
     return true;
   }
@@ -68,6 +73,8 @@
   const say = (line) => window.log('Assistant: ' + line);
   const blockTitle = (key) => (state.blocks[key] ? state.blocks[key].title : key);
   const fill = (text, vars) => String(text).replace(/\{(\w+)\}/g, (_m, k) => (vars[k] !== undefined ? vars[k] : ''));
+  const msg = (key, vars = {}) => fill(C.messages[key], vars);
+  const pname = (n) => (/^empty$/i.test(U.presetName(n)) ? null : U.presetName(n));   // an empty preset's name is null
   const stepRefusal = (what, step) => fill(C.safety.stepRefusal, { what, step });
   const maxRefusal = (what, max) => fill(C.safety.maxRefusal, { what, max });
   class Refusal extends Error {}
@@ -133,7 +140,9 @@
   function busyNow() {
     const u = U.ui;
     return Boolean(u.uploading || (window.NanoTransfer && NanoTransfer.busy) || u.scanning || u.cabIRLoadActive || u.previewBusy
-      || U.irAudition.busy || userDialogOpen());
+      || U.irAudition.busy || u.presetReorderBusy || u.connecting || state.stateMode === 'metadata'
+      || (typeof cap !== 'undefined' && cap && cap.mode)   // the pedal is in Capture mode: writes are dropped
+      || userDialogOpen());
   }
   async function closeSettings() {
     const done = document.querySelector('.settings-modal .row .btn.primary');
@@ -184,7 +193,7 @@
     const capSlot = U.activeCaptureSlot(), cabSlot = U.activeIRSlot();
     const factory = U.selectedIRIsFactory();
     return {
-      number: n, name: U.presetName(n), unsaved: Boolean(U.isDirtyNow()),
+      number: n, name: pname(n), unsaved: Boolean(U.isDirtyNow()),
       amp: { ...Object.fromEntries(AMP.map(([k]) => [k, ampOf(state.amp[k])])), volume_db: round1(state.captureVolumeDb || 0) },
       capture: {
         on: U.stageEnabled('capture'), slot: state.capture.fromLibrary ? null : (capSlot || null),
@@ -218,12 +227,12 @@
       if (a[k] === undefined) continue;
       const raw = rawOfAmp(a[k]);
       parts.push(label + ' ' + round1(a[k]).toFixed(1));
-      ops.push(() => { state.amp[k] = raw; U.noteExpressionLocalOverride(k, 'range', raw); setAmpKnob(k, raw); });
+      ops.push(() => { state.amp[k] = raw; U.noteExpressionLocalOverride(k, 'range', raw); return setAmpKnob(k, raw); });
     }
     if (a.volume_db !== undefined) {
       const v = round1(a.volume_db);
       parts.push('volume ' + fmtDb(v));
-      ops.push(() => { state.captureVolumeDb = v; U.noteExpressionLocalOverride('level', 'range', v); setCaptureVolumeDb(v); });
+      ops.push(() => { state.captureVolumeDb = v; U.noteExpressionLocalOverride('level', 'range', v); return setCaptureVolumeDb(v); });
     }
     if (parts.length) lines.push('amp ' + parts.join(', '));
     return { lines, ops };
@@ -234,12 +243,13 @@
     if (g.reduction !== undefined) {
       const r = Math.round(g.reduction);
       parts.push('reduction ' + r + ' %');
-      ops.push(() => { const p = state.gate.params[0]; p.value = r; U.noteExpressionLocalOverride('gate', 'range', r); setGateReduction(r); });
+      ops.push(() => { const p = state.gate.params[0]; p.value = r; U.noteExpressionLocalOverride('gate', 'range', r); return setGateReduction(r); });
     }
     return { lines: parts.length ? ['gate ' + parts.join(', ')] : [], ops };
   }
   function planCabTone(t) {
     const parts = [], ops = [];
+    if (t.level_db !== undefined && !cabLevelKnown()) refuseWith('The cab level of this preset has not been read from the pedal yet, so a level change can\'t be checked. Try again in a moment.');
     const before = round1(state.cabIR.levelDb);
     if (t.level_db !== undefined) {
       if (t.level_db > before + C.safety.cabLevelDbStep + EPS) refuseWith(stepRefusal('cab level_db', fmtNum(C.safety.cabLevelDbStep) + ' dB'));
@@ -254,12 +264,12 @@
   }
   function planCaptureSlot(slot, field = 'capture_slot') {
     const count = U.captureSlotCount();
-    if (slot > count) refuseWith(field + ' must be between 1 and ' + count + ' (the capture slots on this pedal).');
+    if (slot > count) refuseWith(msg('captureSlotRange', { field, count }));
     return { lines: ['capture slot ' + slot + ' ' + quote(state.captureNames.get(slot) || 'Capture ' + slot)], ops: [() => U.pickCaptureSlot(slot)] };
   }
   function planCabSlot(slot, field = 'cab_slot') {
     const count = U.irSlotCount();
-    if (slot > count) refuseWith(field + ' must be between 1 and ' + count + ' (the cab/IR slots on this pedal).');
+    if (slot > count) refuseWith(msg('cabSlotRange', { field, count }));
     return { lines: ['cab slot ' + slot + ' ' + quote(state.irNames.get(slot) || 'IR ' + slot)], ops: [() => U.pickCabSlot(slot)] };
   }
   // A value for one effect parameter, checked against its range or options and the loudness step.
@@ -294,7 +304,10 @@
     const changing = Boolean(model && (model.name !== b.model || b.unknownId));
     const target = model ? model.name : b.model;
     const unknown = !model && Boolean(b.unknownId);
-    const params = changing ? model.params : b.params;
+    // What the parameters will be right after the model select: its defaults, or the values setFXModel restores from
+    // the cache for this preset and model (the loudness step is measured from there, not from the default).
+    const params = changing ? startParams(key, b, model) : b.params;
+    const after = params.map((q) => ({ ...q }));   // with this call's values, for the Sync checks
     if (changing) { lines.push(title + ' → ' + (model.name === 'None' ? 'empty' : model.name)); ops.push(() => U.chooseModel(key, model.name)); }
     const entries = Object.entries(e.params || {});
     if (entries.length) {
@@ -304,15 +317,21 @@
         const p = params.find((q) => ci(q.name, name));
         if (!p) refuseWith(title + ' ' + target + ' has no parameter ' + quote(name) + '. Its parameters: ' + params.map((q) => q.name).join(', ') + '.');
         const v = paramValue(title, p, value);
+        const mine = after.find((q) => q.name === p.name);
+        if (mine) mine.value = v;
         lines.push(title + ' ' + p.name + ' → ' + paramDisplayValue({ ...p, value: v }));
         ops.push(() => {
           const q = state.blocks[key].params.find((x) => x.name === p.name);
           if (!q) return;
           q.value = coerceParamValue(q, v);
           U.noteExpressionLocalOverride(key, 'param', q);
-          setFXParam(key, q);
+          return setFXParam(key, q);
         });
       }
+    }
+    for (const [name] of entries) {
+      const q = after.find((x) => ci(x.name, name));
+      if (q && isParamDisabled({ ...b, model: target, params: after }, q)) refuseWith(title + ' ' + q.name + ' is set by the Sync setting; change Sync first.');
     }
     if (e.on !== undefined) {
       if (e.on && target === 'None' && !unknown) refuseWith(title + ' is empty: choose a model before switching it on.');
@@ -321,14 +340,41 @@
     }
     return { lines, ops };
   }
-  async function runOps(ops) { for (const op of ops) { op(); await Promise.resolve(); } U.render(); }
-  // After a batch of edits: the writes have left, then the pedal reports its state back (≤ ~3 s).
+  // In order, each one finished (its write sent, a switch's queued write included) before the next.
+  async function runOps(ops) { for (const op of ops) await op(); U.render(); }
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  // After a batch of edits: the writes have left, the slot changes' own confirmatory reads are done, then the pedal
+  // reports its state back (≤ ~3 s). That read must check the effect models: a slot change marks the next read as a
+  // confirmatory one that skips them (skipFXModelApply), and a read asked in the same millisecond as a model select
+  // is not taken as its answer (stateAskedAt > modelAsked.at), so both are made to hold first.
   async function readBack() {
     await waitUntil(() => gattWriteQueue.length === 0 && !gattWritePumpRunning, 3000);
-    await Promise.race([U.ui.bypassWriteChain, new Promise((r) => setTimeout(r, 2000))]);
+    await Promise.race([U.ui.bypassWriteChain, pause(2000)]);
+    await pause(400);   // setCapture / selectCabIRSlot ask for their own state read 300 ms after the write
+    await waitUntil(() => state.stateMode === 'idle', 1500);
+    state.protocol.skipFXModelApply = false;
+    const lastAsked = Math.max(0, ...Object.values(typeof modelAsked !== 'undefined' ? modelAsked : {}).map((a) => (a && a.at) || 0));
+    while (Date.now() <= lastAsked) await pause(2);
+    const record = { skipFXModelApply: state.protocol.skipFXModelApply, askedAfterModels: true };
     if (state.connected && window.NanoLive && NanoLive.readCurrentState) await NanoLive.readCurrentState(3000);
+    record.askedAfterModels = Object.values(typeof modelAsked !== 'undefined' ? modelAsked : {}).every((a) => !a || state.stateAskedAt > a.at);
+    lastReadBack = record;
     U.render();
   }
+  let lastReadBack = null;
+  function startParams(key, b, model) {
+    const params = structuredClone(model.params || []);
+    try {
+      const cached = readFxParamCache()[fxParamCacheKey(key, { models: b.models, model: model.name })];
+      if (cached && cached.model === model.name && Array.isArray(cached.floats) && cached.floats.length === params.length && cached.floats.every(Number.isFinite)) {
+        cached.floats.forEach((n, i) => { const p = params.find((q) => (q.wireIndex === undefined ? q.index : q.wireIndex) === i); if (p) p.value = normalizedToParamValue(p, n); });
+      }
+    } catch { /* the defaults */ }
+    return params;
+  }
+  // The cab's level is known when the editor has read it for this preset (or the cab is off / from the library, when
+  // the pedal does not report it; the demo knows its own).
+  const cabLevelKnown = () => U.ui.demo || !state.cabIR.on || state.cabIR.fromLibrary || Boolean(state.cabIR.paramsLoaded);
   const merge = (...plans) => ({ lines: plans.flatMap((p) => p.lines), ops: plans.flatMap((p) => p.ops) });
   const live = (lines, extra) => ({ summary: lines.join('; '), ...extra });
 
@@ -388,7 +434,7 @@
           editor: { edition: 'electron', version: (window.NANO_LINKS && window.NANO_LINKS.version) || '' },
           connected,
           pedal: connected ? { name: (state.device && state.device.name) || 'Nano Cortex', firmware: state.firmware || null } : null,
-          preset: connected ? { number: state.selectedPreset, name: U.presetName(state.selectedPreset), unsaved: Boolean(U.isDirtyNow()) } : null,
+          preset: connected ? { number: state.selectedPreset, name: pname(state.selectedPreset), unsaved: Boolean(U.isDirtyNow()) } : null,
           audition, cloud: { signedIn }, assistants: { clients: [...(lastStatus.clients || [])] },
         },
       };
@@ -399,7 +445,7 @@
         line: 'listed the presets',
         result: {
           current: state.selectedPreset,
-          presets: Array.from({ length: 64 }, (_, i) => ({ number: i + 1, name: U.presetName(i + 1), empty: /^empty$/i.test(U.presetName(i + 1)) })),
+          presets: Array.from({ length: 64 }, (_, i) => ({ number: i + 1, name: pname(i + 1), empty: pname(i + 1) === null })),
           footswitches: Object.fromEntries(U.FOOTSWITCHES.map((f) => [f.label, fsPreset(f.key)])),
         },
       };
@@ -434,12 +480,14 @@
       if (a.scan) {
         if (U.isDirtyNow()) refuseWith(C.errors.unsavedEdits);
         if (busyNow()) refuseWith(C.errors.busy);
-        await U.scanUsage();
+        if (!(await U.scanUsage())) refuseWith('The slot usage scan did not start (the pedal did not confirm stopping a preview). Try again.');
       }
       const u = U.ui.usage;
+      // Key "0": the presets that play a capture / cab straight from the library.
+      const withLibrary = (slots, lib) => ({ ...slots, ...(lib && lib.length ? { 0: [...lib] } : {}) });
       return {
         line: a.scan ? 'scanned the slot usage (' + (u ? u.scanned : 0) + ' presets)' : 'read the slot usage',
-        result: u ? { scanned: true, capture: { ...u.captures }, cab: { ...u.cabs } } : { scanned: false, capture: null, cab: null },
+        result: u ? { scanned: true, capture: withLibrary(u.captures, u.library), cab: withLibrary(u.cabs, u.cabLibrary) } : { scanned: false, capture: null, cab: null },
       };
     },
 
@@ -502,15 +550,18 @@
     async use_capture_slot(a) { return useSlot('capture', a); },
     async use_cab_slot(a) { return useSlot('cab', a); },
     async set_tempo(a) {
-      const bpm = U.clampTempo(a.bpm);
-      U.setTempo(a.bpm);
+      const range = U.tempoRange();
+      if (a.bpm < range.min || a.bpm > range.max) refuseWith(msg('tempoRange', { min: range.min, max: range.max }));
+      if (U.tempoLocked()) refuseWith('An external MIDI clock sets the tempo on the pedal now, so it can\'t be changed here.');
+      const bpm = U.clampTempo(a.bpm);   // NanOS 2.3+ keeps one decimal; older firmware takes whole BPM
+      U.setTempo(bpm);
       const shown = Number.isInteger(bpm) ? String(bpm) : bpm.toFixed(1);
       const lines = ['tempo ' + shown + ' BPM'];
       return { line: lines[0], result: live(lines, { bpm }) };
     },
     async select_preset(a) {
       const n = a.number;
-      if (n === state.selectedPreset && !U.ui.presetUnknown) return { line: 'preset ' + n + ' is already loaded', result: live(['preset ' + n + ' ' + quote(U.presetName(n)) + ' is already loaded'], { number: n, name: U.presetName(n) }) };
+      if (n === state.selectedPreset && !U.ui.presetUnknown) return { line: 'preset ' + n + ' is already loaded', result: live(['preset ' + n + ' ' + quote(U.presetName(n)) + ' is already loaded'], { number: n, name: pname(n) }) };
       if (U.isDirtyNow()) {
         U.toast('An assistant asked to load preset ' + n + ': save or discard your edits first.');
         refuseWith(C.errors.unsavedEdits);
@@ -518,13 +569,14 @@
       await U.goToPreset(n);
       if (state.selectedPreset !== n) refuseWith('The pedal did not switch to preset ' + n + '.');
       const lines = ['loaded preset ' + n + ' ' + quote(U.presetName(n))];
-      return { line: lines[0], result: live(lines, { number: n, name: U.presetName(n) }) };
+      return { line: lines[0], result: live(lines, { number: n, name: pname(n) }) };
     },
     async discard_edits() {
       const n = state.selectedPreset;
+      if (U.ui.presetUnknown) refuseWith(U.PRESET_UNKNOWN);
       if (!(await U.discardNow())) refuseWith('The pedal did not confirm stopping the preview, so the edits were kept.');
       const lines = ['discarded the edits of preset ' + n + ' ' + quote(U.presetName(n))];
-      return { line: lines[0], result: live(lines, { preset: { number: n, name: U.presetName(n) } }) };
+      return { line: lines[0], result: live(lines, { preset: { number: n, name: pname(n) } }) };
     },
     async preview_cab(a) {
       await needLibrary();
@@ -553,9 +605,12 @@
 
     async save(_a, ctx) {
       const n = state.selectedPreset;
-      if (!U.isDirtyNow()) refuseWith('Preset ' + n + ' has no unsaved edits, so there is nothing to save.');
+      if (U.ui.presetUnknown) refuseWith(U.PRESET_UNKNOWN);
+      if (!U.isDirtyNow()) refuseWith(msg('nothingToSave', { number: n }));
       const name = U.presetName(n);
       if (!(await confirmDialog(ctx, { title: 'Save changes to preset ' + n + ' ' + quote(name) + '?', body: 'The preset on the pedal is overwritten with the current sound.', ok: 'Save' }))) cancelled();
+      // The pedal may have switched presets (a footswitch) while the dialog was open: never save over another one.
+      if (state.selectedPreset !== n || U.ui.presetUnknown) refuseWith('The pedal switched to another preset while the dialog was open, so nothing was saved.');
       const t0 = Date.now();
       await U.doSave();
       const r = U.ui.lastSave;
@@ -585,6 +640,8 @@
       if (!U.stageEnabled('cab')) refuseWith('The cab is bypassed: switch it on first (use_cab_slot on=true).');
       if (!U.selectedIRIsFactory()) refuseWith('The preset plays a user IR, which has no mic. Mics are for the factory cabs.');
       if (U.irAuditioning()) refuseWith('Stop the cab preview first (stop_preview).');
+      // The mic write names the cab's place in the library: read the library first if that place isn't known yet.
+      if (!state.library.loaded && !Number.isInteger(state.cabIR.libraryIndex)) await needLibrary();
       const mics = cabMics();
       let mic = state.cabIR.mic;
       if (a.mic !== undefined) {
@@ -595,13 +652,15 @@
       const oldMic = state.cabIR.mic, oldPos = Number(state.cabIR.position);
       if (ci(mic, oldMic) && position === oldPos) return { line: 'the cab mic is already ' + mic + ', position ' + position, result: { mic: oldMic, position: oldPos } };
       const slot = U.activeIRSlot();
+      const preset = state.selectedPreset, cabName = state.currentIR.shortName;
       const ok = await confirmDialog(ctx, {
         title: slot ? 'Change the mic of cab slot ' + slot + '?' : 'Change the mic of the cab?',
         body: oldMic + ', position ' + oldPos + ' → ' + mic + ', position ' + position + '. The mic is stored in the cab slot, so it changes for every preset that uses ' + (slot ? 'slot ' + slot : 'this cab') + '.',
         ok: 'Change',
       });
       if (!ok) cancelled();
-      await setCabIRMicPosition(mic, position);
+      if (state.selectedPreset !== preset || !ci(state.currentIR.shortName, cabName) || !U.selectedIRIsFactory() || U.irAuditioning()) refuseWith('The preset or its cab changed while the dialog was open, so the mic was not changed.');
+      if (!(await setCabIRMicPosition(mic, position))) refuseWith('The pedal did not take the mic change (see the Activity log); nothing was changed.');
       U.render();
       return { line: 'cab mic ' + state.cabIR.mic + ', position ' + state.cabIR.position, result: { mic: state.cabIR.mic, position: Number(state.cabIR.position) } };
     },
@@ -645,7 +704,10 @@
     },
     async cloud_preview(a) {
       if (!state.connected) refuseWith(C.errors.notConnected);
+      if (busyNow()) refuseWith(C.errors.busy);
       const bundle = await cloudBundle(a.product_id);
+      if (!state.connected) refuseWith(C.errors.notConnected);
+      if (busyNow()) refuseWith(C.errors.busy);   // the download took a while: check again
       const name = (bundle.meta && bundle.meta.name) || 'capture';
       if (!(await U.receivePreview(bundle))) refuseWith(U.ui.lastPreviewError || 'The pedal refused the Live Preview.');
       const lines = ['Live Preview of ' + quote(name)];
@@ -654,8 +716,14 @@
     async cloud_send(a, ctx) {
       if (!state.connected) refuseWith(C.errors.notConnected);
       const bundle = await cloudBundle(a.product_id);
+      if (!state.connected) refuseWith(C.errors.notConnected);
+      if (busyNow()) refuseWith(C.errors.busy);   // the download took a while: check again
       await opensDialog();
-      const outcome = await new Promise((resolve) => { U.receiveCapture(bundle, { asked: ctx.asked, done: resolve }); });
+      // askToLoad: false: no "Load … into a slot now?" afterwards; the assistant calls load_capture_into_slot.
+      const outcome = await new Promise((resolve) => {
+        Promise.resolve().then(() => U.receiveCapture(bundle, { asked: ctx.asked, done: resolve, askToLoad: false }))
+          .then(() => resolve({ error: 'The capture was not sent.' }), (err) => resolve({ error: 'The capture was not sent: ' + ((err && err.message) || err) }));
+      });
       if (outcome.cancelled) cancelled();
       if (!outcome.sent) refuseWith(outcome.error || 'The capture was not sent.');
       return { line: 'sent ' + quote(outcome.name) + ' to the pedal’s library', result: { sent: true, name: outcome.name } };
@@ -665,7 +733,7 @@
   async function useSlot(kind, a) {
     const key = kind === 'capture' ? 'capture' : 'cab';
     if (a.slot === undefined && a.on === undefined) refuseWith('Give slot, on, or both.');
-    if (a.slot !== undefined && a.on === false) refuseWith('Choosing a slot switches the ' + key + ' on; leave out on=false.');
+    if (a.slot !== undefined && a.on === false) refuseWith(msg('slotOrOff'));
     const plan = a.slot !== undefined ? (kind === 'capture' ? planCaptureSlot(a.slot, 'slot') : planCabSlot(a.slot, 'slot'))
       : { lines: [(kind === 'capture' ? 'capture ' : 'cab ') + (a.on ? 'on' : 'off')], ops: [() => U.setStageOn(key, a.on)] };
     await runOps(plan.ops);
@@ -716,7 +784,7 @@
     if (bad) return refuse(bad);
     if (tool !== 'get_status' && !tool.startsWith('cloud_') && !state.connected) return refuse(C.errors.notConnected);
     if ((def.kind === 'live' || def.kind === 'confirm') && busyNow()) return refuse(C.errors.busy);
-    const ctx = { client, asked: 'Asked by ' + (client || 'your AI assistant') + '.' };
+    const ctx = { client, asked: msg('askedBy', { client: client || C.clients.fallback }) };
     try {
       const r = await TOOLS[tool](args, ctx);
       say(r.line);
@@ -727,13 +795,16 @@
       return refuse('The editor hit an error: ' + ((err && err.message) || err));
     }
   }
+  let current = null;   // the call being run: { id }
   if (bridge) bridge.onCall((call) => {
     const c = call && typeof call === 'object' ? call : {};
-    run(String(c.tool || ''), c.args, c.client ? String(c.client) : null).then((answer) => bridge.reply(c.id, answer));
+    const job = chain.then(() => { current = { id: Number(c.id) }; return runOne(String(c.tool || ''), c.args, c.client ? String(c.client) : null); });
+    chain = job.catch(() => {}).then(() => { current = null; });
+    job.then((answer) => bridge.reply(c.id, answer));
   });
 
   // ------------------------------------------------------------------ what the user sees
-  let lastStatus = { on: false, phase: 'off', clients: [], text: 'Off', setup: null };
+  let lastStatus = { on: false, phase: 'off', clients: [], text: '', setup: null };
   const pill = document.getElementById('agentPill');
   let page = null;   // the open Settings page's live parts
   function applyStatus(st) {
@@ -742,14 +813,22 @@
     const clients = st.clients || [];
     if (pill) {
       pill.hidden = !clients.length;
-      pill.title = clients.length ? 'Connected: ' + clients.join(', ') + '. Click for Settings → AI assistants.' : '';
+      pill.title = clients.length ? msg('statusConnected', { clients: clients.join(', ') }) + '. Click for Settings → AI assistants.' : '';
     }
     if (page) page.update();
   }
   if (pill) pill.addEventListener('click', () => U.openSettings('ai'));
   if (bridge) {
     bridge.onStatus(applyStatus);
-    bridge.onConnected((label) => U.toast((label || 'An AI assistant') + ' connected'));
+    bridge.onConnected((label) => { contractReady().then(() => U.toast(msg('connected', { client: label || C.clients.fallback }))); });
+    // The shell gave up on a call (its assistant went away, or AI assistants were turned off): an open assistant
+    // confirmation is cancelled the way the user's Cancel would.
+    bridge.onCancel((id) => {
+      if (!current || current.id !== id) return;
+      const bg = [...document.querySelectorAll('.modal-bg')].find((b) => b.querySelector('.modal-asked'));
+      const cancel = bg && bg.querySelector('.modal .row button');
+      if (cancel) cancel.click();
+    });
     bridge.status().then(applyStatus).catch(() => {});
     contractReady();
   }
@@ -770,7 +849,7 @@
   function buildPage() {
     const el = U.el;
     const status = el('span', { class: 'set-unit ai-status', dataset: { fk: 'ai-status' } });
-    const sw = U.toggleSwitch('set-ai', 'Allow AI assistants to control the editor', !!lastStatus.on, async (v) => {
+    const sw = U.toggleSwitch('set-ai', C.messages.settingsSwitch, !!lastStatus.on, async (v) => {
       sw.disabled = true;
       try { applyStatus(await bridge.setEnabled(v)); } finally { sw.disabled = false; if (page) page.update(); }
     });
@@ -814,14 +893,14 @@
     const root = el('div', { class: 'ai-page', dataset: { fk: 'ai-page' } },
       el('section', {}, el('h3', { text: 'AI assistants' }),
         U.setRow('', sw),
-        U.setNote('Assistants on this computer, such as Claude, ChatGPT or Codex, can read the pedal and make live edits. Saving and anything stored on the pedal still needs your click in the editor.', 'ai-explain'),
+        U.setNote(C.messages.settingsExplain, 'ai-explain'),
         U.setRow('Status', status)),
       el('section', {}, el('h3', { text: 'Set up' }),
         U.setNote('Copy the line for your assistant (it holds this installation’s paths), or use the button. The editor has to be open, with the switch above on, while the assistant works.', 'ai-setup-note'),
         cc.row, cx.row, desk, installRow('cursor', 'Cursor'), installRow('vscode', 'VS Code'), js.row));
     page = {
       update() {
-        status.textContent = lastStatus.text || 'Off';
+        status.textContent = lastStatus.text || C.messages.statusOff;
         sw.classList.toggle('on', !!lastStatus.on); sw.setAttribute('aria-checked', String(!!lastStatus.on));
         cc.update(); cx.update(); js.update();
         desk.hidden = !S().claudeDesktop;
@@ -832,14 +911,14 @@
   }
   U.addSettingsPage({
     id: 'ai', label: 'AI assistants',
-    available: () => !!bridge,
+    available: () => !!bridge && !!C.messages,   // the texts come with the contract
     build: () => { if (bridge) bridge.status().then(applyStatus).catch(() => {}); return buildPage(); },
     closed: () => { page = null; },
   });
 
   // For the UX test: the dispatcher (what the shell's calls run), the last copied setup text, the status.
   window.__agent = {
-    run, get copied() { return copied.last; }, get status() { return lastStatus; }, demoCloud: DEMO_CLOUD,
+    run, get copied() { return copied.last; }, get status() { return lastStatus; }, get lastReadBack() { return lastReadBack; }, demoCloud: DEMO_CLOUD,
     validate: (tool, args) => { const d = C.tools.get(tool); return d ? validate(d.inputSchema, args, '', tool) : 'unknown'; },
   };
 })();

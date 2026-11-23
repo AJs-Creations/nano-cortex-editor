@@ -461,6 +461,7 @@
   }
   // The reload itself (also the assistants' discard_edits, which the user asked for in the chat): true when done.
   async function discardNow() {
+    if (presetUnknownRefuses()) return false;
     if (!(await stopAnyAudition('Discard'))) return false;
     const n = state.selectedPreset;
     ui.lastAction = 'Discarding edits\u2026'; renderStatus();
@@ -2319,10 +2320,11 @@
     if (ui.demo) { demo.load(n); await new Promise(r => setTimeout(r, 40)); return true; }
     return settled;
   }
+  // Resolves true when the scan ran (completely or stopped part-way), false when it did not start.
   async function scanUsage() {
-    if (ui.scanning || !state.connected) return;
-    if (isDirtyNow()) { toast('Save or discard your edits first: the scan switches presets.'); return; }
-    if (!(await stopAnyAudition('the scan'))) return;
+    if (ui.scanning || !state.connected) return false;
+    if (isDirtyNow()) { toast('Save or discard your edits first: the scan switches presets.'); return false; }
+    if (!(await stopAnyAudition('the scan'))) return false;
     ui.scanning = true; ui.scanStop = false;
     const origin = state.selectedPreset;
     const todo = [];
@@ -2365,6 +2367,7 @@
       ui.sideSig = '';
       render(); refreshUsagePop(); scrollPresetIntoView();
     }
+    return true;
   }
 
   function usageContent() {
@@ -2696,7 +2699,8 @@
   // a capture page in the Cloud tab. Confirm, stream it to the pedal, refresh the
   // library, then offer a slot.
   // opts (AI assistants' cloud_send): asked is the dialog's "Asked by …" line; done(outcome) hears how the send ended
-  // ({ sent: true, name } | { cancelled: true } | { error }) before the "Load … into a slot now?" question.
+  // ({ sent: true, name } | { cancelled: true } | { error }) before the "Load … into a slot now?" question, which
+  // askToLoad: false leaves out (the assistant puts it in a slot with load_capture_into_slot, which asks itself).
   async function receiveCapture(bundle, opts = {}) {
     const meta = bundle.meta || {};
     const report = (r) => { if (opts.done) opts.done(r); return false; };
@@ -2726,6 +2730,7 @@
     await ensureLibrary();
     render();
     report({ sent: true, name: meta.name });
+    if (opts.askToLoad === false) { render(); return true; }   // an assistant loads it with load_capture_into_slot
     const load = await modal({
       title: 'Load ' + meta.name + ' into a slot now?',
       body: 'You can also do it later from \u201cLoad from library\u2026\u201d in the Capture inspector.',
@@ -6769,20 +6774,21 @@
   // through the real packet builders (and demo mode answers them). Nothing here runs code or sends raw packets.
   function setStageOn(key, on) {   // the bypass switch, set to a value instead of toggled (toggleStage)
     on = Boolean(on);
-    if (stageEnabled(key) === on) return false;
+    if (stageEnabled(key) === on) return Promise.resolve(false);
     setStageEnabled(key, on);
     noteExpressionLocalOverride(key, 'bypass', on);
     queueStageEnabled(key, on);
     render();
-    return true;
+    return ui.bypassWriteChain;   // settles once the switch's write (and its read-back) is done
   }
-  function pickCaptureSlot(i) { setCapture(i); if (ui.demo) demo.pickCapture(i); render(); }   // a capture slot button
+  function pickCaptureSlot(i) { const w = setCapture(i); if (ui.demo) demo.pickCapture(i); render(); return w; }   // a capture slot button
   function pickCabSlot(i) {   // an IR slot button
     const name = state.irNames.get(i) || ('IR ' + i);
     Object.assign(state.currentIR, { shortName: name, fullName: name, inBank: true, slot: i });
-    selectCabIRSlot(i);
+    const w = selectCabIRSlot(i);
     if (ui.demo) demo.pickIR(i);
     render();
+    return w;
   }
   window.__nanoAgentUI = Object.freeze({
     ui, demo, irAudition, FOOTSWITCHES, CAB_MICS, STAGES, PRESET_UNKNOWN,
@@ -6790,6 +6796,11 @@
     isDirtyNow, stageEnabled, sameName, auditioning, irAuditioning, fwAtLeast23, clampTempo,
     setStageOn, pickCaptureSlot, pickCabSlot, chooseModel, noteExpressionLocalOverride,
     setTempo: (bpm) => tempoCommit(bpm),
+    // The pedal's tempo range (NanOS 2.3+: 40–240 with decimals; before: 30–300 whole BPM), and whether an external
+    // MIDI clock sets the tempo (then the pedal ignores tempo writes).
+    tempoRange: () => (tempo23() ? { min: METRO_BPM[0], max: METRO_BPM[1], decimals: true } : { min: 30, max: 300, decimals: false }),
+    tempoLocked: () => Boolean(tempo23() && scr.extClock),
+    presetUnknownRefuses,
     goToPreset, discardNow, doSave, doSaveAs, doRename, assignFootswitch,
     ensureLibrary, loadFromLibrary, scanUsage, startIRPreview, stopIRPreview, stopCapturePreview,
     receivePreview, receiveCapture,
