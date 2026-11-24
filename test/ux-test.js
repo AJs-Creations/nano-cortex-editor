@@ -3165,12 +3165,26 @@ async function run() {
     const lhc = [...await vals('Low-High Cut', 'HPF Freq', [0.25, 0.5, 0.75]), ...await vals('Low-High Cut', 'LPF Freq', [0.25, 0.5, 0.75]), await val('Low-High Cut', 'HPF Freq', 0.18), await val('Low-High Cut', 'LPF Freq', 0.34)];
     check('Low-High Cut HPF and LPF Freq run 20-20000 Hz with skew 0.3: 217 / 2002 / 7678 Hz at 0.25 / 0.5 / 0.75 (HPF 86 Hz at 0.18, LPF 568 Hz at 0.34)', same(lhc, [217, 2002, 7678, 217, 2002, 7678, 86, 568]), JSON.stringify(lhc));
     const g9 = [await val('Graphic 9', 'LPF', 0.5), await val('Graphic 9', 'LPF', 0.827), await val('Graphic 9', 'HPF', 0.1)];
-    check('Graphic 9 LPF 6985 Hz at 0.5 (1000-20000 Hz, skew 0.6; 14.8 kHz at 0.827), HPF 29 Hz at 0.1 (20-20000 Hz, skew 0.3)', g9[0] === 6985 && Math.round(g9[1] / 100) === 148 && g9[2] === 29, JSON.stringify(g9));
+    check('Graphic 9 LPF 6985 Hz at 0.5 (1000-20000 Hz, skew 0.6; 14.8 kHz at 0.827), HPF 30 Hz at 0.1 (20-500 Hz, skew 0.6; the app read 29)', g9[0] === 6985 && Math.round(g9[1] / 100) === 148 && g9[2] === 30, JSON.stringify(g9));
     const erl = [await val('Blossom (ST)', 'E.R. Length', 0.5), await val('Blossom (ST)', 'E.R. Length', 0.504)];
     check('Blossom E.R. Length 50 % at 0.5 (linear: also 50 % at 0.504, where skew 0.4 gave 18 %)', same(erl, [50, 50]), JSON.stringify(erl));
     const env = [await val('Envelope Filter', 'Attack', 0.18), await val('Envelope Filter', 'Freq Depth', 0.58), await val('Envelope Filter', 'Decay', 0.26), await val('Envelope Filter', 'Decay', 0.5),
       await val('Envelope Filter', 'Level', 0), await val('Envelope Filter', 'Level', 1), await val('Envelope Filter', 'Freq Depth', 0), await val('Envelope Filter', 'Freq Depth', 1)];
-    check('Envelope Filter Attack 188.2 ms at 0.18 and Freq Depth 1600 Hz at 0.58 (linear; Decay 267.4 / 505.0 ms at 0.26 / 0.5; Level -20..+20 dB; Freq Depth -10000..+10000 Hz)', same(env, [188.2, 1600, 267.4, 505, -20, 20, -10000, 10000]), JSON.stringify(env));
+    check('Envelope Filter Attack 188.2 ms at 0.18 and Freq Depth 1600 Hz at 0.58 (linear; Decay 267.4 / 505.0 ms at 0.26 / 0.5; Level -60..+12 dB; Freq Depth -10000..+10000 Hz)', same(env, [188.2, 1600, 267.4, 505, -60, 12, -10000, 10000]), JSON.stringify(env));
+    // Second NanOS 2.3.0 sweep (2026-11-24): Cal presets at 0 / 0.25 / 0.5 / 0.75 / 1, each control read in Cortex Cloud.
+    const sweep24 = [
+      ['Envelope Filter', 'Freq', [20, 118, 1010, 3845, 10000]], ['Envelope Filter', 'Level', [-60, -10, 0, 6.8, 12]],
+      ['Graphic 9', 'HPF', [20, 67, 171, 317, 500]], ['Circular Delay', 'High Pass', [20, 1308, 4108, 8056, 13000]],
+      ['Circular Delay', 'Low Pass', [170, 2137, 6416, 12400, 20000]], ['Circular Delay', 'Mod Rate', [0.01, 0.11, 1, 3.84, 10]],
+      ['Room', 'Pre Delay', [0.1, 10, 31.6, 61.9, 100]], ['Mind Hall', 'Pre Delay', [1, 13.4, 50.8, 112.9, 200]], ['Dual Reverse Delay', 'Low Pass', [1000, 2885, 6985, 12700, 20000]]];
+    const sweepOff = [];
+    for (const [m, p, want] of sweep24) {
+      const got = await vals(m, p, [0, 0.25, 0.5, 0.75, 1]);
+      got.forEach((g, i) => { if (Math.abs(g - want[i]) > Math.max(Math.abs(want[i]) * 0.012, Number.isInteger(want[i]) ? 1 : 0.06)) sweepOff.push(m + ' ' + p + ' ' + g + ' (app ' + want[i] + ')'); });
+    }
+    check('NanOS 2.3.0 sweep of 2026-11-24: Envelope Filter Freq / Level, Graphic 9 HPF, Circular Delay High / Low Pass and Mod Rate, Room and Mind Hall Pre Delay, Dual Reverse Delay Low Pass read as in the app at five knob positions (within 1.2 %, or 1 for whole numbers: display rounding)', !sweepOff.length, sweepOff.join('; '));
+    const mh = [await val('Mind Hall', 'Decay', 0.23), await val('Shimmer', 'Decay', 0.86)];
+    check('Mind Hall Decay is 0-100 % (23 % at 0.23, not the Hall seconds); Shimmer Decay 16.44 s at 0.86 (two decimals)', same(mh, [23, 16.44]), JSON.stringify(mh));
     const dyn = [await val('Digital Delay (ST)', 'Dyn Depth', 0.443), await val('Dual Delay', 'Dyn Depth', 0.443), await val('Dual Reverse Delay', 'Dyn Depth', 0.443), await val('Dual Delay', 'Dyn Depth', 0.519)];
     const dynUnit = await js("state.blocks.post2.models.find(x => x.name === 'Dual Delay').params.find(p => p.name === 'Dyn Depth').meta.unit");
     check('Dyn Depth 15.4 dB at 0.443 (0-60 dB, skew 0.6; 20.1 dB at 0.519) in Digital Delay (ST), Dual Delay and Dual Reverse Delay', same(dyn, [15.4, 15.4, 15.4, 20.1]) && dynUnit === 'dB', JSON.stringify(dyn) + ' ' + dynUnit);
