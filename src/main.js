@@ -20,6 +20,8 @@ const { createActivityLog } = require('./activity-log');
 const { randomUUID } = require('crypto');
 const { decodeIRPayload, checkWav } = require('./cloud-ir');
 const { refuseBrowserRequest, devShotPath } = require('./dev-remote');
+const { createAgentShell } = require('./mcp-shell');
+const { setupInfo, stablePaths } = require('./mcp-setup');
 
 // Capture pages live under /cloud/discover/… and under pack pages like /cloud/<pack>/…
 const CAPTURE_PAGE = /\/neural-capture\/view\/([0-9a-f-]{36})/i;
@@ -202,7 +204,7 @@ const cloudIRTransfers = new Map();
 // remembered pedal, Developer tools (for the menu) and the update settings (checked at launch). Everything else
 // lives in the editor page's localStorage.
 const SETTINGS_FILE = () => path.join(app.getPath('userData'), 'settings.json');
-let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false, autoUpdate: true, skippedVersion: null };
+let shellSettings = { accent: DEFAULT_ACCENT, dockFollowsAccent: true, pedal: null, devTools: false, autoUpdate: true, skippedVersion: null, ai: false };
 function loadShellSettings() {
   try { Object.assign(shellSettings, JSON.parse(fs.readFileSync(SETTINGS_FILE(), 'utf8'))); } catch { /* defaults */ }
 }
@@ -329,8 +331,8 @@ function createWindow() {
   wireBluetooth(editor.webContents);
   editor.webContents.on('did-finish-load', () => { if (pendingUpdate && editorFlavor === 'pro') editor.webContents.send('update-event', pendingUpdate); });
   // A page that reloads, navigates or crashes auditions nothing any more (a new page reports changes from false on).
-  editor.webContents.on('did-start-navigation', (details) => { if (details && details.isMainFrame && !details.isSameDocument) auditionActive = false; });
-  editor.webContents.on('render-process-gone', () => { auditionActive = false; });
+  editor.webContents.on('did-start-navigation', (details) => { if (details && details.isMainFrame && !details.isSameDocument) { auditionActive = false; if (agent) agent.pageGone(); } });
+  editor.webContents.on('render-process-gone', () => { auditionActive = false; if (agent) agent.pageGone(); });
   loadEditor('pro');
   editor.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
   // The editor's Activity log goes to the log file for everyone (Help → Show Log File). Running from source it is
@@ -885,6 +887,89 @@ function buildMenu() {
   })));
 }
 
+// ---------- AI assistants (MCP; src/mcp-shell.js, mcp/PROTOCOL.md) ----------
+// One switch, Settings → General → AI assistants, off by default (userData/settings.json `ai`; an older build's
+// `aiFeatures` is ignored). While it is on, the editor listens on a private local socket for the MCP
+// helper (mcp/helper.js, run by this app's own Node: ELECTRON_RUN_AS_NODE=1). Every call goes to the editor page
+// (pro/agent.js) as data; nothing an assistant sends is ever evaluated. Cortex Cloud requests use the Cloud tab's
+// session, like Send to Nano Cortex.
+let agent = null;
+let cloudSignedIn = null;   // learnt from the last Cortex Cloud request: true, false, or null (not known)
+const helperPath = () => (app.isPackaged
+  ? path.join(process.resourcesPath, 'app.asar.unpacked', 'mcp', 'helper.js')
+  : path.join(__dirname, '..', 'mcp', 'helper.js'));
+// The paths the setup lines name (src/mcp-setup.js stablePaths: an AppImage or a portable exe gets lasting ones).
+const setupPaths = () => stablePaths({
+  packaged: app.isPackaged, execPath: process.execPath, helper: helperPath(), env: process.env,
+  userData: app.getPath('userData'), version: app.getVersion(), log: (m) => console.log('[assistants] ' + m),
+});
+const CLOUD_SEARCH = 'https://cloud-api.neuraldsp.com/search/v1/for/neuralCapture';
+const NOT_SIGNED_IN = 'Cortex Cloud says you are not signed in. Sign in on the Cortex Cloud tab of the editor, then try again.';
+async function agentCloudSearch(query, page) {
+  if (!cloud) return { ok: false, error: 'The Cortex Cloud tab is not ready.' };
+  const url = CLOUD_SEARCH + '?page=' + (page - 1) + '&size=20&query=' + encodeURIComponent(query);
+  const res = await cloud.webContents.session.fetch(url, { credentials: 'include', headers: CLOUD_API_CLIENT_HEADERS });
+  if (res.status === 401 || res.status === 403) { cloudSignedIn = false; return { ok: false, error: NOT_SIGNED_IN }; }
+  if (!res.ok) return { ok: false, error: 'Cortex Cloud answered ' + res.status + '. The search may have changed; try cloud_open with a capture you know instead.' };
+  let json;
+  try { json = await res.json(); } catch { return { ok: false, error: 'Cortex Cloud returned an unreadable search result.' }; }
+  if (!json || !Array.isArray(json.data)) return { ok: false, error: 'Cortex Cloud returned a search result in an unknown shape.' };
+  const text = (v) => (v === undefined || v === null ? null : String(v));
+  const results = json.data.filter((d) => d && CLOUD_PRODUCT_ID.test(String(d.productId || ''))).map((d) => {
+    const m = d.metadata && typeof d.metadata === 'object' ? d.metadata : {};
+    return {
+      product_id: String(d.productId).toLowerCase(), name: String(d.name || ''),
+      author: String(d.authorUsername || d.authorName || ''), tags: Array.isArray(d.tags) ? d.tags.map(String) : [],
+      instrument: text(m.instrument ?? m.instrumentType), device: text(m.device ?? m.deviceType), gain: text(m.gain ?? m.gainType),
+      downloads: Number(d.downloads) || 0, likes: Number(d.likes) || 0,
+      description: storedDescription(d.description).slice(0, 300), hash: d.hash ? String(d.hash) : null,
+    };
+  });
+  cloudSignedIn = true;   // the search API answered with the session: signed in
+  return { ok: true, result: { query, page, pages: Number(json.numberOfPages) || (results.length ? page : 0), total: Number(json.numberOfResults) || results.length, results } };
+}
+async function agentCloudBundle(id) {
+  if (!CLOUD_PRODUCT_ID.test(id)) return { ok: false, error: 'That is not a Cortex Cloud product id.' };
+  try {
+    const bundle = await fetchCaptureBundle(id.toLowerCase());
+    cloudSignedIn = true;
+    return { ok: true, bundle };
+  } catch (err) {
+    if (/\b401\b/.test(err.message)) { cloudSignedIn = false; return { ok: false, error: NOT_SIGNED_IN }; }
+    return { ok: false, error: err.message };
+  }
+}
+function focusEditorWindow() {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  show('editor');
+  win.show();
+  win.focus();
+  if (process.platform === 'darwin') app.focus({ steal: true });
+}
+function startAgent() {
+  agent = createAgentShell({
+    ipcMain,
+    getPage: () => editorPage(),
+    store: { get: () => !!shellSettings.ai, set: (on) => { shellSettings.ai = !!on; saveShellSettings(); } },
+    version: app.getVersion(),
+    setup: setupInfo(setupPaths()),
+    cloud: {
+      search: agentCloudSearch,
+      bundle: agentCloudBundle,
+      open: (id) => {
+        if (!cloud || !CLOUD_PRODUCT_ID.test(id)) return false;
+        show('cloud', CLOUD_URL + 'neural-capture/view/' + id.toLowerCase());
+        return true;
+      },
+      signedIn: () => cloudSignedIn,
+    },
+    focusWindow: focusEditorWindow,
+    log: (line) => { activityLog().write(line); if (!app.isPackaged) console.log(line); },
+  });
+  agent.start();
+}
+
 // ---------- sleep and wake ----------
 // Before the computer sleeps the editor disconnects from the pedal cleanly, so macOS has no link left to hold (a held
 // link kept the pedal from advertising: 2026-10-20→23). On wake, if it was connected before the sleep, the page
@@ -914,6 +999,7 @@ function wirePower() {
 
 app.whenReady().then(() => {
   loadShellSettings();
+  startAgent();
   // Packaged builds get the icon from build/icon.icns; from source, set the Dock icon by hand.
   // The cached accent icon (if any) replaces it once rendered.
   if (!app.isPackaged && process.platform === 'darwin' && fs.existsSync(STOCK_ICON)) app.dock.setIcon(STOCK_ICON);
@@ -925,3 +1011,4 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (!win || win.isDestroyed()) createWindow(); });
 });
 app.on('window-all-closed', () => app.quit());
+app.on('will-quit', () => { if (agent) agent.stop(); });

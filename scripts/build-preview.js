@@ -16,8 +16,9 @@ const transfer = read('pro/transfer.js');
 const ui = read('pro/ui.js');
 const links = read('pro/links.js');
 const text = read('pro/capture-text.js');
+const agent = read('pro/agent.js');   // inert without the desktop shell's bridge
 
-for (const [name, src] of [['core.js', core], ['live-sync.js', live], ['links.js', links], ['capture-text.js', text], ['transfer.js', transfer], ['ui.js', ui]]) {
+for (const [name, src] of [['core.js', core], ['live-sync.js', live], ['links.js', links], ['capture-text.js', text], ['transfer.js', transfer], ['ui.js', ui], ['agent.js', agent]]) {
   if (/<\/script/i.test(src)) throw new Error(name + ' contains "</script", which would break inlining');
 }
 
@@ -53,6 +54,9 @@ ${transfer}
 </script>
 <script>
 ${ui}
+</script>
+<script>
+${agent}
 </script>
 `;
 

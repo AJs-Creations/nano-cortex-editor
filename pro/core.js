@@ -65,7 +65,7 @@ const MODEL_PARAM_META = {
       'Blossom (ST)': { 'Mix': PERCENT, 'Decay': [0.5, 20, 0.01, 's', 2], 'Pre Delay': [0, 500, 1, 'ms', 0], 'High Pass': [30, 800, 1, 'Hz', 0],
         'Low Pass': [1000, 20000, 1, 'Hz', 0], 'E.R. Length': [0, 100, 1, '%', 0], 'Diffusion': [0, 100, 1, '%', 0],
         'Bass': [-18, 6, 0.1, 'dB', 1], 'Treble': [-18, 6, 0.1, 'dB', 1], 'Ducking': [0, 100, 1, '%', 0], 'Modulation': PERCENT },
-      'Shimmer': { 'Mix': PERCENT, 'Decay': [4, 20, 0.1, 's', 1], 'Brightness': PERCENT, 'Feedback': PERCENT, 'Pitch': SEMITONES,
+      'Shimmer': { 'Mix': PERCENT, 'Decay': [4, 20, 0.01, 's', 2], 'Brightness': PERCENT, 'Feedback': PERCENT, 'Pitch': SEMITONES,
         'Pre Delay': [1, 200, 1, 'ms', 0], 'Damping': PERCENT, 'High Pass': [20, 800, 1, 'Hz', 0], 'Rand Pitch': [2, 33, 1, 'Cent', 0],
         'Mod Speed': [0.1, 5, 0.01, 'Hz', 2], 'Mod Depth': PERCENT }
     };
@@ -86,18 +86,18 @@ const PARAM_SKEW = {
       "Analog Delay": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6, "Mod Rate": 0.6 },
       "Digital Delay (ST)": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6, "Dyn Depth": 0.6 },
       "Dual Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "High Pass": 0.6, "Low Pass": 0.6, "Mod Rate": 0.6, "Attack": 0.6, "Release": 0.6, "Dyn Depth": 0.6 },
-      "Dual Reverse Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "Attack": 0.6, "Release": 0.6, "High Pass": 0.6, "Dyn Depth": 0.6 },
-      "Circular Delay": { "High Pass": 0.6, "Low Pass": 0.61 },
+      "Dual Reverse Delay": { "Delay Time L": 0.6, "Delay Time R": 0.6, "Attack": 0.6, "Release": 0.6, "High Pass": 0.6, "Low Pass": 0.6, "Dyn Depth": 0.6 },
+      "Circular Delay": { "High Pass": 0.6, "Low Pass": 0.6 },
       "Tape Delay": { "High Pass": 0.6, "Low Pass": 0.6, "Delay Time": 0.6 },
       "Ambience": { "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
       "Cave": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
       "Hall": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
-      "Mind Hall": { "High Pass": 0.5, "Low Pass": 0.5 },
+      "Mind Hall": { "Pre Delay": 0.5, "High Pass": 0.5, "Low Pass": 0.5 },
       "Modulated": { "Decay": 0.6, "Pre Delay": 0.6, "Mod Speed": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
       "Room": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Low Pass": 0.6 },
       "Blossom (ST)": { "Decay": 0.4, "Pre Delay": 0.4, "High Pass": 0.5, "Low Pass": 0.5, "Bass": 2.375, "Treble": 2.375 },
       "Shimmer": { "Decay": 0.6, "Pre Delay": 0.6, "High Pass": 0.6, "Mod Speed": 0.6 },
-      "Graphic 9": { "HPF": 0.3, "LPF": 0.6 },
+      "Graphic 9": { "HPF": 0.6, "LPF": 0.6 },
     };
 
 function makeParams(labels, modelName = '') {
@@ -255,14 +255,15 @@ function exactRangeMeta(modelName, paramName) {
       // Envelope Filter values calibrated from the paired Cortex Cloud/readback sample.
       if (m.includes('envelope filter')) {
         if (p === 'sens') return rangeMeta(0, 54, 0.1, 'dB', 1);
-        // Measured on NanOS 2.3.0: Attack and Decay 10-1000 ms and Level -20..+20 dB, all linear.
+        // Measured on NanOS 2.3.0: Attack and Decay 10-1000 ms linear; Level -60..+12 dB (skew 3.8);
+        // Freq 20-10000 Hz on the 10/3 power curve (2026-11-24 sweep).
         if (p === 'attack' || p === 'decay') return rangeMeta(10, 1000, 0.1, 'ms', 1);
-        if (p === 'level') return rangeMeta(-20, 20, 0.1, 'dB', 1);
-        if (p === 'freq') {
-          const meta = rangeMeta(20, 20000, 1, 'Hz', 0);
-          meta.normalizedPower = 4.085;
+        if (p === 'level') {
+          const meta = rangeMeta(-60, 12, 0.1, 'dB', 1);
+          meta.skew = 3.8;
           return meta;
         }
+        if (p === 'freq') return fxFrequencyRangeMeta(20, 10000);
         if (p === 'freq depth') return rangeMeta(-10000, 10000, 1, 'Hz', 0);   // linear (NanOS 2.3.0)
         if (p === 'reso') {
           const meta = rangeMeta(1, 10, 0.01, '', 2);
@@ -309,6 +310,11 @@ function exactRangeMeta(modelName, paramName) {
           p === 'diffusion' || p === 'mod depth' || p === 'level') return rangeMeta(0, 100, 0.1, '%', 1);
 
       if (p === 'drive' && (m.includes('chief dc2w') || m.includes('tape delay'))) return rangeMeta(0, 100, 1, '%', 0);
+      if (p === 'mod rate' && m.includes('circular delay')) {
+        const meta = rangeMeta(0.01, 10, 0.01, 'Hz', 2);   // NanOS 2.3.0 sweep: the 10/3 power curve
+        meta.normalizedPower = 10 / 3;
+        return meta;
+      }
       if (p === 'mod rate') return rangeMeta(0.1, 10, 0.1, 'Hz', 1);
       if (p === 'rate' && m.includes('tremolo')) return rangeMeta(0.1, 20, 0.1, 'Hz', 1);
       if ((p === 'rate' || p === 'speed') && m.includes('chorus 229t')) return rangeMeta(0.2, 3, 0.01, 'Hz', 2);
@@ -341,17 +347,22 @@ function exactRangeMeta(modelName, paramName) {
       // Match cutoff controls before the generic frequency fallback. Models such
       // as Low-High Cut label these "HPF Freq" and "LPF Freq".
       if (p === 'hpf' || p === 'high pass' || p.includes('hpf freq') || p.includes('high pass freq')) {
-        // NanOS 2.3.0: Graphic 9 and Low-High Cut run 20-20000 Hz (skew 0.3), Circular Delay 20-13000 Hz (skew 0.6).
-        if (m.includes('graphic 9') || m.includes('low-high cut')) return rangeMeta(20, 20000, 1, 'Hz', 0);
+        // NanOS 2.3.0: Graphic 9 20-500 Hz (skew 0.6; the app shows the bottom as OFF), Low-High Cut 20-20000 Hz
+        // (skew 0.3), Circular Delay 20-13000 Hz (skew 0.6).
+        if (m.includes('graphic 9')) return rangeMeta(20, 500, 1, 'Hz', 0);
+        if (m.includes('low-high cut')) return rangeMeta(20, 20000, 1, 'Hz', 0);
         if (m.includes('circular delay')) return rangeMeta(20, 13000, 1, 'Hz', 0);
         if (m.includes('tape delay')) return fxFrequencyRangeMeta(80, 800);
         if (m.includes('transpose')) return fxFrequencyRangeMeta(20, 2000);
         return fxFrequencyRangeMeta(20, 800);
       }
       if (p === 'lpf' || p === 'low pass' || p.includes('lpf freq') || p.includes('low pass freq')) {
-        // NanOS 2.3.0: Graphic 9 1000-20000 Hz (skew 0.6), Low-High Cut and Circular Delay 20-20000 Hz (0.3, 0.61).
+        // NanOS 2.3.0: Graphic 9 1000-20000 Hz (skew 0.6), Low-High Cut 20-20000 Hz (skew 0.3), Circular Delay
+        // 170-20000 Hz and Dual Reverse Delay 1000-20000 Hz (both skew 0.6).
         if (m.includes('graphic 9')) return rangeMeta(1000, 20000, 1, 'Hz', 0);
-        if (m.includes('low-high cut') || m.includes('circular delay')) return rangeMeta(20, 20000, 1, 'Hz', 0);
+        if (m.includes('low-high cut')) return rangeMeta(20, 20000, 1, 'Hz', 0);
+        if (m.includes('circular delay')) return rangeMeta(170, 20000, 1, 'Hz', 0);
+        if (m.includes('dual reverse')) return rangeMeta(1000, 20000, 1, 'Hz', 0);
         if (m.includes('tape delay')) return fxFrequencyRangeMeta(800, 6000);
         if (m.includes('transpose')) return fxFrequencyRangeMeta(200, 19900);
         if (m.includes('ambience') || m.includes('hall') || m.includes('mind hall') || m.includes('modulated') || m.includes('room')) return fxFrequencyRangeMeta(800, 12000);
@@ -372,16 +383,18 @@ function exactRangeMeta(modelName, paramName) {
       }
 
       if (p === 'pre delay') {
-        if (m.includes('ambience') || m === 'room') return rangeMeta(0, 100, 0.1, 'ms', 1);
+        if (m.includes('mind hall')) return rangeMeta(1, 200, 0.1, 'ms', 1);   // before 'hall'; skew 0.5 (NanOS 2.3.0 sweep)
+        if (m.includes('ambience')) return rangeMeta(0, 100, 0.1, 'ms', 1);
+        if (m === 'room') return rangeMeta(0.1, 100, 0.1, 'ms', 1);
         if (m.includes('hall') || m.includes('room')) return rangeMeta(1, 100, 0.1, 'ms', 1);
         return rangeMeta(1, 200, 0.1, 'ms', 1);
       }
 
       if (p === 'decay') {
+        if (m.includes('mind hall')) return rangeMeta(0, 100, 0.1, '%', 1);   // before 'hall' (NanOS 2.3.0 sweep)
         if (m.includes('cave')) return rangeMeta(5, 20, 0.01, 's', 2);
         if (m.includes('hall') || m.includes('modulated')) return rangeMeta(1, 10, 0.01, 's', 2);
         if (m.includes('room')) return rangeMeta(0.1, 2, 0.01, 's', 2);
-        if (m.includes('mind hall')) return rangeMeta(0, 100, 0.1, '%', 1);
       }
 
       if (p === 'damping') return rangeMeta(0, 100, 0.1, '%', 1);
