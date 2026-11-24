@@ -175,14 +175,14 @@ Done in this edition (demo mode only; nothing has touched a pedal yet):
   as an artifact on dry runs; `mcp/build-mcpb.js` and `mcp/conformance.js` are not packed into the app.
 
 Left:
-- [ ] **Hardware session with Anup** (Fable): turn it on, connect Claude Code, read the preset, `apply_tone` on a scratch
+- [x] **Hardware session with Anup** (Fable; passed 2026-11-24 on firmware 2.3.0: three tones built, refusals verified, three fixes recorded in CHANGELOG 1.3.0): turn it on, connect Claude Code, read the preset, `apply_tone` on a scratch
   preset, `save_as` to an empty slot, `select_preset`, `preview_cab` / `stop_preview`, `set_cab_mic`,
   `assign_footswitch`; while signed in to the Cloud tab: `cloud_search` (check the `metadata` field names: instrument /
-  device / gain are mapped defensively), `cloud_open`, `cloud_preview`, `cloud_send`. Also the effect values owed
-  before this release (CLAUDE.md "Owed before the next release").
+  device / gain are mapped defensively), `cloud_open`, `cloud_preview`, `cloud_send`. The effect values owed
+  before this release were measured and fixed the same day.
 - [ ] Windows: the named pipe and the Claude Desktop path under `%APPDATA%` (untested); Linux under Xvfb runs the UX test.
 - [ ] The Claude Desktop `.mcpb` bundle (the helper is its body; works with either edition).
-- [ ] User docs: README, `docs/MANUAL.md` chapter, CHANGELOG (the leader writes them for both editions).
+- [x] User docs: README, `docs/MANUAL.md` chapter, CHANGELOG (written for both editions, updated 2026-11-24).
 
 ## Session log
 
