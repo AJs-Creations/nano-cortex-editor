@@ -307,7 +307,13 @@
     const unknown = !model && Boolean(b.unknownId);
     // What the parameters will be right after the model select: its defaults, or the values setFXModel restores from
     // the cache for this preset and model (the loudness step is measured from there, not from the default).
-    const params = changing ? startParams(key, b, model) : b.params;
+    // Choosing a model or switching an effect on: its level controls in dB start at most at effectLevelDbStart (PROTOCOL
+    // §4), since a model can come back with a stored output of +12 dB.
+    const starting = target !== 'None' && !unknown && (changing || (e.on === true && !b.on));
+    const startDb = Number(C.safety.effectLevelDbStart) || 0;
+    const levelDb = (q) => C.levelRe.test(String(q.name).trim()) && q.meta && q.meta.kind !== 'enum' && q.meta.unit === 'dB';
+    const params = changing ? startParams(key, b, model) : (starting ? structuredClone(b.params) : b.params);
+    if (starting) for (const q of params) if (levelDb(q) && Number(q.value) > startDb) q.value = startDb;
     const after = params.map((q) => ({ ...q }));   // with this call's values, for the Sync checks
     if (changing) { lines.push(title + ' → ' + (model.name === 'None' ? 'empty' : model.name)); ops.push(() => U.chooseModel(key, model.name)); }
     const entries = Object.entries(e.params || {});
@@ -333,6 +339,17 @@
     for (const [name] of entries) {
       const q = after.find((x) => ci(x.name, name));
       if (q && isParamDisabled({ ...b, model: target, params: after }, q)) refuseWith(title + ' ' + q.name + ' is set by the Sync setting; change Sync first.');
+    }
+    if (starting) for (const q of params) {
+      if (!levelDb(q) || entries.some(([n]) => ci(n, q.name))) continue;
+      const v = roundToStep(Math.min(Number(q.value), startDb), q.meta.step || 0.1);   // always written: the pedal may hold a value the editor has not read
+      lines.push(title + ' ' + q.name + ' → ' + paramDisplayValue({ ...q, value: v }));
+      ops.push(() => {
+        const x = state.blocks[key].params.find((y) => y.name === q.name);
+        if (!x) return;
+        x.value = coerceParamValue(x, v);
+        return setFXParam(key, x);
+      });
     }
     if (e.on !== undefined) {
       if (e.on && target === 'None' && !unknown) refuseWith(title + ' is empty: choose a model before switching it on.');
@@ -576,6 +593,9 @@
       const n = state.selectedPreset;
       if (U.ui.presetUnknown) refuseWith(U.PRESET_UNKNOWN);
       if (!(await U.discardNow())) refuseWith('The pedal did not confirm stopping the preview, so the edits were kept.');
+      // Answer once the editor no longer counts the edits (the pedal's report comes back after the reload): a
+      // select_preset right after this would be refused otherwise (hardware session 2026-11-24).
+      await waitUntil(() => !U.isDirtyNow(), 3000);
       const lines = ['discarded the edits of preset ' + n + ' ' + quote(U.presetName(n))];
       return { line: lines[0], result: live(lines, { preset: { number: n, name: pname(n) } }) };
     },
@@ -887,7 +907,7 @@
     const chatgpt = addRow('ai-add-chatgpt', C.messages.addChatGPT,
       () => 'The ChatGPT desktop app reads its MCP servers from ' + S().chatgpt + ' (shared with Codex). This adds the table below at the end; the rest of the file stays as it is, and the old file is kept as ' + base(S().chatgpt) + '.bak.',
       () => S().chatgptTable || '', () => bridge.addToChatGPT(),
-      (r) => (r.exists ? S().chatgpt + ' has a nano-cortex entry already, so nothing was changed.' : 'Added. Restart the ChatGPT app.'));
+      (r) => (r.exists ? S().chatgpt + ' has a nano-cortex entry already, so nothing was changed.' : 'Added. Restart the ChatGPT app, then use a Work chat or Codex: its plain Chat tab doesn\'t offer local tools yet.'));
     const other = el('p', { class: 'set-note' }, U.linkEl(((window.NANO_LINKS && window.NANO_LINKS.manual) || '') + '#17-ai-assistants', C.messages.otherAssistants, 'ai-other'));
     const onBox = el('div', { class: 'ai-on', dataset: { fk: 'ai-on' } }, status, claude, chatgpt, other);
     const p = {

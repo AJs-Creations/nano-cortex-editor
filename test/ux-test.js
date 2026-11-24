@@ -4105,7 +4105,7 @@ async function run() {
       check('… Cancel writes nothing', !fs.existsSync(toml));
       await addChatGPT();
       await click('[data-fk="ai-add-chatgpt-confirm-add"]');
-      await checkSoon('… with no config.toml yet: creates it holding exactly the table, no backup, and says "Restart the ChatGPT app."', async () => fs.existsSync(toml) && fs.readFileSync(toml, 'utf8') === table && !fs.existsSync(toml + '.bak') && /Restart the ChatGPT app\.$/.test(await note()), note);
+      await checkSoon('… with no config.toml yet: creates it holding exactly the table, no backup, and says "Restart the ChatGPT app, then use a Work chat or Codex"', async () => fs.existsSync(toml) && fs.readFileSync(toml, 'utf8') === table && !fs.existsSync(toml + '.bak') && /Restart the ChatGPT app, then use a Work chat or Codex/.test(await note()), note);
       const other = '# my settings\nmodel = "gpt-5"\n\n[mcp_servers.other]\ncommand = "/usr/bin/other"\nargs = ["x"]\n\n[profiles.fast]\nmodel = "gpt-5-mini"';
       fs.writeFileSync(toml, other);
       fs.rmSync(toml + '.bak', { force: true });
@@ -4330,6 +4330,22 @@ async function run() {
       n0 = await mark();
       r = await mc.call('apply_tone', { effects: [{ slot: k, model: levelModel.name, params: { Level: levelModel.p.min + (levelModel.p.max - levelModel.p.min) * 0.75 } }] });
       check('loudness: emptying a slot and choosing the same effect again cannot jump its Level (measured from the cached value the pedal restores)', r.isError && /in smaller steps \(at most 25 % of its range per call\)/.test(r.text) && reads(await txSince(n0)).length === 0, r.text);
+    }
+
+    // A model can come back with a stored output of +12 dB: an assistant choosing it or switching it on starts it at 0 dB.
+    {
+      await mc.call('set_effect', { slot: 'post1', model: 'Chief CE2W (ST)', on: false });
+      await js("(() => { const q = state.blocks.post1.params.find(x => x.name === 'Output'); q.value = 12; return 1; })()");
+      n0 = await mark();
+      r = await mc.call('apply_tone', { effects: [{ slot: 'post1', on: true }] });
+      let t = reads(await txSince(n0));
+      const iOut = t.findIndex(x => /^TX Post FX 1 param Output=/.test(x)), iOn = t.findIndex(x => /^TX Post FX 1 ON/.test(x));
+      check('loudness: switching an effect on writes a stored output above 0 dB as 0.0 dB first, with a line in the changes',
+        !r.isError && r.data.changes.includes('Post FX 1 Output → 0.0 dB') && iOut >= 0 && iOn > iOut && (await js("state.blocks.post1.params.find(x => x.name === 'Output').value")) === 0,
+        JSON.stringify({ changes: r.data && r.data.changes, t }));
+      r = await mc.call('apply_tone', { effects: [{ slot: 'post1', model: 'Chief DC2W (ST)', params: { Output: 12 } }] });
+      check('… and an output the call sets itself after a model change is stepped from 0 dB (+12 dB refused)', r.isError && /in smaller steps \(at most 25 % of its range per call\)/.test(r.text), r.text);
+      await mc.call('set_effect', { slot: 'post1', on: false });
     }
 
     // use_*_slot on: true reads the slot after the switch's write is done.
